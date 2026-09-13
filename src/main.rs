@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod config;
 mod theme;
 mod ui;
@@ -13,6 +14,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use zeroize::Zeroize;
 
 use app::App;
+use crate::clipboard::Board;
 use config::{Cli, Config};
 
 fn main() -> Result<()> {
@@ -38,6 +40,9 @@ fn main() -> Result<()> {
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
+    /* The clipboard with its auto-clear timer, armed once like the lock:
+       copies before this point cannot happen, since nothing is unlocked. */
+    app.set_board(Board::new(cfg.clipboard_timeout));
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
     result
@@ -136,10 +141,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
-/* The vault's own keys: movement first, since a stuck cursor reads as a
-   dead tool. Keys owned by later waves (y/p copy, e/D edit, / search)
-   say which wave they belong to rather than going silent: a key that
-   goes silent reads as a broken key. */
+ /* The vault's own keys: movement first, since a stuck cursor reads as a
+    dead tool. Keys owned by later waves (e/D edit, / search) say which wave
+    they belong to rather than going silent: a key that goes silent reads
+    as a broken key. */
 fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -159,7 +164,9 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('G') => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
         KeyCode::Char('*') => app.toggle_password(),
-        KeyCode::Char('y') | KeyCode::Char('p') => app.say("copy arrives in wave 4"),
+        KeyCode::Char('y') => app.copy_username(),
+        KeyCode::Char('p') => app.copy_password(),
+        KeyCode::Char('U') => app.copy_url(),
         KeyCode::Char('/') => app.say("search arrives in wave 6"),
         KeyCode::Char('e') | KeyCode::Char('D') | KeyCode::Char('a') => {
             app.say("editing arrives in wave 5")
@@ -358,6 +365,17 @@ mod tests {
         assert!(app.quit, "a second q did not answer the question");
     }
 
+    /* Copy keys with no board wired (tests never touch the OS clipboard)
+       report the missing board instead of reaching for one. */
+    #[test]
+    fn copy_without_a_board_says_so() {
+        let mut app = open_browser();
+        // Root holds no entries: step onto Banks before copying.
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(app.stage.contains("not ready"), "{}", app.stage);
+    }
+
     /* Keys owned by later waves report their wave: silence reads as a
        broken key. */
     #[test]
@@ -365,10 +383,10 @@ mod tests {
         /* One app per key: the first flash is still up when the second key
            lands, so the second message queues instead of showing. */
         let mut app = open_browser();
-        handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
-        assert!(app.stage.contains("wave 4"), "{}", app.stage);
-        let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(app.stage.contains("wave 6"), "{}", app.stage);
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(app.stage.contains("wave 5"), "{}", app.stage);
     }
 }

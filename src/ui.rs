@@ -436,7 +436,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::raw(" ")];
     if app.view == View::Browser {
         spans.push(Span::styled("y user", Style::new().fg(GOLD)));
-        spans.push(dim("   p pass   "));
+        spans.push(dim("   p pass   U url"));
         /* Whole-vault health where earworm puts the run summary: the panes
            show one group at a time, so only the bar says how big the vault
            is. Skipped while locked: there is no vault to count. */
@@ -525,7 +525,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     if app.view == View::Browser {
         rows.insert(
             1,
-            ("copy", "y  p", "username, password"),
+            ("copy", "y p U", "username, password, url"),
         );
     }
 

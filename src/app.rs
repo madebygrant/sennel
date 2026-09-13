@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use keepass_rs::{Entry, Group, NodeId};
 use zeroize::Zeroize;
 
+use crate::clipboard::Board;
 use crate::vault::{Vault, VaultError};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
@@ -126,6 +127,10 @@ pub struct App {
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
     pub last_activity: Instant,
+    /* The OS clipboard with its auto-clear timer. `None` until startup wires
+       it from the config: `App::new` must stay callable in tests without
+       touching platform clipboard state. */
+    board: Option<Board>,
 }
 
 impl App {
@@ -153,6 +158,7 @@ impl App {
             unlock_field: UnlockField::Password,
             unlock_password: String::new(),
             unlock_keyfile: String::new(),
+            board: None,
             unlock_confirm: String::new(),
             caret: 0,
             dirty: false,
@@ -229,6 +235,50 @@ impl App {
         self.show_password = !self.show_password;
         if self.show_password {
             self.say("password shown  ·  * hides it");
+        }
+    }
+
+    /// Wire the OS clipboard from the config timeout. Called once at startup;
+    /// `None` until then so tests never touch platform clipboard state.
+    pub fn set_board(&mut self, board: Board) {
+        self.board = Some(board);
+    }
+
+    /* One keypress onto the clipboard. An empty or missing field says which:
+       copying an empty string would wipe whatever the user is holding in the
+       clipboard to protect nothing, and silence reads as a broken key. */
+    pub fn copy_username(&mut self) {
+        self.copy_field("username", |e| e.username.as_str().to_string());
+    }
+
+    pub fn copy_password(&mut self) {
+        self.copy_field("password", |e| e.password.as_str().to_string());
+    }
+
+    pub fn copy_url(&mut self) {
+        self.copy_field("url", |e| e.url.clone());
+    }
+
+    fn copy_field(&mut self, label: &str, take: impl FnOnce(&Entry) -> String) {
+        let Some(entry) = self.selected_entry() else {
+            self.say("no entry here to copy from");
+            return;
+        };
+        let text = take(entry);
+        if text.is_empty() {
+            self.say(format!("no {label} on this entry"));
+            return;
+        }
+        let Some(board) = &self.board else {
+            self.say("clipboard is not ready  ·  report this as a bug");
+            return;
+        };
+        match board.copy(&text) {
+            Ok(()) => match board.timeout_secs() {
+                Some(secs) => self.say(format!("copied {label}  ·  clears in {secs}s")),
+                None => self.say(format!("copied {label}")),
+            },
+            Err(e) => self.say(e),
         }
     }
 
@@ -678,6 +728,40 @@ mod tests {
         let mut app = App::new();
         app.open_vault(vault);
         app
+    }
+
+    /* Copying with no entry under the cursor names the miss: the root group
+       holds no entries, so a fresh open has nothing to copy. */
+    #[test]
+    fn copying_with_no_entry_says_so() {
+        let mut app = open_app();
+        app.copy_password();
+        assert!(app.stage.contains("no entry"), "{}", app.stage);
+    }
+
+    /* An empty field is not copied: pushing an empty string would wipe
+       whatever the user is holding in the clipboard to protect nothing. */
+    #[test]
+    fn copying_an_empty_field_names_the_field() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "empty", "u", "", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.copy_password();
+        assert!(app.stage.contains("no password"), "{}", app.stage);
+    }
+
+    /* Tests never touch the OS clipboard, so with no board wired the copy
+       reports the missing board instead of reaching for one. */
+    #[test]
+    fn copying_without_a_board_says_so() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.copy_password();
+        assert!(app.stage.contains("not ready"), "{}", app.stage);
     }
 
     /* Tab moves the keys, never the cursors: leaving a pane must not lose
