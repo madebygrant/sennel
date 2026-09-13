@@ -1,0 +1,23 @@
+[package]
+name = "sennel-tui"
+version = "0.1.0"
+edition = "2024"
+description = "KeePass-style terminal password manager with one-key clipboard copy, folders and fuzzy search"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+unicode-normalization = "0.1"
+unicode-width = "0.2"
+keepass-rs = "0.2"
+arboard = "3"
+nucleo-matcher = "0.3"
+zeroize = "1"
+secrecy = "0.8"
+
+[profile.release]
+strip = true
