@@ -5,11 +5,18 @@
    adds only what sennel needs on top: guarded moves/deletes, paths, and
    ordered child views for the panes. File IO lives here too in Wave 2. */
 
-use keepass_rs::{Database, DatabaseVersion, Entry, Group, NodeId, ProtectedString};
+use std::path::{Path, PathBuf};
+
+use keepass_rs::{
+    open_database, save_database, CompositeKey, Database, DatabaseError, DatabaseVersion, Entry,
+    Group, NodeId, ProtectedString,
+};
 
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/* Payloads are Strings, not sources: io and database errors stay
+   assert_eq-friendly, and the UI only ever displays them. */
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum VaultError {
     GroupNotFound,
     EntryNotFound,
@@ -17,6 +24,12 @@ pub enum VaultError {
     CannotDeleteRoot,
     CannotMoveRoot,
     WouldCycle,
+    /// Password, key file, or both did not open the database.
+    WrongPassword,
+    /// `save` before any `open` or `save_as` gave the vault a path and a key.
+    Unsaved,
+    Io(String),
+    Db(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -28,6 +41,10 @@ impl std::fmt::Display for VaultError {
             VaultError::CannotDeleteRoot => write!(f, "cannot delete the root group"),
             VaultError::CannotMoveRoot => write!(f, "cannot move the root group"),
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
+            VaultError::WrongPassword => write!(f, "wrong password or key file"),
+            VaultError::Unsaved => write!(f, "nothing to save to yet"),
+            VaultError::Io(e) => write!(f, "file error: {e}"),
+            VaultError::Db(e) => write!(f, "database error: {e}"),
         }
     }
 }
@@ -36,6 +53,11 @@ impl std::error::Error for VaultError {}
 
 pub struct Vault {
     db: Database,
+    /* The key stays with the vault so `save` needs no password prompt:
+       re-asking on every save would train "type it without thinking".
+       CompositeKey zeroizes on drop, so holding it is holding secrets right. */
+    key: Option<CompositeKey>,
+    path: Option<PathBuf>,
 }
 
 impl Vault {
@@ -48,7 +70,97 @@ impl Vault {
         let id = root.id;
         db.groups.insert(id, root);
         db.root_group_id = Some(id);
-        Vault { db }
+        Vault {
+            db,
+            key: None,
+            path: None,
+        }
+    }
+
+    /* KDBX4 verifies the header HMAC before decrypting, so a wrong password
+       arrives as DecryptionError("Header HMAC mismatch") rather than
+       InvalidCredentials. An HMAC mismatch is cryptographically
+       indistinguishable from a wrong key, which is why KeePass clients report
+       both the same way; a genuinely corrupt file just keeps saying it. */
+    fn map_db_error(e: DatabaseError) -> VaultError {
+        match e {
+            DatabaseError::InvalidKey
+            | DatabaseError::InvalidCredentials
+            | DatabaseError::DecryptionError(_) => VaultError::WrongPassword,
+            other => VaultError::Db(other.to_string()),
+        }
+    }
+
+    fn build_key(password: &[u8], key_file: Option<&[u8]>) -> CompositeKey {
+        let mut key = CompositeKey::new().with_password(password);
+        if let Some(data) = key_file {
+            key = key.with_key_file(data);
+        }
+        key
+    }
+
+    /// Open an existing `.kdbx` file. The password bytes are copied into the
+    /// retained key; the caller zeroizes its own buffer.
+    pub fn open(
+        path: &Path,
+        password: &[u8],
+        key_file: Option<&[u8]>,
+    ) -> Result<Self, VaultError> {
+        let file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
+        let key = Self::build_key(password, key_file);
+        let db = open_database(file, &key).map_err(Self::map_db_error)?;
+        Ok(Vault {
+            db,
+            key: Some(key),
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Write to the path this vault was opened from or last saved to.
+    pub fn save(&self) -> Result<(), VaultError> {
+        let (Some(path), Some(key)) = (self.path.as_ref(), self.key.as_ref()) else {
+            return Err(VaultError::Unsaved);
+        };
+        Self::write_file(&self.db, key, path)
+    }
+
+    /// First save of a new vault: records the path and key, so later `save`
+    /// calls need neither.
+    pub fn save_as(
+        &mut self,
+        path: &Path,
+        password: &[u8],
+        key_file: Option<&[u8]>,
+    ) -> Result<(), VaultError> {
+        let key = Self::build_key(password, key_file);
+        Self::write_file(&self.db, &key, path)?;
+        self.key = Some(key);
+        self.path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /* Beside the target and renamed over it: `save_database` truncates first
+       through an interrupted write, and a half-written kdbx opens as nothing.
+       Mode 0600, because this file holds every secret at once. */
+    fn write_file(db: &Database, key: &CompositeKey, path: &Path) -> Result<(), VaultError> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|e| VaultError::Io(e.to_string()))?;
+        }
+        let temp = path.with_extension(format!(
+            "{}.tmp",
+            std::process::id()
+        ));
+        let mut out = std::fs::File::create(&temp).map_err(|e| VaultError::Io(e.to_string()))?;
+        save_database(&mut out, db, key).map_err(Self::map_db_error)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| VaultError::Io(e.to_string()))?;
+        std::fs::rename(&temp, path).map_err(|e| VaultError::Io(e.to_string()))?;
+        Ok(())
     }
 
     pub fn db(&self) -> &Database {
@@ -405,5 +517,119 @@ mod tests {
         assert_eq!(v.rename_group(&ghost, "x"), Err(VaultError::GroupNotFound));
         assert_eq!(v.move_entry(&ghost, &root), Err(VaultError::EntryNotFound));
         assert!(v.group_path(&ghost).is_empty());
+    }
+
+    /* Unique per call, not just per process: the harness runs tests in
+       parallel, and two sharing a path would delete each other's file. */
+    struct Temp {
+        path: std::path::PathBuf,
+    }
+
+    impl Temp {
+        fn new(tag: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Temp {
+                path: std::env::temp_dir()
+                    .join(format!("sennel-test-{tag}-{}-{n}.kdbx", std::process::id())),
+            }
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn saved_vault(file: &Temp) -> Vault {
+        let mut v = vault();
+        let root = v.root_id();
+        let banks = v.create_group(&root, "Banks").unwrap();
+        v.create_entry(&banks, "checking", "octo", "s3cret", "https://x", "n")
+            .unwrap();
+        v.save_as(&file.path, b"correct horse", None).unwrap();
+        v
+    }
+
+    #[test]
+    fn a_saved_vault_reopens_with_everything_it_held() {
+        let file = Temp::new("roundtrip");
+        let saved = saved_vault(&file);
+        assert_eq!(saved.path(), Some(file.path.as_path()));
+
+        let open = Vault::open(&file.path, b"correct horse", None).unwrap();
+        let banks = open.groups_in(&open.root_id())[0].id;
+        assert_eq!(open.group_path(&banks), vec!["Root", "Banks"]);
+        let entry = open.entries_in(&banks)[0];
+        assert_eq!(entry.title, "checking");
+        assert_eq!(entry.username.as_str(), "octo");
+        assert_eq!(entry.password.as_str(), "s3cret");
+        assert_eq!(open.path(), Some(file.path.as_path()));
+    }
+
+    #[test]
+    fn a_wrong_password_is_a_wrong_password_not_a_corrupt_file() {
+        let file = Temp::new("wrongpw");
+        saved_vault(&file);
+        assert!(
+            matches!(
+                Vault::open(&file.path, b"wrong battery", None),
+                Err(VaultError::WrongPassword)
+            ),
+            "a wrong password came back as something else"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_an_io_error() {
+        let missing = std::env::temp_dir().join(format!(
+            "sennel-test-absent-{}.kdbx",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        assert!(matches!(
+            Vault::open(&missing, b"pw", None),
+            Err(VaultError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn save_before_any_path_is_an_error_not_a_panic() {
+        let v = vault();
+        assert_eq!(v.save(), Err(VaultError::Unsaved));
+    }
+
+    #[test]
+    fn edits_save_through_the_retained_key_and_path() {
+        let file = Temp::new("resave");
+        let mut v = saved_vault(&file);
+        let banks = v.groups_in(&v.root_id())[0].id;
+        let e = v.entries_in(&banks)[0].id;
+        v.update_entry(&e, "checking", "octo2", None, "https://x", "n")
+            .unwrap();
+        v.save().unwrap();
+
+        let open = Vault::open(&file.path, b"correct horse", None).unwrap();
+        let entry = open.entries_in(&banks)[0];
+        assert_eq!(entry.username.as_str(), "octo2");
+        assert_eq!(entry.password.as_str(), "s3cret", "untouched password changed");
+    }
+
+    /* The file holds every secret at once: group-readable is a leak, and the
+       temp-file dance must not be what widens it. */
+    #[test]
+    #[cfg(unix)]
+    fn the_saved_file_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = Temp::new("mode");
+        saved_vault(&file);
+        let mode = std::fs::metadata(&file.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the save widened who can read the vault");
     }
 }
