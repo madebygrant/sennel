@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod theme;
 mod ui;
+mod vault;
 
 use std::io::IsTerminal;
 use std::time::Duration;
