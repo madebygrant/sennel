@@ -35,6 +35,9 @@ fn main() -> Result<()> {
        and the cached `unlock_new` is all the draw ever reads. */
     app.set_db_path(cfg.db.clone());
     app.refresh_db_state();
+    /* Armed once from config: 0 means the user asked for no lock, and the
+       mapping lives in `App` so the frame loop below needs no branch. */
+    app.set_lock_timeout(cfg.lock_timeout);
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
     result
@@ -75,6 +78,9 @@ fn check(cfg: &Config) -> Result<()> {
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.quit {
         app.expire_flash();
+        /* Once per frame, not per keypress: idleness is the absence of keys,
+           and nothing else on screen moves between messages to re-check it. */
+        app.check_idle();
         terminal.draw(|frame| ui::draw(frame, app))?;
         app.tick = app.tick.wrapping_add(1);
 
@@ -89,6 +95,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    /* First, because this is the proof of presence: every key that reaches
+       the session restarts the idle clock, including the ones swallowed
+       below. The poll timeout is not presence, so `run` never touches it. */
+    app.touch();
     /* Ahead of every screen's keys: it is the UI's own question and the
        answer must not also reach the list behind it. */
     if app.confirm.is_some() {

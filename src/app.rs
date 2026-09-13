@@ -114,6 +114,10 @@ pub struct App {
     pub caret: usize,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
     dirty: bool,
+    /* Idle auto-lock. `None` is off. The deadline is checked once per frame
+       in `run`, never in the draw, which must not mutate. */
+    pub lock_after: Option<Duration>,
+    pub last_activity: Instant,
 }
 
 impl App {
@@ -142,6 +146,8 @@ impl App {
             unlock_confirm: String::new(),
             caret: 0,
             dirty: false,
+            lock_after: None,
+            last_activity: Instant::now(),
         }
     }
 
@@ -204,6 +210,54 @@ impl App {
     /// out without interrogation.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /* Seconds of idleness before the vault locks itself. Zero means off:
+       a `Duration::ZERO` deadline would lock on the next frame, which reads
+       as the unlock failing. `None` is the absence of a deadline. */
+    pub fn set_lock_timeout(&mut self, secs: u64) {
+        self.lock_after = (secs > 0).then(|| Duration::from_secs(secs));
+    }
+
+    /// A keypress happened, so the idle clock restarts. Called at the top of
+    /// key handling rather than per frame, or every redraw would defer the
+    /// lock and an idle vault would never close.
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    /* Whether the vault has sat untouched past the deadline. Takes the clock
+       so tests drive it without sleeping: the lock path is about elapsed
+       time, not about whatever the frame loop happened to do. */
+    pub fn idle_expired(&self, now: Instant) -> bool {
+        let Some(after) = self.lock_after else {
+            return false;
+        };
+        self.view == View::Browser
+            && self.vault.is_some()
+            && now.duration_since(self.last_activity) >= after
+    }
+
+    /* Drop the vault and go back behind the password prompt. Dropping is the
+       wipe: secrets live in `ProtectedString` and the retained key, both of
+       which zeroize on drop, so nothing may be copied out first. Called once
+       per frame, not per keypress, since idleness is the absence of keys. */
+    pub fn check_idle(&mut self) {
+        if !self.idle_expired(Instant::now()) {
+            return;
+        }
+        let secs = self.lock_after.map_or(0, |d| d.as_secs());
+        self.vault = None;
+        self.group_cursor = None;
+        self.entry_cursor = None;
+        self.unlock_password.clear();
+        self.unlock_keyfile.clear();
+        self.unlock_confirm.clear();
+        self.caret = 0;
+        self.dirty = false;
+        self.view = View::Unlock;
+        self.refresh_db_state();
+        self.say(format!("locked after {secs} seconds idle"));
     }
 
     /// Where the vault file lives. Set once at startup from the config; the
@@ -536,6 +590,60 @@ mod tests {
         let mut app = App::new();
         app.open_vault(vault);
         app
+    }
+
+    /* No timeout configured means no deadline at all: a fresh open must never
+       find itself locked on the next frame. */
+    #[test]
+    fn without_a_timeout_the_vault_never_locks() {
+        let mut app = open_app();
+        app.last_activity = Instant::now() - Duration::from_secs(3600);
+        app.check_idle();
+        assert_eq!(app.view, View::Browser);
+        assert!(app.vault.is_some(), "an untimed vault was dropped");
+    }
+
+    /* Idleness past the deadline drops the vault and returns behind the
+       password prompt. Dropping is the wipe; the assertion is that nothing
+       selectable survives. */
+    #[test]
+    fn idleness_past_the_deadline_locks_and_wipes() {
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.check_idle();
+        assert_eq!(app.view, View::Unlock);
+        assert!(app.vault.is_none(), "the secrets survived the lock");
+        assert!(app.group_cursor.is_none());
+        assert!(app.entry_cursor.is_none());
+        assert!(!app.dirty, "a lock invented unsaved changes");
+        assert!(app.stage.contains("locked after 60 seconds idle"), "{}", app.stage);
+    }
+
+    /* Any keypress restarts the clock: activity just before the deadline is
+       what keeps a working session open. */
+    #[test]
+    fn a_keypress_defers_the_lock() {
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.touch();
+        app.check_idle();
+        assert_eq!(app.view, View::Browser);
+        assert!(app.vault.is_some());
+    }
+
+    /* Zero disables rather than arming a zero-second deadline, which would
+       lock on the very next frame and read as the unlock failing. */
+    #[test]
+    fn zero_timeout_is_off_not_instant() {
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        app.set_lock_timeout(0);
+        app.last_activity = Instant::now() - Duration::from_secs(3600);
+        app.check_idle();
+        assert_eq!(app.view, View::Browser);
+        assert!(app.vault.is_some());
     }
 
     /* Opening lands on the root with a valid selection, or the first keypress
