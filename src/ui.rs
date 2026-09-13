@@ -134,9 +134,13 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
         draw_detail(frame, app, detail);
+        app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
     } else {
         let [groups, entries] =
             Layout::horizontal([Constraint::Percentage(35), Constraint::Min(1)]).areas(area);
+        /* What a page key moves by, which only the layout knows. The lower
+           of the two, so a page never overshoots whichever pane is live. */
+        app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
     }

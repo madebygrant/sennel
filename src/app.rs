@@ -100,6 +100,9 @@ pub struct App {
     /// Per-pane list offsets, carried across frames (see `scroll_to`).
     pub group_scroll: usize,
     pub entry_scroll: usize,
+    /* Rows the live pane last drew with, set by the draw that knows. A page
+       key has to move by what is on screen, and only the layout knows that. */
+    pub viewport: usize,
     /* Unlock state. The path comes from the config once at startup;
        `unlock_new` caches whether it names a missing file so the draw loop
        never stats. */
@@ -138,6 +141,7 @@ impl App {
             active_pane: Pane::Groups,
             group_scroll: 0,
             entry_scroll: 0,
+            viewport: 1,
             db_path: None,
             unlock_new: false,
             unlock_field: UnlockField::Password,
@@ -562,6 +566,74 @@ impl App {
         };
         self.entry_cursor = Some(rows[next]);
     }
+
+    /// First (`false`) or last group. Never wraps: reaching an end says so
+    /// by staying put, and the move itself is the feedback.
+    pub fn jump_group(&mut self, last: bool) {
+        let tree = self.group_tree();
+        if tree.is_empty() {
+            return;
+        }
+        self.group_cursor = Some(if last {
+            tree[tree.len() - 1].0
+        } else {
+            tree[0].0
+        });
+        self.entry_cursor = None;
+        self.entry_scroll = 0;
+        self.snap();
+    }
+
+    /// First or last entry of the cursor group. Clamps like `step_entry`:
+    /// no wrap, the list ends where it ends.
+    pub fn jump_entry(&mut self, last: bool) {
+        let rows = self.entry_rows();
+        if rows.is_empty() {
+            self.entry_cursor = None;
+            return;
+        }
+        self.entry_cursor = Some(if last {
+            rows[rows.len() - 1]
+        } else {
+            rows[0]
+        });
+    }
+
+    /// One step in whichever pane has the keys. Tab moves the keys, never
+    /// the cursors, so this is the only mover that reads `active_pane`.
+    pub fn step_pane(&mut self, down: bool) {
+        match self.active_pane {
+            Pane::Groups => self.step_group(down),
+            Pane::Entries => self.step_entry(down),
+        }
+    }
+
+    /// First (`false`) or last (`true`) row of the live pane.
+    pub fn jump_pane(&mut self, last: bool) {
+        match self.active_pane {
+            Pane::Groups => self.jump_group(last),
+            Pane::Entries => self.jump_entry(last),
+        }
+    }
+
+    /// A screenful in the live pane. Loops the single-step movers rather
+    /// than computing positions: they already clamp, and only the draw
+    /// knows the true row count, which is what `viewport` carries.
+    pub fn page_pane(&mut self, down: bool) {
+        for _ in 0..self.viewport.max(1) {
+            self.step_pane(down);
+        }
+    }
+
+    /// Tab between the panes. The cursors stay where they were: leaving a
+    /// pane must not lose the row you were reading.
+    pub fn switch_pane(&mut self) {
+        self.active_pane = match self.active_pane {
+            Pane::Groups => Pane::Entries,
+            Pane::Entries => Pane::Groups,
+        };
+        self.snap();
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +662,59 @@ mod tests {
         let mut app = App::new();
         app.open_vault(vault);
         app
+    }
+
+    /* Tab moves the keys, never the cursors: leaving a pane must not lose
+       the row you were reading. */
+    #[test]
+    fn tab_switches_panes_and_keeps_both_cursors() {
+        let mut app = open_app();
+        assert_eq!(app.active_pane, Pane::Groups);
+        let (group, entry) = (app.group_cursor, app.entry_cursor);
+        app.switch_pane();
+        assert_eq!(app.active_pane, Pane::Entries);
+        assert_eq!((app.group_cursor, app.entry_cursor), (group, entry));
+        app.switch_pane();
+        assert_eq!(app.active_pane, Pane::Groups);
+    }
+
+    /* g/G land on the ends of the live pane: the group tree for Groups,
+       the cursor group's entries for Entries. */
+    #[test]
+    fn jumps_land_on_the_live_panes_ends() {
+        let mut app = open_app();
+        app.jump_pane(true);
+        let tree = app.group_tree();
+        assert_eq!(app.group_cursor, Some(tree[tree.len() - 1].0));
+        app.active_pane = Pane::Entries;
+        // One entry: first and last are the same row.
+        let rows = app.entry_rows();
+        app.jump_pane(true);
+        assert_eq!(app.entry_cursor, rows.last().copied());
+        app.jump_pane(false);
+        assert_eq!(app.entry_cursor, rows.first().copied());
+    }
+
+    /* A page moves by what the draw saw, which is what `viewport` carries:
+       stepping one row would make PgDn a slow `j`. */
+    #[test]
+    fn a_page_moves_by_the_drawn_rows() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        for n in 0..10 {
+            vault
+                .create_entry(&banks, &format!("e{n}"), "u", "p", "", "")
+                .unwrap();
+        }
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.active_pane = Pane::Entries;
+        app.viewport = 4;
+        app.page_pane(true);
+        let rows = app.entry_rows();
+        assert_eq!(app.entry_cursor, Some(rows[4]));
     }
 
     /* No timeout configured means no deadline at all: a fresh open must never

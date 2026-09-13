@@ -117,6 +117,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_unlock_key(app, code, mods);
         return;
     }
+    /* The vault owns its own keys: movement, panes and (from later waves)
+       copy, edit and search. The global match below stays for the views that
+       have no screen of their own. */
+    if app.view == app::View::Browser {
+        handle_browser_key(app, code, mods);
+        return;
+    }
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
@@ -125,6 +132,37 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            so it says so rather than going silent: a key that goes silent
            reads as a broken key. */
         KeyCode::Esc => app.say("this is the top  ·  q quits"),
+        _ => {}
+    }
+}
+
+/* The vault's own keys: movement first, since a stuck cursor reads as a
+   dead tool. Keys owned by later waves (y/p copy, e/D edit, / search)
+   say which wave they belong to rather than going silent: a key that
+   goes silent reads as a broken key. */
+fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.ask_quit(),
+        /* No filter yet (wave 6) and no marks, so Esc has nothing to
+           unwind: it says so rather than quitting, and Esc never quits. */
+        KeyCode::Esc => app.say("this is the top  ·  q quits"),
+        KeyCode::Char('j') | KeyCode::Down => app.step_pane(true),
+        KeyCode::Char('k') | KeyCode::Up => app.step_pane(false),
+        KeyCode::PageDown => app.page_pane(true),
+        KeyCode::PageUp => app.page_pane(false),
+        KeyCode::Char('d') if ctrl => app.page_pane(true),
+        KeyCode::Char('u') if ctrl => app.page_pane(false),
+        KeyCode::Char('g') => app.jump_pane(false),
+        KeyCode::Char('G') => app.jump_pane(true),
+        KeyCode::Tab => app.switch_pane(),
+        KeyCode::Char('y') | KeyCode::Char('p') => app.say("copy arrives in wave 4"),
+        KeyCode::Char('/') => app.say("search arrives in wave 6"),
+        KeyCode::Char('e') | KeyCode::Char('D') | KeyCode::Char('a') => {
+            app.say("editing arrives in wave 5")
+        }
         _ => {}
     }
 }
@@ -277,5 +315,59 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.view, crate::app::View::Unlock, "unlocked without a file");
         assert!(app.stage.contains("--db"), "{}", app.stage);
+    }
+
+    fn open_browser() -> App {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        vault.create_entry(&banks, "savings", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app
+    }
+
+    /* Tab hands the movement keys to the other pane: j after Tab steps
+       entries, not groups. */
+    #[test]
+    fn tab_hands_movement_to_the_other_pane() {
+        let mut app = open_browser();
+        assert_eq!(app.active_pane, crate::app::Pane::Groups);
+        // Root holds no entries: step onto Banks before handing over.
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.active_pane, crate::app::Pane::Entries);
+        let first = app.entry_cursor;
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_ne!(app.entry_cursor, first, "j moved groups, not entries");
+        assert_ne!(app.entry_cursor, None);
+    }
+
+    /* q on the vault asks first when there are unsaved changes: quitting
+       would take them with it. A second q answers, so qq never reads. */
+    #[test]
+    fn q_asks_before_dropping_unsaved_changes() {
+        let mut app = open_browser();
+        app.mark_dirty();
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit over unsaved changes");
+        assert!(app.confirm.is_some(), "no question was asked");
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.quit, "a second q did not answer the question");
+    }
+
+    /* Keys owned by later waves report their wave: silence reads as a
+       broken key. */
+    #[test]
+    fn future_keys_name_their_wave() {
+        /* One app per key: the first flash is still up when the second key
+           lands, so the second message queues instead of showing. */
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(app.stage.contains("wave 4"), "{}", app.stage);
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(app.stage.contains("wave 6"), "{}", app.stage);
     }
 }

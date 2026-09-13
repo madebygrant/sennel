@@ -188,6 +188,11 @@ impl Vault {
         self.db.data_modified
     }
 
+    /// Total entries across all groups, for the unlock flash.
+    pub fn entry_count(&self) -> usize {
+        self.db.entries.len()
+    }
+
     /// Children of a group in stored order. Order is a view concern (Wave 5
     /// sorts on top of this); the vec order is insertion order.
     pub fn groups_in(&self, parent: &NodeId) -> Vec<&Group> {
