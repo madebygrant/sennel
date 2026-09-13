@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use keepass_rs::{Entry, Group, NodeId};
+use zeroize::Zeroize;
 
-use crate::vault::Vault;
+use crate::vault::{Vault, VaultError};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
    the browser has nothing to act on, so it is a screen and not a prompt. */
@@ -22,6 +24,16 @@ pub enum Pane {
     #[default]
     Groups,
     Entries,
+}
+
+/* Which box on the unlock screen has the keys. Password first because it is
+   the one every unlock needs; the confirm only exists in create mode. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum UnlockField {
+    #[default]
+    Password,
+    KeyFile,
+    Confirm,
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -78,7 +90,7 @@ pub struct App {
     /* Selection state. Cursors hold NodeIds, never row positions: rows shift
        under every mutation and under the Wave 5/6 sort and filter views, while
        an id still names the same group or entry. */
-    /// The open vault. None while locked; Wave 2 opens real KDBX files here.
+    /// The open vault. None while locked; `try_unlock` opens real KDBX here.
     pub vault: Option<Vault>,
     /// Selected group. Always valid once a vault is open (`snap` keeps it so).
     pub group_cursor: Option<NodeId>,
@@ -88,6 +100,20 @@ pub struct App {
     /// Per-pane list offsets, carried across frames (see `scroll_to`).
     pub group_scroll: usize,
     pub entry_scroll: usize,
+    /* Unlock state. The path comes from the config once at startup;
+       `unlock_new` caches whether it names a missing file so the draw loop
+       never stats. */
+    pub db_path: Option<PathBuf>,
+    /// True when the configured file is missing: Enter creates, with a confirm.
+    pub unlock_new: bool,
+    pub unlock_field: UnlockField,
+    pub unlock_password: String,
+    pub unlock_keyfile: String,
+    pub unlock_confirm: String,
+    /// Where typing lands, as a char index into the focused box (see below).
+    pub caret: usize,
+    /// Unsaved changes. Set by every vault mutation; quitting while set asks.
+    dirty: bool,
 }
 
 impl App {
@@ -108,6 +134,14 @@ impl App {
             active_pane: Pane::Groups,
             group_scroll: 0,
             entry_scroll: 0,
+            db_path: None,
+            unlock_new: false,
+            unlock_field: UnlockField::Password,
+            unlock_password: String::new(),
+            unlock_keyfile: String::new(),
+            unlock_confirm: String::new(),
+            caret: 0,
+            dirty: false,
         }
     }
 
@@ -147,9 +181,9 @@ impl App {
         }
     }
 
-    /* `q` is the deliberate way out and stays one key everywhere nothing is
-       running. Wave 2 arms the dirty guard behind `working()`; until then
-       quitting costs nothing and asks nothing. */
+    /* `q` is the deliberate way out and stays one key everywhere nothing
+       would be lost. With unsaved changes it asks first; a second `q`
+       answers, so `qq` never reads the box. */
     pub fn ask_quit(&mut self) {
         if self.working() {
             self.confirm = Some(Confirm::Quit);
@@ -158,11 +192,197 @@ impl App {
         }
     }
 
-    /// Whether anything is in flight that quitting would lose. One predicate
-    /// for the guard, so the safe key is safe on the same set of screens that
-    /// ask about it. False until Wave 2 tracks dirty vault state.
+    /// Whether quitting would lose anything. One predicate behind both Esc
+    /// reporting and `q` asking, so the safe key is safe on the same set of
+    /// screens that ask about it.
     pub fn working(&self) -> bool {
-        false
+        self.dirty
+    }
+
+    /// Mark the vault as holding unsaved changes. Called by every mutation
+    /// path; the unlock path leaves it clear, so a fresh open quits straight
+    /// out without interrogation.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Where the vault file lives. Set once at startup from the config; the
+    /// unlock screen reads it, and the refresh follows it.
+    pub fn set_db_path(&mut self, path: Option<PathBuf>) {
+        self.db_path = path;
+        self.refresh_db_state();
+    }
+
+    /* Whether Enter will create rather than open. Cached on keypresses, not
+       read per frame: the draw loop must not stat, and the answer only
+       changes when the file does. */
+    pub fn refresh_db_state(&mut self) {
+        self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
+    }
+
+    /* Unlock with the typed password (and optional key file), or create the
+       database when the file is missing and the confirm matches. The password
+       buffer is zeroized on every path out; the retained CompositeKey inside
+       the vault is the only copy that survives, and it zeroizes on drop. */
+    pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
+        let Some(path) = self.db_path.clone() else {
+            self.say("no database configured  ·  sennel --help names --db");
+            password.zeroize();
+            return;
+        };
+        if password.is_empty() {
+            self.say("empty password  ·  type one or ^c quits");
+            password.zeroize();
+            return;
+        }
+        let result = if self.unlock_new {
+            if self.unlock_confirm.as_bytes() != password.as_slice() {
+                self.say("passwords differ  ·  retype both fields");
+                self.unlock_confirm.clear();
+                self.caret = 0;
+                password.zeroize();
+                return;
+            }
+            let mut vault = Vault::new();
+            vault.save_as(&path, password, key_file).map(|()| vault)
+        } else {
+            Vault::open(&path, password, key_file)
+        };
+        // The typed bytes have served: the key inside the vault is a copy.
+        password.zeroize();
+        match result {
+            Ok(vault) => {
+                let n = vault.entry_count();
+                /* Typed secrets do not linger behind the browser. The key-file
+                   path stays: it names a file, not a secret, and prefills the
+                   next unlock after an auto-lock. */
+                self.unlock_password.zeroize();
+                self.unlock_password.clear();
+                self.unlock_confirm.clear();
+                self.unlock_field = UnlockField::Password;
+                self.caret = 0;
+                self.unlock_new = false;
+                self.open_vault(vault);
+                self.resting = "ready".into();
+                let plural = if n == 1 { "entry" } else { "entries" };
+                self.say(format!("unlocked {n} {plural}"));
+            }
+            Err(VaultError::WrongPassword) => {
+                self.say("wrong password or key file  ·  try again");
+            }
+            Err(e) => self.say(format!("cannot open {}  ·  {e}", path.display())),
+        }
+    }
+
+    /// Tab and shift-Tab through the unlock boxes, wrapping. Two boxes except
+    /// in create mode, where the confirm joins them.
+    pub fn next_unlock_field(&mut self, forward: bool) {
+        let n = if self.unlock_new { 3 } else { 2 };
+        let at = match self.unlock_field {
+            UnlockField::Password => 0,
+            UnlockField::KeyFile => 1,
+            UnlockField::Confirm => 2,
+        };
+        self.unlock_field = match (at + if forward { 1 } else { n - 1 }) % n {
+            0 => UnlockField::Password,
+            1 => UnlockField::KeyFile,
+            _ => UnlockField::Confirm,
+        };
+        // Behind the text, which is where an edit to a prefilled value starts.
+        self.caret = self.active_unlock_value().chars().count();
+    }
+
+    /// The box the unlock keys are typing into.
+    pub fn active_unlock_value(&mut self) -> &mut String {
+        match self.unlock_field {
+            UnlockField::Password => &mut self.unlock_password,
+            UnlockField::KeyFile => &mut self.unlock_keyfile,
+            UnlockField::Confirm => &mut self.unlock_confirm,
+        }
+    }
+
+    /// Byte offset of the caret, for slicing. The caret is a char index: a
+    /// byte one lands inside a multi-byte character the moment a password
+    /// carries an accent, and `String::insert` panics on it.
+    fn caret_byte(&self) -> usize {
+        let value = match self.unlock_field {
+            UnlockField::Password => &self.unlock_password,
+            UnlockField::KeyFile => &self.unlock_keyfile,
+            UnlockField::Confirm => &self.unlock_confirm,
+        };
+        value
+            .char_indices()
+            .nth(self.caret)
+            .map_or(value.len(), |(at, _)| at)
+    }
+
+    pub fn unlock_insert(&mut self, c: char) {
+        let at = self.caret_byte();
+        self.active_unlock_value().insert(at, c);
+        self.caret += 1;
+    }
+
+    pub fn unlock_backspace(&mut self) {
+        if self.caret == 0 {
+            return;
+        }
+        let at = self.caret_byte();
+        let prev = self.active_unlock_value()[..at]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i);
+        self.active_unlock_value().remove(prev);
+        self.caret -= 1;
+    }
+
+    pub fn unlock_delete(&mut self) {
+        let at = self.caret_byte();
+        let has_tail = self
+            .active_unlock_value()
+            .get(at..)
+            .is_some_and(|rest| !rest.is_empty());
+        if has_tail {
+            self.active_unlock_value().remove(at);
+        }
+    }
+
+    pub fn unlock_move(&mut self, right: bool) {
+        let len = self.active_unlock_value().chars().count();
+        self.caret = if right {
+            (self.caret + 1).min(len)
+        } else {
+            self.caret.saturating_sub(1)
+        };
+    }
+
+    pub fn unlock_end(&mut self, end: bool) {
+        self.caret = if end {
+            self.active_unlock_value().chars().count()
+        } else {
+            0
+        };
+    }
+
+    /// Clear the focused box. The other boxes hold answers being kept.
+    pub fn unlock_clear(&mut self) {
+        self.active_unlock_value().clear();
+        self.caret = 0;
+    }
+
+    /* The same word delete the search box will take in Wave 6: muscle memory
+       should not depend on which box has the keys. Deletes back to the word
+       start, keeping whatever follows the caret. */
+    pub fn unlock_kill_word(&mut self) {
+        let at = self.caret_byte();
+        let start = {
+            let value = self.active_unlock_value();
+            let before = value[..at].trim_end();
+            before.rfind(' ').map_or(0, |i| i + 1)
+        };
+        /* Both bounds sit on ASCII (` `, or 0) or on the caret's own char
+           boundary, so the drain cannot split a character. */
+        self.active_unlock_value().drain(start..at);
+        self.caret = self.active_unlock_value()[..start].chars().count();
     }
 
     /// Opens a vault into the browser: cursor on the root, first entry (if
@@ -400,5 +620,172 @@ mod tests {
         assert!(app.selected_entry().is_none());
         app.snap();
         assert_eq!(app.entry_cursor, None, "root is empty");
+    }
+
+    /* Unique per call, not just per process: the harness runs tests in
+       parallel, and two sharing a path would delete each other's file. */
+    fn temp_path(tag: &str) -> TempPath {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TempPath(std::env::temp_dir().join(format!(
+            "sennel-test-{tag}-{}-{n}.kdbx",
+            std::process::id()
+        )))
+    }
+
+    struct TempPath(std::path::PathBuf);
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A real KDBX file on disk behind a locked app, as main.rs builds it.
+    fn locked_app_with_db(password: &[u8]) -> (App, TempPath) {
+        let tmp = temp_path("unlock");
+        let mut seed = Vault::new();
+        seed.save_as(&tmp.0, password, None).unwrap();
+        let mut app = App::new();
+        app.set_db_path(Some(tmp.0.clone()));
+        (app, tmp)
+    }
+
+    /* The happy path: the browser opens, and the typed bytes are gone from
+       every buffer the UI held. The retained key inside the vault is the only
+       copy, and it zeroizes on drop. */
+    #[test]
+    fn right_password_unlocks_and_wipes_the_buffers() {
+        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        assert!(!app.unlock_new, "an existing file reads as create");
+        let mut pw = b"correct horse".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser);
+        assert!(app.vault.is_some());
+        assert!(pw.iter().all(|b| *b == 0), "password buffer survived unlock");
+        assert!(app.unlock_password.is_empty());
+        assert!(app.unlock_confirm.is_empty());
+        assert_eq!(app.stage, "unlocked 0 entries");
+    }
+
+    /* A wrong password keeps the lock and says the next step, and still wipes
+       the typed bytes: a failed guess is exactly what must not linger. */
+    #[test]
+    fn wrong_password_stays_locked_and_says_so() {
+        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        let mut pw = b"wrong guess".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Unlock);
+        assert!(app.vault.is_none());
+        assert!(app.stage.contains("try again"), "{}", app.stage);
+        assert!(pw.iter().all(|b| *b == 0), "failed guess lingered");
+    }
+
+    /* A missing file is a create, not an error: a matching confirm writes the
+       database and opens it. */
+    #[test]
+    fn missing_file_creates_when_the_confirm_matches() {
+        let tmp = temp_path("create");
+        let mut app = App::new();
+        app.set_db_path(Some(tmp.0.clone()));
+        assert!(app.unlock_new, "a missing file must read as create");
+        app.unlock_confirm = "new secret".into();
+        let mut pw = b"new secret".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser);
+        assert!(tmp.0.is_file(), "create wrote no file");
+        // And the created file opens with the same password.
+        assert!(Vault::open(&tmp.0, b"new secret", None).is_ok());
+    }
+
+    /* A mismatched confirm writes nothing: one stray keystroke must not mint
+       a database the user can never open again. */
+    #[test]
+    fn missing_file_refuses_a_mismatched_confirm() {
+        let tmp = temp_path("mismatch");
+        let mut app = App::new();
+        app.set_db_path(Some(tmp.0.clone()));
+        app.unlock_confirm = "something else".into();
+        let mut pw = b"new secret".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Unlock);
+        assert!(!tmp.0.exists(), "a mismatch still wrote a file");
+        assert!(app.stage.contains("differ"), "{}", app.stage);
+    }
+
+    /* No --db and no config: the screen says where the answer lives instead
+       of failing on an empty path. */
+    #[test]
+    fn no_database_configured_says_what_to_do() {
+        let mut app = App::new();
+        let mut pw = b"whatever".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Unlock);
+        assert!(app.stage.contains("--db"), "{}", app.stage);
+    }
+
+    /* Typing lands behind a char-indexed caret: a byte index splits an
+       accented password and `String::insert` panics on it. */
+    #[test]
+    fn unlock_typing_moves_a_char_caret() {
+        let mut app = App::new();
+        app.unlock_insert('é');
+        app.unlock_insert('x');
+        assert_eq!(app.unlock_password, "éx");
+        app.unlock_move(false);
+        app.unlock_insert('a');
+        assert_eq!(app.unlock_password, "éax");
+        app.unlock_backspace();
+        assert_eq!(app.unlock_password, "éx");
+        app.unlock_end(false);
+        app.unlock_delete();
+        assert_eq!(app.unlock_password, "x");
+        // Word kill takes the word back, keeping what follows the caret.
+        app.unlock_clear();
+        for c in "foo bar".chars() {
+            app.unlock_insert(c);
+        }
+        app.unlock_end(false);
+        for _ in 0..3 {
+            app.unlock_move(true);
+        }
+        app.unlock_kill_word();
+        assert_eq!(app.unlock_password, " bar");
+    }
+
+    /* Tab walks two boxes, three in create mode, and lands behind the text:
+       an edit to a prefilled key-file path starts at its end. */
+    #[test]
+    fn tab_walks_two_boxes_three_when_creating() {
+        let mut app = App::new();
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::KeyFile);
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::Password, "wrapped");
+        app.unlock_new = true;
+        app.next_unlock_field(false);
+        assert_eq!(app.unlock_field, UnlockField::Confirm);
+        app.unlock_keyfile = "/keys/k".into();
+        app.unlock_field = UnlockField::Password;
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::KeyFile);
+        assert_eq!(app.caret, 7, "caret did not land behind the path");
+    }
+
+    /* The dirty guard: a fresh unlock quits straight out, a mutation asks. */
+    #[test]
+    fn the_dirty_guard_asks_only_after_a_mutation() {
+        let (mut app, _tmp) = locked_app_with_db(b"pw");
+        let mut pw = b"pw".to_vec();
+        app.try_unlock(&mut pw, None);
+        app.ask_quit();
+        assert!(app.quit, "a clean vault interrogated the quit");
+        let (mut app, _tmp) = locked_app_with_db(b"pw");
+        let mut pw = b"pw".to_vec();
+        app.try_unlock(&mut pw, None);
+        app.mark_dirty();
+        app.ask_quit();
+        assert!(!app.quit, "a dirty vault quit without asking");
+        assert_eq!(app.confirm, Some(Confirm::Quit));
     }
 }

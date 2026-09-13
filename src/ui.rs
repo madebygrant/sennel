@@ -99,16 +99,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/* Wave 1 replaces the locked line with the group/entry panes. Until then the
-   body says the one true thing: there is no open vault yet. */
+/* The lock is a popup over the frame, not a line in the body: it is the only
+   thing on screen and should read as one question. The body behind it stays
+   empty — nothing is open yet. */
 fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     match app.view {
-        View::Unlock => {
-            frame.render_widget(
-                Paragraph::new(Line::from(dim(" vault locked · unlocking arrives in wave 2"))),
-                area,
-            );
-        }
+        View::Unlock => draw_unlock(frame, app),
         View::Browser => {
             frame.render_widget(
                 Paragraph::new(Line::from(dim(" no entries yet"))),
@@ -118,11 +114,96 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/* One question with two or three boxes: the password always, the key file
+   beside it (empty means none), the confirm joining only when creating. Only
+   the focused box draws the block, or the popup shows two cursors and neither
+   is where typing lands. The password is bullets end to end: length is the
+   only thing about it the screen may reveal. */
+fn draw_unlock(frame: &mut Frame, app: &App) {
+    use crate::app::UnlockField;
+    let title = if app.db_path.is_none() {
+        "no database"
+    } else if app.unlock_new {
+        "new database"
+    } else {
+        "unlock"
+    };
+
+    let mut rows: Vec<Line> = Vec::new();
+    match &app.db_path {
+        Some(p) => rows.push(Line::from(dim(format!(" file  {}", p.display())))),
+        /* Not an error state: the next step is a flag away, and the boxes
+           below still take an answer worth keeping once one is named. */
+        None => rows.push(Line::from(dim(" pass --db <file> or set db in the config"))),
+    }
+    rows.push(Line::default());
+
+    /* Byte offset of a char-index caret, shared with the editor: a byte index
+       lands inside a multi-byte character the moment a path has an accent in
+       it, and slicing panics. */
+    let split_at_char = |text: &str, caret: usize| {
+        text.char_indices()
+            .nth(caret)
+            .map_or(text.len(), |(at, _)| at)
+    };
+    let field = |label: &str, value: &str, at: UnlockField, secret: bool| {
+        let focused = app.unlock_field == at;
+        let shown = if secret {
+            "•".repeat(value.chars().count())
+        } else {
+            value.to_string()
+        };
+        /* Drawn between the halves, so the block is where the next character
+           lands rather than always at the end of the line. */
+        let text = if focused {
+            let (before, after) = shown.split_at(split_at_char(&shown, app.caret));
+            format!("{before}█{after}")
+        } else {
+            shown
+        };
+        let style = if focused {
+            Style::new().fg(CREAM)
+        } else {
+            Style::new().fg(DIM)
+        };
+        Line::from(vec![
+            dim(format!(" {label:<8}")),
+            Span::styled(text, style),
+        ])
+    };
+    rows.push(field(
+        "password",
+        &app.unlock_password,
+        UnlockField::Password,
+        true,
+    ));
+    rows.push(field(
+        "key file",
+        &app.unlock_keyfile,
+        UnlockField::KeyFile,
+        false,
+    ));
+    if app.unlock_new {
+        rows.push(field(
+            "confirm",
+            &app.unlock_confirm,
+            UnlockField::Confirm,
+            true,
+        ));
+    }
+    rows.push(Line::default());
+    rows.push(Line::from(dim(" tab field   enter unlock   esc clear")));
+    let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    popup(frame, title, rows, width.max(20));
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::raw(" ")];
     if app.view == View::Browser {
         spans.push(Span::styled("y user", Style::new().fg(GOLD)));
         spans.push(dim("   p pass   "));
+    } else {
+        spans.push(dim("   enter unlock   "));
     }
     spans.push(Span::styled("h keys", Style::new().fg(DIM)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -179,10 +260,23 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
 /* One entry per line in three aligned columns. Only live keys: a row naming
    a key that does nothing on this screen is documentation for a bug. */
 fn draw_help(frame: &mut Frame, app: &App) {
-    let mut rows: Vec<(&str, &str, &str)> = vec![
-        ("move", "j k  ↑ ↓", "wave 1 gives these a list"),
-        ("quit", "q  ^c", ""),
-    ];
+    /* Only live keys: a row naming a key that does nothing on this screen is
+       documentation for a bug. The lock owns every printable key, so its
+       table names the boxes rather than the browser's list. */
+    let mut rows: Vec<(&str, &str, &str)> = if app.view == View::Unlock {
+        vec![
+            ("type", "a–z  0–9", "the boxes take every key"),
+            ("move", "tab  ↑ ↓", "between boxes"),
+            ("edit", "^u  ^w", "clear box, kill word"),
+            ("go", "enter", "unlock"),
+            ("quit", "^c", ""),
+        ]
+    } else {
+        vec![
+            ("move", "j k  ↑ ↓", "wave 1 gives these a list"),
+            ("quit", "q  ^c", ""),
+        ]
+    };
     if app.view == View::Browser {
         rows.insert(
             1,
@@ -249,7 +343,7 @@ mod tests {
             .collect()
     }
 
-    /* The frame's contract in one test: the wordmark, the lock state, and
+    /* The frame's contract in one test: the wordmark, the lock question, and
        the one key that is always live. */
     #[test]
     fn the_frame_names_sennel_and_offers_keys() {
@@ -259,8 +353,24 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("sennel"), "{joined}");
-        assert!(joined.contains("locked"), "{joined}");
+        assert!(joined.contains("database"), "{joined}");
         assert!(joined.contains("h keys"), "{joined}");
+    }
+
+    /* The password box shows bullets end to end: length is the only thing
+       about it the screen may reveal, and the plaintext never reaches a
+       cell. */
+    #[test]
+    fn the_lock_screen_never_shows_the_password() {
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.unlock_password = "s3cret".to_string();
+        app.caret = 6;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(!joined.contains("s3cret"), "{joined}");
+        assert!(joined.contains("••••••"), "{joined}");
     }
 
     /* The overlay is a popup, not a screen: the frame behind it is still

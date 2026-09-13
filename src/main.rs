@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use zeroize::Zeroize;
 
 use app::App;
 use config::{Cli, Config};
@@ -29,6 +30,11 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     let mut app = App::new();
+    /* Which file the lock screen is for, resolved once at startup. The draw
+       loop must not stat: `refresh_db_state` runs here and after every save,
+       and the cached `unlock_new` is all the draw ever reads. */
+    app.set_db_path(cfg.db.clone());
+    app.refresh_db_state();
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
     result
@@ -95,6 +101,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.show_help = false;
         return;
     }
+    /* The lock screen owns its own keys: typing `q` or `h` must land in the
+       box, not end the session or open the overlay. Only ^c quits here. */
+    if app.view == app::View::Unlock {
+        handle_unlock_key(app, code, mods);
+        return;
+    }
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
@@ -104,6 +116,68 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            reads as a broken key. */
         KeyCode::Esc => app.say("this is the top  ·  q quits"),
         _ => {}
+    }
+}
+
+/* Every printable key is text while the lock owns the screen, so `q` types a
+   letter instead of ending the session. The shape mirrors earworm's prompt
+   keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
+   unlocks, Esc clears-or-reports, ^c quits. */
+fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Esc if !app.active_unlock_value().is_empty() => app.unlock_clear(),
+        /* The lock is the screen behind everything, so Esc has nothing to go
+           back to. It says so rather than quitting: Esc means the same thing
+           on every screen or it means nothing anywhere. */
+        KeyCode::Esc => app.say("locked  ·  ^c quits"),
+        KeyCode::Tab | KeyCode::Down if !ctrl => app.next_unlock_field(true),
+        KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_unlock_field(false),
+        KeyCode::Char('u') if ctrl => app.unlock_clear(),
+        KeyCode::Char('w') if ctrl => app.unlock_kill_word(),
+        KeyCode::Left if !ctrl => app.unlock_move(false),
+        KeyCode::Right if !ctrl => app.unlock_move(true),
+        KeyCode::Home if !ctrl => app.unlock_end(false),
+        KeyCode::End if !ctrl => app.unlock_end(true),
+        KeyCode::Char('a') if ctrl => app.unlock_end(false),
+        KeyCode::Char('e') if ctrl => app.unlock_end(true),
+        KeyCode::Delete if !ctrl => app.unlock_delete(),
+        KeyCode::Backspace => app.unlock_backspace(),
+        KeyCode::Enter => unlock_now(app),
+        KeyCode::Char(c) if !ctrl => app.unlock_insert(c),
+        _ => {}
+    }
+}
+
+/* Enter on the lock screen. The secret buffers live here, not in `App`: the
+   UI holds what it displays, and the secret it passes on is taken, used once,
+   and wiped — never stored beside the state it unlocks. */
+fn unlock_now(app: &mut App) {
+    /* Taken, not borrowed: `try_unlock` consumes and zeroizes on every path,
+       and a take leaves `App` holding nothing the moment the key is read. */
+    let mut password: Vec<u8> = std::mem::take(&mut app.unlock_password).into_bytes();
+    /* Copied out first: the read below borrows `app` through the match, and a
+       key-file error must still reach `say`. Key bytes are key material too,
+       wiped the moment the attempt returns. */
+    let key_path = app.unlock_keyfile.trim().to_string();
+    let mut key_bytes: Option<Vec<u8>> = match key_path.as_str() {
+        "" => None,
+        path => match std::fs::read(path) {
+            Ok(b) => Some(b),
+            /* Named, not probed further: the next step is a path the user can
+               check, and the content is key material that never reaches the
+               screen. */
+            Err(_) => {
+                app.say(format!("cannot read key file {path}"));
+                password.zeroize();
+                return;
+            }
+        },
+    };
+    app.try_unlock(&mut password, key_bytes.as_deref());
+    if let Some(b) = key_bytes.as_mut() {
+        b.zeroize();
     }
 }
 
@@ -169,6 +243,29 @@ mod tests {
         let mut app = App::new();
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.quit, "esc ended the session");
-        assert!(app.stage.contains("q quits"), "{}", app.stage);
+        assert!(app.stage.contains("^c quits"), "{}", app.stage);
+    }
+
+    /* The lock owns its keys: `q` and `h` are text in the password box, not
+       commands. Only ^c quits without a vault open. */
+    #[test]
+    fn plain_keys_type_on_the_lock_screen() {
+        let mut app = App::new();
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit from the lock screen");
+        assert_eq!(app.unlock_password, "q");
+        handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(!app.show_help, "h opened the overlay over the lock");
+        assert_eq!(app.unlock_password, "qh");
+    }
+
+    /* Enter on the lock with no database configured says what to do rather
+       than failing on an empty path. */
+    #[test]
+    fn enter_without_a_database_names_the_flag() {
+        let mut app = App::new();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.view, crate::app::View::Unlock, "unlocked without a file");
+        assert!(app.stage.contains("--db"), "{}", app.stage);
     }
 }
