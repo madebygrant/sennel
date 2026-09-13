@@ -158,6 +158,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('g') => app.jump_pane(false),
         KeyCode::Char('G') => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
+        KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') | KeyCode::Char('p') => app.say("copy arrives in wave 4"),
         KeyCode::Char('/') => app.say("search arrives in wave 6"),
         KeyCode::Char('e') | KeyCode::Char('D') | KeyCode::Char('a') => {

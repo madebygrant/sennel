@@ -103,6 +103,11 @@ pub struct App {
     /* Rows the live pane last drew with, set by the draw that knows. A page
        key has to move by what is on screen, and only the layout knows that. */
     pub viewport: usize,
+    /* Whether the detail pane shows the real password. Off because the pane
+       is what the eye lands on, and a shown password is one screenshot away
+       from a leak. `*` flips it and says which way, so the key never reads
+       as dead. */
+    pub show_password: bool,
     /* Unlock state. The path comes from the config once at startup;
        `unlock_new` caches whether it names a missing file so the draw loop
        never stats. */
@@ -142,6 +147,7 @@ impl App {
             group_scroll: 0,
             entry_scroll: 0,
             viewport: 1,
+            show_password: false,
             db_path: None,
             unlock_new: false,
             unlock_field: UnlockField::Password,
@@ -214,6 +220,16 @@ impl App {
     /// out without interrogation.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /* Flip the detail pane between bullets and the real password. Showing
+       says so out loud: a silent reveal reads as a key that did nothing,
+       and the next `*` press must find the pane hidden again. */
+    pub fn toggle_password(&mut self) {
+        self.show_password = !self.show_password;
+        if self.show_password {
+            self.say("password shown  ·  * hides it");
+        }
     }
 
     /* Seconds of idleness before the vault locks itself. Zero means off:
@@ -1020,5 +1036,26 @@ mod tests {
         app.ask_quit();
         assert!(!app.quit, "a dirty vault quit without asking");
         assert_eq!(app.confirm, Some(Confirm::Quit));
+    }
+
+    /* Hidden by default: the detail pane is what the eye lands on. Showing
+       says so, so the key never reads as dead. */
+    #[test]
+    fn the_password_starts_hidden_and_showing_says_so() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        assert!(!app.show_password);
+        app.toggle_password();
+        assert!(app.show_password);
+        assert!(app.stage.contains("shown"), "{}", app.stage);
+        app.toggle_password();
+        assert!(!app.show_password);
     }
 }

@@ -318,7 +318,15 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             truncate(entry.username.as_str(), width.saturating_sub(10)),
             cream,
         ),
-        row("pass", "••••••••".to_string(), cream),
+        row(
+            "pass",
+            if app.show_password {
+                truncate(entry.password.as_str(), width.saturating_sub(10))
+            } else {
+                "••••••••".to_string()
+            },
+            cream,
+        ),
     ];
     if !entry.url.is_empty() {
         lines.push(row(
@@ -429,6 +437,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if app.view == View::Browser {
         spans.push(Span::styled("y user", Style::new().fg(GOLD)));
         spans.push(dim("   p pass   "));
+        /* Whole-vault health where earworm puts the run summary: the panes
+           show one group at a time, so only the bar says how big the vault
+           is. Skipped while locked: there is no vault to count. */
+        if let Some(vault) = &app.vault {
+            let groups = app.group_tree().len();
+            let entries = vault.entry_count();
+            let g = if groups == 1 { "group" } else { "groups" };
+            let e = if entries == 1 { "entry" } else { "entries" };
+            spans.push(dim(format!("  {groups} {g} · {entries} {e}   ")));
+        }
     } else {
         spans.push(dim("   enter unlock   "));
     }
@@ -631,6 +649,37 @@ mod tests {
         assert!(joined.contains("octo"), "{joined}");
         assert!(!joined.contains("s3cret-pw"), "{joined}");
         assert!(joined.contains("••••••••"), "{joined}");
+    }
+
+    /* `*` reveals the real password in the detail, and the bar counts the
+       whole vault: root plus Banks is two groups, one entry. */
+    #[test]
+    fn star_reveals_the_password_and_the_bar_counts_the_vault() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(
+                &banks,
+                "checking",
+                "octo",
+                "s3cret-pw",
+                "https://bank.example",
+                "main account",
+            )
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.toggle_password();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("s3cret-pw"), "{joined}");
+        assert!(joined.contains("2 groups"), "{joined}");
+        assert!(joined.contains("1 entry"), "{joined}");
     }
 
     /* The overlay is a popup, not a screen: the frame behind it is still
