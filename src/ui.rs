@@ -2,10 +2,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState,
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Confirm, View};
+use crate::app::{self, App, Confirm, Pane, View};
 use crate::theme::{self, CREAM, DIM, GOLD, RULE, SURFACE, TEAL};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
@@ -102,16 +105,236 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 /* The lock is a popup over the frame, not a line in the body: it is the only
    thing on screen and should read as one question. The body behind it stays
    empty — nothing is open yet. */
-fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.view {
         View::Unlock => draw_unlock(frame, app),
-        View::Browser => {
-            frame.render_widget(
-                Paragraph::new(Line::from(dim(" no entries yet"))),
-                area,
-            );
-        }
+        View::Browser => draw_browser(frame, app, area),
     }
+}
+
+/* Groups left, entries middle, detail right past PREVIEW_FROM: the row keeps
+   its title and user, so the pane only appears where all three fit without
+   squeezing names down to nothing. Below that it is simply absent. */
+const PREVIEW_FROM: u16 = 100;
+
+fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.vault.is_none() {
+        frame.render_widget(Paragraph::new(Line::from(dim(" no vault open"))), area);
+        return;
+    }
+    if area.width >= PREVIEW_FROM {
+        /* u32: the product overflows u16 past 32767 columns. */
+        let detail = (u32::from(area.width) * 2 / 5).min(46) as u16;
+        let [groups, entries, detail] = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Min(1),
+            Constraint::Length(detail),
+        ])
+        .areas(area);
+        draw_groups(frame, app, groups);
+        draw_entries(frame, app, entries);
+        draw_detail(frame, app, detail);
+    } else {
+        let [groups, entries] =
+            Layout::horizontal([Constraint::Percentage(35), Constraint::Min(1)]).areas(area);
+        draw_groups(frame, app, groups);
+        draw_entries(frame, app, entries);
+    }
+}
+
+/* Columns, not characters, and never straddling the edge: a width of one
+   against a two-column glyph would otherwise take nothing and spill into the
+   next field. Callers pad to the column count, which absorbs coming back
+   short. */
+fn truncate(text: &str, width: usize) -> String {
+    if cols(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out
+}
+
+/* Only worth the column when the list actually runs off the pane. */
+fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize) {
+    if len > area.height as usize {
+        let mut state = ScrollbarState::new(len).position(at);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::new().fg(DIM))
+                .track_symbol(None),
+            area,
+            &mut state,
+        );
+    }
+}
+
+/* Pre-order with two cells of indent per depth: a flat list of names hides
+   which folder an entry row belongs to, and the tree is the only place depth
+   is visible. The marker is TEAL in the live pane and DIM in the other, so
+   each pane still says where its own cursor is. */
+fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
+    let tree = app.group_tree();
+    if tree.is_empty() {
+        frame.render_widget(Paragraph::new(Line::from(dim(" no groups"))), area);
+        return;
+    }
+    let at = tree
+        .iter()
+        .position(|(id, _)| Some(*id) == app.group_cursor)
+        .unwrap_or(0);
+    let live = app.active_pane == Pane::Groups;
+    let width = area.width as usize;
+    let items: Vec<ListItem> = tree
+        .iter()
+        .map(|(id, depth)| {
+            let selected = Some(*id) == app.group_cursor;
+            let name = app
+                .vault
+                .as_ref()
+                .and_then(|v| v.get_group(id))
+                .map(|g| g.title.clone())
+                .unwrap_or_default();
+            let shown = truncate(&format!("{}{name}", "  ".repeat(*depth)), width.saturating_sub(2));
+            let mark = if selected && live {
+                teal("▌")
+            } else if selected {
+                dim("▌")
+            } else {
+                Span::raw(" ")
+            };
+            ListItem::new(Line::from(vec![
+                mark,
+                Span::styled(format!(" {shown}"), row_style(selected)),
+            ]))
+        })
+        .collect();
+    /* Carried across frames, or ratatui recomputes the least scroll that makes
+       the selection visible and pins the cursor to the last row. */
+    app.group_scroll = app::scroll_to(app.group_scroll, at, tree.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.group_scroll);
+    state.select(Some(at));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+    draw_scrollbar(frame, area, tree.len(), at);
+}
+
+fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = app.entry_rows();
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(" no entries here"))),
+            area,
+        );
+        return;
+    }
+    let at = rows
+        .iter()
+        .position(|id| Some(*id) == app.entry_cursor)
+        .unwrap_or(0);
+    let live = app.active_pane == Pane::Entries;
+    let width = area.width as usize;
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|id| {
+            let selected = Some(*id) == app.entry_cursor;
+            let (title, user) = app
+                .vault
+                .as_ref()
+                .and_then(|v| v.get_entry(id))
+                .map(|e| (e.title.clone(), e.username.as_str().to_string()))
+                .unwrap_or_default();
+            let name = truncate(&title, width.saturating_sub(2));
+            let mark = if selected && live {
+                teal("▌")
+            } else if selected {
+                dim("▌")
+            } else {
+                Span::raw(" ")
+            };
+            let mut spans = vec![
+                mark,
+                Span::styled(format!(" {name}"), row_style(selected)),
+            ];
+            if !user.is_empty() {
+                spans.push(dim(format!("  {user}")));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    app.entry_scroll = app::scroll_to(app.entry_scroll, at, rows.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.entry_scroll);
+    state.select(Some(at));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+    draw_scrollbar(frame, area, rows.len(), at);
+}
+
+/* The row keeps only title and user, so the pane says the rest: url, notes,
+   and the password masked to a fixed run of bullets. Fixed length because
+   even the length is something the screen may not reveal. */
+fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(RULE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+    let Some(entry) = app.selected_entry() else {
+        frame.render_widget(Paragraph::new(Line::from(dim(" no entry"))), inner);
+        return;
+    };
+    let row = |label: &str, value: String, style: Style| {
+        Line::from(vec![
+            dim(format!(" {label:<8}")),
+            Span::styled(value, style),
+        ])
+    };
+    let cream = Style::new().fg(CREAM);
+    let faint = Style::new().fg(DIM);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate(&entry.title, width),
+            row_style(true),
+        )),
+        Line::default(),
+        row(
+            "user",
+            truncate(entry.username.as_str(), width.saturating_sub(10)),
+            cream,
+        ),
+        row("pass", "••••••••".to_string(), cream),
+    ];
+    if !entry.url.is_empty() {
+        lines.push(row(
+            "url",
+            truncate(&entry.url, width.saturating_sub(10)),
+            faint,
+        ));
+    }
+    /* First line only: the row is one row, and a note that wraps the pane is
+       a detail view of its own, which is Wave 7's editor to give. */
+    let notes = entry.notes.as_str().lines().next().unwrap_or("");
+    if !notes.is_empty() {
+        lines.push(row(
+            "notes",
+            truncate(notes, width.saturating_sub(10)),
+            faint,
+        ));
+    }
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /* One question with two or three boxes: the password always, the key file
@@ -305,7 +528,6 @@ fn draw_help(frame: &mut Frame, app: &App) {
 /* The row under the cursor is what the next key acts on, so its name is bold
    as well as marked. Bold is safe here because every colour is RGB: a
    terminal cannot swap it for a bright ANSI variant. */
-#[allow(dead_code)]
 fn row_style(selected: bool) -> Style {
     let style = Style::new().fg(CREAM);
     if selected {
@@ -315,7 +537,6 @@ fn row_style(selected: bool) -> Style {
     }
 }
 
-#[allow(dead_code)]
 fn teal(text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::new().fg(TEAL))
 }
@@ -371,6 +592,41 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(!joined.contains("s3cret"), "{joined}");
         assert!(joined.contains("••••••"), "{joined}");
+    }
+
+    /* The browser's contract: both panes list what the vault holds, the
+       detail names the entry's user, and the password never reaches a cell —
+       the detail carries a fixed run of bullets instead. */
+    #[test]
+    fn the_browser_shows_groups_entries_and_a_masked_detail() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(
+                &banks,
+                "checking",
+                "octo",
+                "s3cret-pw",
+                "https://bank.example",
+                "main account",
+            )
+            .unwrap();
+        app.open_vault(vault);
+        /* Pre-order is root then Banks, so one step down lands on it, and
+           stepping groups re-points the entry cursor at its first entry. */
+        app.step_group(true);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("Banks"), "{joined}");
+        assert!(joined.contains("checking"), "{joined}");
+        assert!(joined.contains("octo"), "{joined}");
+        assert!(!joined.contains("s3cret-pw"), "{joined}");
+        assert!(joined.contains("••••••••"), "{joined}");
     }
 
     /* The overlay is a popup, not a screen: the frame behind it is still
