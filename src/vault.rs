@@ -193,6 +193,15 @@ impl Vault {
         self.db.entries.len()
     }
 
+    /* Expansion is presentation, not data: toggling it does not mark the vault
+       dirty, so folding the tree never triggers the quit guard. KeePass does
+       store the flag, so it rides along on the next real save. */
+    pub fn set_expanded(&mut self, id: &NodeId, expanded: bool) {
+        if let Some(group) = self.db.get_group_mut(id) {
+            group.is_expanded = expanded;
+        }
+    }
+
     /// Children of a group in stored order. Order is a view concern (Wave 5
     /// sorts on top of this); the vec order is insertion order.
     pub fn groups_in(&self, parent: &NodeId) -> Vec<&Group> {

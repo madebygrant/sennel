@@ -209,13 +209,29 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|(id, depth)| {
             let selected = Some(*id) == app.group_cursor;
-            let name = app
+            let (name, expanded) = app
                 .vault
                 .as_ref()
                 .and_then(|v| v.get_group(id))
-                .map(|g| g.title.clone())
+                .map(|g| (g.title.clone(), g.is_expanded))
                 .unwrap_or_default();
-            let shown = truncate(&format!("{}{name}", "  ".repeat(*depth)), width.saturating_sub(2));
+            /* ▸/▾ only where folding means something: a leaf gets blanks so
+               names still line up down the pane. */
+            let has_children = app
+                .vault
+                .as_ref()
+                .is_some_and(|v| !v.groups_in(id).is_empty());
+            let branch = if !has_children {
+                "  "
+            } else if expanded {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            let shown = truncate(
+                &format!("{}{}{name}", "  ".repeat(*depth), branch),
+                width.saturating_sub(2),
+            );
             let mark = if selected && live {
                 teal("▌")
             } else if selected {
@@ -613,6 +629,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.insert(2, ("edit", "a e D", "add, edit, delete entry"));
         rows.insert(3, ("groups", "A E D", "add, rename, delete group"));
         rows.insert(4, ("move", "X V", "cut, paste"));
+        rows.insert(5, ("fold", "← →", "collapse, expand group"));
+        rows.insert(6, ("order", "o", "entries: name, recent, updated"));
     }
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
@@ -770,6 +788,33 @@ mod tests {
         assert!(joined.contains("octo"), "{joined}");
         assert!(!joined.contains("s3cret-pw"), "{joined}");
         assert!(joined.contains("••••••••"), "{joined}");
+    }
+
+    /* The tree says which groups fold: ▾ on an open parent, ▸ once folded,
+       and nothing on a leaf. A folded subtree must not appear at all. */
+    #[test]
+    fn the_tree_marks_folds_and_hides_folded_children() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_group(&banks, "Work").unwrap();
+        vault.create_entry(&root, "loose", "u", "p", "", "").unwrap();
+        app.open_vault(vault);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("▾ Banks"), "{joined}");
+        assert!(joined.contains("Work"), "{joined}");
+        // Fold Banks, redraw: its marker flips and Work disappears.
+        app.step_group(true); // onto Banks
+        app.collapse_group();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let folded = screen(&t).join("\n");
+        assert!(folded.contains("▸ Banks"), "{folded}");
+        assert!(!folded.contains("Work"), "{folded}");
     }
 
     /* `*` reveals the real password in the detail, and the bar counts the

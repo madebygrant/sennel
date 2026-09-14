@@ -194,6 +194,12 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('D') => app.ask_delete_entry(),
         KeyCode::Char('X') => app.cut_selected(),
         KeyCode::Char('V') => app.paste_cut(),
+        /* Left folds on the groups pane and hops there from the entries pane;
+           Right re-opens. `o` cycles the entries order. */
+        KeyCode::Left if app.active_pane == app::Pane::Groups => app.collapse_group(),
+        KeyCode::Left => app.switch_pane(),
+        KeyCode::Right if app.active_pane == app::Pane::Groups => app.expand_group(),
+        KeyCode::Char('o') => app.cycle_order(),
         KeyCode::Char('/') => app.say("search arrives in wave 6"),
         _ => {}
     }
@@ -561,5 +567,40 @@ mod tests {
         // Second Esc has nothing to unwind: the usual report returns and,
         // above all, Esc never quits.
         assert!(!app.quit, "esc quit the session");
+    }
+
+    /* Left on the entries pane hands the keys to the groups pane, where the
+       fold keys live; Left on the groups pane folds instead. */
+    #[test]
+    fn left_hops_panes_from_entries_and_folds_on_groups() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        let banks = app.group_cursor.unwrap();
+        // Banks needs a subtree to fold: a leaf correctly refuses.
+        app.vault
+            .as_mut()
+            .unwrap()
+            .create_group(&banks, "Work")
+            .unwrap();
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.active_pane, crate::app::Pane::Entries);
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.active_pane, crate::app::Pane::Groups, "Left did not hop");
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.group_tree().len(), 2, "Left did not fold the tree");
+    }
+
+    /* `o` cycles the entries order from the browser; the flash names the new
+       order so the key never reads as dead. */
+    #[test]
+    fn o_cycles_the_order_and_says_so() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(app.order, crate::app::SortOrder::Name);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(app.order, crate::app::SortOrder::Stored, "o did not wrap");
     }
 }

@@ -119,6 +119,40 @@ pub enum Cut {
     Group(NodeId),
 }
 
+/* How the entries pane orders itself. `Stored` is the file's own order; the
+   rest are views over it — the vault vec is never re-ordered, so `o` cycling
+   back always lands exactly where the file left things. Session-only for
+   now: config has no write-back, so the choice does not survive a restart. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SortOrder {
+    #[default]
+    Stored,
+    Name,
+    Recent,
+    Updated,
+}
+
+impl SortOrder {
+    pub fn next(self) -> Self {
+        match self {
+            SortOrder::Stored => SortOrder::Name,
+            SortOrder::Name => SortOrder::Recent,
+            SortOrder::Recent => SortOrder::Updated,
+            SortOrder::Updated => SortOrder::Stored,
+        }
+    }
+
+    /// What the status flash calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortOrder::Stored => "stored order",
+            SortOrder::Name => "by name",
+            SortOrder::Recent => "by recent",
+            SortOrder::Updated => "by updated",
+        }
+    }
+}
+
 /* A flash is timed by its length: four fixed seconds fits "saved" and not a
    wrapped clipboard error, so the floor plus reading time travels with the
    message instead of one number for all of them. */
@@ -184,6 +218,9 @@ pub struct App {
        from a leak. `*` flips it and says which way, so the key never reads
        as dead. */
     pub show_password: bool,
+    /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
+       a re-ordering of it (see SortOrder above). */
+    pub order: SortOrder,
     /* Unlock state. The path comes from the config once at startup;
        `unlock_new` caches whether it names a missing file so the draw loop
        never stats. */
@@ -237,6 +274,7 @@ impl App {
             entry_scroll: 0,
             viewport: 1,
             show_password: false,
+            order: SortOrder::default(),
             db_path: None,
             unlock_new: false,
             unlock_field: UnlockField::Password,
@@ -622,24 +660,87 @@ impl App {
         let mut stack = vec![(vault.root_id(), 0)];
         while let Some((id, depth)) = stack.pop() {
             out.push((id, depth));
-            /* Reversed so the first child pops first and order matches the
-               stored child list. */
-            for child in vault.groups_in(&id).iter().rev() {
-                stack.push((child.id, depth + 1));
+            /* A collapsed group hides its subtree but stays visible itself, so
+               the cursor on it keeps a row and Right re-opens it. Groups are
+               born expanded (keepass-rs defaults the flag true), so the tree
+               only shrinks after an explicit Left. */
+            let collapsed = vault.get_group(&id).is_some_and(|g| !g.is_expanded);
+            if !collapsed {
+                /* Reversed so the first child pops first and order matches the
+                   stored child list. */
+                for child in vault.groups_in(&id).iter().rev() {
+                    stack.push((child.id, depth + 1));
+                }
             }
         }
         out
     }
 
-    /// Entry ids of the cursor group in stored order. Positions, like the
+    /// Entry ids of the cursor group in the active order. Positions, like the
     /// group tree above: the cursor holds the id, the list is rebuilt per
     /// frame, and the two meet in `snap`.
     pub fn entry_rows(&self) -> Vec<NodeId> {
-        match (&self.vault, self.group_cursor) {
-            (Some(vault), Some(group)) => {
-                vault.entries_in(&group).iter().map(|e| e.id).collect()
+        let Some((vault, group)) = self.vault.as_ref().zip(self.group_cursor) else {
+            return Vec::new();
+        };
+        let mut entries = vault.entries_in(&group);
+        /* Stable sorts: ties keep the file's own order, so equal timestamps
+           never shuffle rows between presses of `o`. Missing timestamps sort
+           last under Reverse, reading as "oldest". */
+        match self.order {
+            SortOrder::Stored => {}
+            SortOrder::Name => entries.sort_by(|a, b| {
+                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+            }),
+            SortOrder::Recent => {
+                entries.sort_by_key(|e| std::cmp::Reverse(e.creation_time.as_millis()))
             }
-            _ => Vec::new(),
+            SortOrder::Updated => {
+                entries.sort_by_key(|e| std::cmp::Reverse(e.last_modification_time.as_millis()))
+            }
+        }
+        entries.iter().map(|e| e.id).collect()
+    }
+
+    /* `o` cycles the entries-pane order. `snap` re-points the cursor because
+       the id it held may have moved rows — the selection follows the entry,
+       not the position, which is the whole reason cursors hold ids. */
+    pub fn cycle_order(&mut self) {
+        self.order = self.order.next();
+        self.snap();
+        self.say(format!("order: {}", self.order.label()));
+    }
+
+    /* Left on the groups pane folds the selected group. Only groups with
+       subgroups fold: a leaf collapsing to no visible change would read as
+       a dead key. An already-folded group reports rather than re-folding. */
+    pub fn collapse_group(&mut self) {
+        let Some(id) = self.group_cursor else {
+            return;
+        };
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        if vault.groups_in(&id).is_empty() {
+            self.say("a group without subgroups does not fold");
+            return;
+        }
+        if !vault.get_group(&id).is_some_and(|g| g.is_expanded) {
+            self.say("already folded");
+            return;
+        }
+        self.vault
+            .as_mut()
+            .expect("checked above")
+            .set_expanded(&id, false);
+    }
+
+    /// Right on the groups pane re-opens a folded group.
+    pub fn expand_group(&mut self) {
+        if let Some(id) = self.group_cursor
+            && let Some(vault) = &mut self.vault
+        {
+            vault.set_expanded(&id, true);
         }
     }
 
@@ -669,13 +770,18 @@ impl App {
        entry of another group is a selection nobody can see, and every command
        reads as dead until the next keypress moves it. */
     pub fn snap(&mut self) {
-        let Some(vault) = &self.vault else {
+        if self.vault.is_none() {
             self.group_cursor = None;
             self.entry_cursor = None;
             return;
         };
         let tree = self.group_tree();
-        if self.group_cursor.is_none_or(|id| vault.get_group(&id).is_none()) {
+        /* A cursor must rest on a *visible* row: a group that still exists
+           but is folded shut inside its parent is not one anyone can see. */
+        if self
+            .group_cursor
+            .is_none_or(|id| !tree.iter().any(|(g, _)| *g == id))
+        {
             self.group_cursor = tree.first().map(|(id, _)| *id);
         }
         let rows = self.entry_rows();
@@ -2185,5 +2291,121 @@ mod tests {
         assert!(app.drop_cut(), "an armed cut should be dropped");
         assert!(app.cut.is_none());
         assert!(!app.drop_cut(), "an empty shelf is not a drop");
+    }
+
+    /* Three entries whose stored order is neither alphabetical nor by time:
+       sorting views have to visibly rearrange them, and cycling back to
+       Stored has to restore the file's own order exactly. */
+    fn sorted_app() -> App {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "zebra", "u", "p", "", "").unwrap();
+        vault.create_entry(&banks, "apple", "u", "p", "", "").unwrap();
+        vault.create_entry(&banks, "mango", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true); // onto Banks
+        app
+    }
+
+    fn titles(app: &App) -> Vec<String> {
+        app.entry_rows()
+            .iter()
+            .map(|id| {
+                app.vault
+                    .as_ref()
+                    .unwrap()
+                    .get_entry(id)
+                    .unwrap()
+                    .title
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn o_cycles_the_orders_and_back_to_stored() {
+        let mut app = sorted_app();
+        assert_eq!(titles(&app), ["zebra", "apple", "mango"]);
+        app.cycle_order(); // Name
+        assert_eq!(titles(&app), ["apple", "mango", "zebra"]);
+        app.cycle_order(); // Recent (equal timestamps keep stored order)
+        app.cycle_order(); // Updated
+        app.cycle_order(); // back to Stored
+        assert_eq!(titles(&app), ["zebra", "apple", "mango"]);
+        /* Stage text queues behind the first flash, so assert the state. */
+        assert_eq!(app.order, SortOrder::Stored, "o did not wrap");
+    }
+
+    #[test]
+    fn updated_order_puts_the_newest_first() {
+        let mut app = sorted_app();
+        /* Stamp the middle entry newest directly: the editor is the only
+           mutator in prod, and a test should not depend on clock ticks. */
+        let id = app.entry_rows()[1];
+        let vault = app.vault.as_mut().unwrap();
+        vault.db_mut().get_entry_mut(&id).unwrap().last_modification_time =
+            keepass_rs::DateInstant::EpochMillis(9_000_000_000_000);
+        app.cycle_order(); // Name first — cycle once more for Updated.
+        app.cycle_order();
+        app.cycle_order();
+        assert_eq!(titles(&app)[0], "apple", "the newest entry leads");
+    }
+
+    /* A collapsed group hides its subtree but keeps its own row, so the
+       cursor on it stays put and Right re-opens it. */
+    #[test]
+    fn left_folds_a_group_and_right_reopens_it() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        let banks = app.group_cursor.unwrap();
+        /* Banks needs a subtree to fold: a leaf correctly refuses. */
+        app.vault.as_mut().unwrap().create_group(&banks, "Work").unwrap();
+        app.collapse_group();
+        let tree = app.group_tree();
+        /* A folded group keeps its own row: only its subtree hides. */
+        assert_eq!(
+            tree,
+            vec![(app.root_id(), 0), (banks, 1)],
+            "Work hid but Banks stayed"
+        );
+        assert_eq!(app.group_cursor, Some(banks), "the row itself stays");
+        app.expand_group();
+        assert!(app.group_tree().len() > 1, "Right re-opened the tree");
+    }
+
+    /* Snap must fall back from a group a fold just hid: a cursor pointing at
+       an invisible row is a selection nobody can see. */
+    #[test]
+    fn snapping_never_rests_on_a_hidden_group() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let outer = vault.create_group(&root, "Outer").unwrap();
+        let inner = vault.create_group(&outer, "Inner").unwrap();
+        vault.create_entry(&inner, "deep", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true); // Outer
+        app.step_group(true); // Inner
+        app.step_group(false); // back onto Outer — the fold target
+        app.collapse_group(); // folds Outer with Inner inside
+        app.snap();
+        assert_ne!(app.group_cursor, Some(inner), "cursor fell out of the fold");
+        assert!(
+            app.group_tree().iter().all(|(id, _)| *id != inner),
+            "Inner is not a row anyone can see"
+        );
+    }
+
+    /* A leaf has nothing to fold, and a fold repeated twice is a no-op: both
+       report instead of reading as dead keys. */
+    #[test]
+    fn folding_a_leaf_or_twice_says_so() {
+        let mut app = open_app();
+        app.collapse_group(); // root has children — folds
+        assert_eq!(app.group_tree().len(), 1, "the tree folded to the root");
+        app.collapse_group(); // already folded now
+        assert!(app.stage.contains("already folded"), "{}", app.stage);
     }
 }
