@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Pane, View};
+use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Pane, View, char_index_to_byte};
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
@@ -23,10 +23,18 @@ fn dim(text: impl Into<String>) -> Span<'static> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [header, rule, body, footrule, status] = Layout::vertical([
+    /* The band squeezes the body from below only while it is open: a fixed
+       row the rest of the time would leave a hole where search should be. */
+    let band = if app.search.is_some() {
+        1
+    } else {
+        0
+    };
+    let [header, rule, body, band_area, footrule, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(band),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -36,6 +44,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, app, header);
     draw_rule(frame, rule);
     draw_body(frame, app, body);
+    if app.search.is_some() {
+        draw_search(frame, app, band_area);
+    }
     draw_rule(frame, footrule);
     draw_status(frame, app, status);
 
@@ -454,7 +465,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     popup(frame, title, rows, width.max(20));
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = vec![Span::raw(" ")];
     if app.view == View::Browser {
         spans.push(Span::styled("y user", Style::new().fg(GOLD)));
@@ -469,6 +480,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             let e = if entries == 1 { "entry" } else { "entries" };
             spans.push(dim(format!("  {groups} {g} · {entries} {e}   ")));
         }
+        /* While the band filters, the bar counts honestly: N of M tells the
+           truth about matches across the whole vault, not just this pane. */
+        if app.search.is_some() {
+            let shown = app.entry_matches();
+            let total = app.entry_total();
+            spans.push(Span::styled(
+                format!("  {shown} of {total} shown  "),
+                Style::new().fg(GOLD),
+            ));
+        }
         /* An armed cut is one keypress from moving something: the bar names
            it so X never reads as a silent no-op. */
         if let Some(note) = app.cut_note() {
@@ -479,6 +500,23 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
     spans.push(Span::styled("h keys", Style::new().fg(DIM)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/* The filter band, one row between body and status: `/needle█` like earworm.
+   The caret is a block between the split halves of the needle, the same
+   char-index rule as every other box in the app. */
+fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
+    let needle = app.search.as_deref().unwrap_or_default();
+    let at = char_index_to_byte(needle, app.search_caret);
+    let (head, tail) = needle.split_at(at.min(needle.len()));
+    let line = Line::from(vec![
+        Span::styled("/", Style::new().fg(GOLD)),
+        Span::styled(head.to_string(), Style::new().fg(CREAM)),
+        Span::styled("█", Style::new().fg(GOLD)),
+        Span::styled(tail.to_string(), Style::new().fg(CREAM)),
+        dim("  enter keep · esc clear"),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /* Wide enough for the content, centred, two rows of margin so it never
@@ -631,6 +669,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.insert(4, ("move", "X V", "cut, paste"));
         rows.insert(5, ("fold", "← →", "collapse, expand group"));
         rows.insert(6, ("order", "o", "entries: name, recent, updated"));
+        rows.insert(7, ("find", "/", "fuzzy search"));
     }
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
@@ -982,5 +1021,35 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("cut: checking"), "{joined}");
         assert!(joined.contains("v pastes"), "{joined}");
+    }
+
+    /* The band draws `/needle` with a block caret and the status bar counts
+       honestly: "N of M shown" over the whole vault, not just this pane. */
+    #[test]
+    fn the_search_band_draws_the_needle_and_counts_matches() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "savings", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.open_search();
+        for ch in "check".chars() {
+            app.search_insert(ch);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("/check"), "{joined}");
+        assert!(joined.contains("1 of 2 shown"), "{joined}");
+        assert!(joined.contains("esc clear"), "{joined}");
     }
 }

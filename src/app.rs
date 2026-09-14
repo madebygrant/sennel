@@ -184,6 +184,15 @@ pub fn scroll_to(offset: usize, at: usize, len: usize, height: usize) -> usize {
     offset.clamp(lowest, highest)
 }
 
+/// Byte offset of char index `at` in `s`. The carets count chars, Rust edits
+/// count bytes; this is the bridge, and clamping past the end means "the end"
+/// rather than a panic.
+pub fn char_index_to_byte(s: &str, at: usize) -> usize {
+    s.char_indices()
+        .nth(at)
+        .map_or(s.len(), |(byte, _)| byte)
+}
+
 pub struct App {
     pub tick: usize,
     pub view: View,
@@ -244,6 +253,16 @@ pub struct App {
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
+    /* Live fuzzy search. None when the band is closed; Some holds the typed
+       needle and filters the entries pane as a predicate — the vault itself
+       is never touched. `enter` closes the band keeping the filter; Esc
+       clears the filter first (and only quits-ish reports once empty). */
+    pub search: Option<String>,
+    /// Char index into the search band, same rule as every other caret.
+    pub search_caret: usize,
+    /// Ranks the current needle against every entry's haystack, reusing its
+    /// scratch buffers. Lives here so the band and `entry_rows` share one.
+    pub searcher: crate::search::Searcher,
     /* Idle auto-lock. `None` is off. The deadline is checked once per frame
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
@@ -287,6 +306,9 @@ impl App {
             form: None,
             group_prompt: None,
             cut: None,
+            search: None,
+            search_caret: 0,
+            searcher: crate::search::Searcher::new(),
             lock_after: None,
             last_activity: Instant::now(),
         }
@@ -679,7 +701,9 @@ impl App {
     /// Entry ids of the cursor group in the active order. Positions, like the
     /// group tree above: the cursor holds the id, the list is rebuilt per
     /// frame, and the two meet in `snap`.
-    pub fn entry_rows(&self) -> Vec<NodeId> {
+    /* &mut self, not &self: the matcher scores with internal scratch state,
+       so the filter loop borrows it mutably while the vault stays shared. */
+    pub fn entry_rows(&mut self) -> Vec<NodeId> {
         let Some((vault, group)) = self.vault.as_ref().zip(self.group_cursor) else {
             return Vec::new();
         };
@@ -699,7 +723,42 @@ impl App {
                 entries.sort_by_key(|e| std::cmp::Reverse(e.last_modification_time.as_millis()))
             }
         }
+        /* The search needle is a predicate over the sorted view, not a
+            separate mode: sorting and filtering compose instead of fighting
+           over who owns the list. The ids are collected first so the
+           searcher can be borrowed mutably inside the loop without fighting
+           the shared borrow on `entries`. */
+        if let Some(needle) = self.search.clone().filter(|n| !n.is_empty()) {
+            let ids: Vec<NodeId> = entries.iter().map(|e| e.id).collect();
+            /* rank_entry, not raw rank: multi-word needles ("git octo")
+               become Pattern atoms there, and the band must agree with the
+               count in `entry_matches`, which uses the same predicate. */
+            let hits: Vec<NodeId> = ids
+                .into_iter()
+                .filter(|id| self.searcher.rank_entry(&needle, vault, id).is_some())
+                .collect();
+            return hits;
+        }
         entries.iter().map(|e| e.id).collect()
+    }
+
+    /// How many entries the vault holds in total, for the "N of M shown"
+    /// search count. Reads the raw map, not any view.
+    pub fn entry_total(&self) -> usize {
+        self.vault.as_ref().map_or(0, Vault::entry_count)
+    }
+
+    /// How many rows the filter leaves visible, across the whole vault. The
+    /// entries pane only shows the cursor group, but the count tells the
+    /// truth about the filter: the needle still matches rows elsewhere.
+    /* &mut self for the same reason as entry_rows: the searcher scores with
+       internal scratch state, and the draw path already holds &mut App. */
+    pub fn entry_matches(&mut self) -> usize {
+        let Some(vault) = &self.vault else {
+            return 0;
+        };
+        let ids: Vec<NodeId> = vault.db().entries.keys().copied().collect();
+        ids.iter().filter(|id| self.search_hit(**id)).count()
     }
 
     /* `o` cycles the entries-pane order. `snap` re-points the cursor because
@@ -742,6 +801,146 @@ impl App {
         {
             vault.set_expanded(&id, true);
         }
+    }
+
+    /* `/` opens the band over whatever was last searched, so refining a
+       filter does not mean retyping it. The caret lands at the end: you came
+       here to add characters. */
+    pub fn open_search(&mut self) {
+        let prior = self.search.clone().unwrap_or_default();
+        self.search_caret = prior.chars().count();
+        self.search = Some(prior);
+    }
+
+    /// Enter on the band: keep the filter, hand the keys back to the browser.
+    pub fn keep_search(&mut self) {
+        if self.search.as_deref().is_some_and(str::is_empty) {
+            self.search = None;
+        }
+        self.snap();
+    }
+
+    /* Esc on the band clears the filter first. With nothing typed it reports
+       instead — Esc never quits, and a bare Esc on an empty band closing
+       nothing should say so. */
+    pub fn clear_search(&mut self) -> bool {
+        let was_live = self.search.is_some();
+        if was_live {
+            self.search = None;
+            self.search_caret = 0;
+            self.snap();
+        }
+        was_live
+    }
+
+    /* The band owns its caret/word keys exactly like every other box. These
+       mirror the form variants but write to `search` — small duplication for
+       keeping each modal's logic readable in one place. */
+    pub fn search_insert(&mut self, ch: char) {
+        let Some(query) = &mut self.search else {
+            return;
+        };
+        let at = char_index_to_byte(query, self.search_caret);
+        query.insert(at, ch);
+        self.search_caret += 1;
+        self.search_changed();
+    }
+
+    pub fn search_backspace(&mut self) {
+        let Some(query) = &mut self.search else {
+            return;
+        };
+        if self.search_caret == 0 {
+            return;
+        }
+        let start = char_index_to_byte(query, self.search_caret - 1);
+        let end = char_index_to_byte(query, self.search_caret);
+        query.drain(start..end);
+        self.search_caret -= 1;
+        self.search_changed();
+    }
+
+    pub fn search_delete(&mut self) {
+        let Some(query) = &mut self.search else {
+            return;
+        };
+        let len = query.chars().count();
+        if self.search_caret >= len {
+            return;
+        }
+        let start = char_index_to_byte(query, self.search_caret);
+        let end = char_index_to_byte(query, self.search_caret + 1);
+        query.drain(start..end);
+        self.search_changed();
+    }
+
+    pub fn search_move(&mut self, right: bool) {
+        let len = self
+            .search
+            .as_ref()
+            .map(|q| q.chars().count())
+            .unwrap_or(0);
+        if right {
+            self.search_caret = (self.search_caret + 1).min(len);
+        } else {
+            self.search_caret = self.search_caret.saturating_sub(1);
+        }
+    }
+
+    pub fn search_end(&mut self, end: bool) {
+        let len = self
+            .search
+            .as_ref()
+            .map(|q| q.chars().count())
+            .unwrap_or(0);
+        self.search_caret = if end { len } else { 0 };
+    }
+
+    pub fn search_clear(&mut self) {
+        if let Some(query) = &mut self.search {
+            query.clear();
+        }
+        self.search_caret = 0;
+        self.search_changed();
+    }
+
+    pub fn search_kill_word(&mut self) {
+        let Some(query) = &mut self.search else {
+            return;
+        };
+        /* Head is sliced out first so the drain below does not fight an
+           immutable borrow: the caret maths needs the pre-edit head length. */
+        let at = char_index_to_byte(query, self.search_caret);
+        let head = query[..at].to_string();
+        let Some(cut) = head.rfind(|c: char| !c.is_whitespace())
+            .and_then(|end| head[..=end].rfind(char::is_whitespace))
+        else {
+            query.drain(..at);
+            self.search_caret = 0;
+            self.search_changed();
+            return;
+        };
+        query.drain(cut..at);
+        self.search_caret -= head[cut..].chars().count();
+        self.search_changed();
+    }
+
+    /// The needle changed: re-point the cursor onto a row that survives the
+    /// filter, exactly like any other view change.
+    fn search_changed(&mut self) {
+        self.snap();
+    }
+
+    /// Whether the current needle passes an entry. The single predicate the
+    /// rows list and the status count both read, so they can never disagree.
+    pub fn search_hit(&mut self, id: NodeId) -> bool {
+        let Some(needle) = self.search.as_deref().filter(|n| !n.is_empty()) else {
+            return true;
+        };
+        let Some(vault) = &self.vault else {
+            return true;
+        };
+        self.searcher.rank_entry(needle, vault, &id).is_some()
     }
 
     pub fn selected_group(&self) -> Option<&Group> {
@@ -2309,7 +2508,7 @@ mod tests {
         app
     }
 
-    fn titles(app: &App) -> Vec<String> {
+    fn titles(app: &mut App) -> Vec<String> {
         app.entry_rows()
             .iter()
             .map(|id| {
@@ -2327,13 +2526,13 @@ mod tests {
     #[test]
     fn o_cycles_the_orders_and_back_to_stored() {
         let mut app = sorted_app();
-        assert_eq!(titles(&app), ["zebra", "apple", "mango"]);
+        assert_eq!(titles(&mut app), ["zebra", "apple", "mango"]);
         app.cycle_order(); // Name
-        assert_eq!(titles(&app), ["apple", "mango", "zebra"]);
+        assert_eq!(titles(&mut app), ["apple", "mango", "zebra"]);
         app.cycle_order(); // Recent (equal timestamps keep stored order)
         app.cycle_order(); // Updated
         app.cycle_order(); // back to Stored
-        assert_eq!(titles(&app), ["zebra", "apple", "mango"]);
+        assert_eq!(titles(&mut app), ["zebra", "apple", "mango"]);
         /* Stage text queues behind the first flash, so assert the state. */
         assert_eq!(app.order, SortOrder::Stored, "o did not wrap");
     }
@@ -2350,7 +2549,7 @@ mod tests {
         app.cycle_order(); // Name first — cycle once more for Updated.
         app.cycle_order();
         app.cycle_order();
-        assert_eq!(titles(&app)[0], "apple", "the newest entry leads");
+        assert_eq!(titles(&mut app)[0], "apple", "the newest entry leads");
     }
 
     /* A collapsed group hides its subtree but keeps its own row, so the

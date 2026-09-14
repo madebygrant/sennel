@@ -122,6 +122,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_group_prompt_key(app, code, mods);
         return;
     }
+    /* The search band is modal the same way: `q` types a letter into the
+       needle, `h` too. Enter and Esc hand the keys back to the browser. */
+    if app.search.is_some() {
+        handle_search_key(app, code, mods);
+        return;
+    }
     /* The overlay swallows the next key rather than acting on it: anything
        else makes dismissing it a guess about what the key also did. */
     if app.show_help && !matches!(code, KeyCode::Char('q')) {
@@ -201,7 +207,35 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Left => app.switch_pane(),
         KeyCode::Right if app.active_pane == app::Pane::Groups => app.expand_group(),
         KeyCode::Char('o') => app.cycle_order(),
-        KeyCode::Char('/') => app.say("search arrives in wave 6"),
+        KeyCode::Char('/') => app.open_search(),
+        _ => {}
+    }
+}
+
+/* The search band owns every printable key while it is open — `q` types a
+   letter, `h` types a letter — so only named chords and Enter/Esc are
+   commands. The shape mirrors the form boxes exactly. */
+fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
+        KeyCode::Esc => {
+            if !app.clear_search() {
+                app.say("this is the top  ·  q quits");
+            }
+        }
+        KeyCode::Enter => app.keep_search(),
+        KeyCode::Char('u') if ctrl => app.search_clear(),
+        KeyCode::Char('w') if ctrl => app.search_kill_word(),
+        KeyCode::Left if !ctrl => app.search_move(false),
+        KeyCode::Right if !ctrl => app.search_move(true),
+        KeyCode::Home if !ctrl => app.search_end(false),
+        KeyCode::End if !ctrl => app.search_end(true),
+        KeyCode::Char('a') if ctrl => app.search_end(false),
+        KeyCode::Char('e') if ctrl => app.search_end(true),
+        KeyCode::Delete if !ctrl => app.search_delete(),
+        KeyCode::Backspace => app.search_backspace(),
+        KeyCode::Char(c) if !ctrl => app.search_insert(c),
         _ => {}
     }
 }
@@ -473,11 +507,48 @@ mod tests {
         /* One app per key: the first flash is still up when the second key
            lands, so the second message queues instead of showing. */
         let mut app = open_browser();
-        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
-        assert!(app.stage.contains("wave 6"), "{}", app.stage);
-        let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
         assert!(app.stage.contains("no entry"), "{}", app.stage);
+    }
+
+    /* `/` opens the band and the band owns the keys: `q` types a letter
+       rather than quitting, Enter keeps the filter and hands keys back. */
+    #[test]
+    fn slash_opens_the_band_and_typing_filters() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(app.search.is_some(), "/ did not open the band");
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit from inside the band");
+        handle_key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+        // No entry matches "qz", so the pane empties rather than lying.
+        assert!(app.entry_rows().is_empty(), "a non-matching needle kept rows");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.search.is_some(), "enter did not keep the filter");
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        // Keys returned to the browser: j moved the cursor again.
+        assert_ne!(app.group_cursor, None);
+    }
+
+    /* Esc with text in the band clears the filter; Esc again falls through
+       to the usual report. Esc never quits. */
+    #[test]
+    fn esc_clears_the_band_before_its_usual_report() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        /* A needle nothing matches: "qz" is not in any haystack, so the
+           pane empties instead of quietly ignoring the filter. */
+        for ch in "qz".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert!(app.entry_rows().is_empty(), "the needle did not filter");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.search.is_none(), "esc did not clear the band");
+        assert!(!app.entry_rows().is_empty(), "clearing did not restore rows");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.quit, "esc quit the session");
     }
 
     /* The form is modal: `a` opens it, `q` types a letter rather than
