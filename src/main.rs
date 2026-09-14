@@ -215,6 +215,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            otherwise — the same key, honest in both modes. */
         KeyCode::Char('n') => app.jump_match(true),
         KeyCode::Char('N') => app.jump_match(false),
+        /* `u` undoes the last one-slot change; ^u stays page-up. */
+        KeyCode::Char('u') => app.undo_last(),
         KeyCode::Char('/') => app.open_search(),
         _ => {}
     }
@@ -261,6 +263,9 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Tab | KeyCode::Down if !ctrl => app.next_form_field(true),
         KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_form_field(false),
         KeyCode::Char('u') if ctrl => app.form_clear(),
+        /* ^s generates into the password box: a fresh secret without
+           leaving the form, named in the flash with its entropy. */
+        KeyCode::Char('s') if ctrl => app.form_generate(),
         KeyCode::Char('w') if ctrl => app.form_kill_word(),
         KeyCode::Left if !ctrl => app.form_move(false),
         KeyCode::Right if !ctrl => app.form_move(true),
@@ -704,5 +709,40 @@ mod tests {
            force the expiry the frame loop would perform, then read. */
         app.expire_now();
         assert!(app.stage.contains("first match"), "{}", app.stage);
+    }
+
+    /* The form routes ^s to the generator; plainly typing 's' still types. */
+    #[test]
+    fn ctrl_s_generates_inside_the_form() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE); // edit form
+        handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let (filled, touched) = {
+            let form = app.form.as_ref().expect("the form stayed open");
+            (!form.password.is_empty(), form.password_touched)
+        };
+        assert!(filled, "^s did not fill the password box");
+        assert!(touched, "^s did not arm the write");
+    }
+
+    /* `u` in the browser undoes the last change: ^u stays page-up. */
+    #[test]
+    fn u_undoes_the_last_change_from_the_browser() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        if let Some(form) = app.form.as_mut() {
+            form.notes = "via u".into();
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // submit
+        handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+        let entry = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .get_entry(&app.entry_cursor.unwrap())
+            .unwrap();
+        assert_eq!(entry.notes.as_str(), "", "u did not restore the notes");
     }
 }

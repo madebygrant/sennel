@@ -514,6 +514,11 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(note) = app.cut_note() {
             spans.push(Span::styled(format!("{note} · v pastes  "), Style::new().fg(AMBER)));
         }
+        /* The undo slot is the same deal: `u` has a name, so the key can be
+           pressed on purpose rather than as a gamble. */
+        if let Some(note) = app.undo_note() {
+            spans.push(Span::styled(format!("{note}  "), Style::new().fg(AMBER)));
+        }
     } else {
         spans.push(dim("   enter unlock   "));
     }
@@ -647,6 +652,8 @@ fn draw_form(frame: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled(" enter", Style::new().fg(GOLD)),
             dim(" save   "),
+            Span::styled("^s", Style::new().fg(GOLD)),
+            dim(" generate   "),
             Span::styled("tab", Style::new().fg(GOLD)),
             dim(" next box   "),
             Span::styled("esc", Style::new().fg(GOLD)),
@@ -688,6 +695,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.insert(4, ("move", "X V", "cut, paste"));
         rows.insert(5, ("fold", "← →", "collapse, expand group"));
         rows.insert(6, ("order", "o", "entries: name, recent, updated"));
+        rows.insert(7, ("undo", "u", "one level · ^s generates"));
         rows.insert(7, ("find", "/", "fuzzy search"));
     }
 

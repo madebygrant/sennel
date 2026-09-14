@@ -414,6 +414,62 @@ impl Vault {
             None => Err(VaultError::EntryNotFound),
         }
     }
+
+    /* Undo support (Wave 7): the app snapshots whole entries and calls back
+       here to restore them. */
+    /// Swap an entry wholesale — the original timestamps ride along, which
+    /// an update_entry-based undo would not preserve.
+    pub fn replace_entry(&mut self, entry: Entry) -> Result<(), VaultError> {
+        let id = entry.id;
+        if !self.db.entries.contains_key(&id) {
+            return Err(VaultError::EntryNotFound);
+        }
+        self.db.entries.insert(id, entry);
+        self.db.mark_modified();
+        Ok(())
+    }
+
+    /// Re-insert a deleted entry under `parent`. Appends at the end: the
+    /// snapshot carries the record but not its slot in the child list, and
+    /// a one-level undo that restores content is worth the position it
+    /// cannot bring back.
+    pub fn restore_entry(&mut self, entry: Entry, parent: &NodeId) -> Result<(), VaultError> {
+        let id = entry.id;
+        if self.db.get_group(parent).is_none() {
+            return Err(VaultError::GroupNotFound);
+        }
+        self.db.entries.insert(id, entry);
+        if let Some(group) = self.db.get_group_mut(parent) {
+            group.child_entry_ids.push(id);
+        }
+        self.db.mark_modified();
+        Ok(())
+    }
+
+    /// Hard-remove an entry an undo needs to disappear again (an add that
+    /// `u` takes back). No tombstone — this rolls back, it does not delete.
+    pub fn expunge_entry(&mut self, id: &NodeId) -> Result<(), VaultError> {
+        if self.db.entries.remove(id).is_none() {
+            return Err(VaultError::EntryNotFound);
+        }
+        if let Some(old) = self.db.find_parent_group_of_entry(id)
+            && let Some(parent) = self.db.get_group_mut(&old)
+        {
+            parent.child_entry_ids.retain(|e| e != id);
+        }
+        self.db.mark_modified();
+        Ok(())
+    }
+
+    /// Title write for rename undo.
+    pub fn set_group_title(&mut self, id: &NodeId, title: &str) -> Result<(), VaultError> {
+        let Some(group) = self.db.get_group_mut(id) else {
+            return Err(VaultError::GroupNotFound);
+        };
+        group.title = title.to_string();
+        self.db.mark_modified();
+        Ok(())
+    }
 }
 
 impl Default for Vault {

@@ -6,6 +6,7 @@ use keepass_rs::{Entry, Group, NodeId};
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
+use crate::generator::Classes;
 use crate::vault::{Vault, VaultError};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
@@ -117,6 +118,26 @@ pub struct GroupPrompt {
 pub enum Cut {
     Entry(NodeId),
     Group(NodeId),
+}
+
+/* One slot, one undo. The snapshot carries the whole entry — secrets
+   included, zeroized on drop like every other copy — because a field-by-field
+   restore would miss the timestamps the form never touches. Group delete is
+   not undoable: it only ever runs on an empty group behind a confirm, and
+   its contents were moved or deleted through paths that arm their own undo. */
+pub enum Undo {
+    /// Before-state of an edited entry; restore swaps it wholesale.
+    Edit { id: NodeId, before: Entry },
+    /// A deleted entry, where it lived, and what it was.
+    Delete {
+        id: NodeId,
+        parent: NodeId,
+        before: Entry,
+    },
+    /// An added entry that `u` removes again.
+    AddEntry { id: NodeId, title: String },
+    /// A group rename that `u` turns back.
+    Rename { id: NodeId, before: String },
 }
 
 /* How the entries pane orders itself. `Stored` is the file's own order; the
@@ -253,6 +274,8 @@ pub struct App {
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
+    /* One undo slot, armed by the last mutation and consumed by `u`. */
+    pub undo: Option<Undo>,
     /* Live fuzzy search. None when the band is closed; Some holds the typed
        needle and filters the entries pane as a predicate — the vault itself
        is never touched. `enter` closes the band keeping the filter; Esc
@@ -310,6 +333,7 @@ impl App {
             form: None,
             group_prompt: None,
             cut: None,
+            undo: None,
             search: None,
             band: false,
             search_caret: 0,
@@ -1262,17 +1286,31 @@ impl App {
     /// The yes side of the delete confirm. Kept off the key handler so the
     /// confirm popup and the delete itself cannot drift apart.
     pub fn confirm_delete_entry(&mut self, id: NodeId) {
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        match vault.delete_entry(&id) {
-            Ok(()) => {
-                self.entry_cursor = None;
-                self.snap();
-                self.persist();
-                self.say("entry deleted");
+        /* Snapshot before the delete — undo puts the whole entry back
+           (restore appends it to its old parent; the list position is not
+           reconstructible and does not matter). */
+        let parent = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id));
+        let before = self.vault.as_ref().and_then(|v| v.get_entry(&id).cloned());
+        if let (Some(vault), Some(parent), Some(before)) =
+            (self.vault.as_mut(), parent, before)
+        {
+            match vault.delete_entry(&id) {
+                Ok(()) => {
+                    self.undo = Some(Undo::Delete {
+                        id,
+                        parent,
+                        before,
+                    });
+                    self.entry_cursor = None;
+                    self.snap();
+                    self.persist();
+                    self.say("entry deleted");
+                }
+                Err(e) => {
+                    self.undo = None;
+                    self.say(format!("cannot delete  ·  {e}"));
+                }
             }
-            Err(e) => self.say(format!("cannot delete  ·  {e}")),
         }
     }
 
@@ -1442,6 +1480,14 @@ impl App {
                     None
                 };
                 let vault = self.vault.as_mut().expect("edit form needs a vault");
+                /* Snapshot before the write: undo restores the entry as the
+                   form found it, password included. */
+                if let Some(before) = vault.get_entry(&id) {
+                    self.undo = Some(Undo::Edit {
+                        id,
+                        before: before.clone(),
+                    });
+                }
                 vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
                     .map(|()| None)
@@ -1450,6 +1496,10 @@ impl App {
         match result {
             Ok(new_id) => {
                 if let Some(id) = new_id {
+                    self.undo = Some(Undo::AddEntry {
+                        id,
+                        title: form.title.clone(),
+                    });
                     self.entry_cursor = Some(id);
                 }
                 self.snap();
@@ -1461,6 +1511,7 @@ impl App {
             }
             Err(e) => {
                 self.say(format!("cannot save  ·  {e}"));
+                self.undo = None;
                 self.form = Some(form);
             }
         }
@@ -1524,6 +1575,14 @@ impl App {
             }
             GroupPromptKind::Rename(id) => {
                 let vault = self.vault.as_mut().expect("group prompt needs a vault");
+                /* Snapshot the old name before the rename so one `u` puts
+                  GroupName back. */
+                if let Some(group) = vault.get_group(&id) {
+                    self.undo = Some(Undo::Rename {
+                        id,
+                        before: group.title.clone(),
+                    });
+                }
                 vault.rename_group(&id, &prompt.value).map(|()| None)
             }
         };
@@ -1784,6 +1843,87 @@ impl App {
                 .get_group(&id)
                 .map(|g| format!("cut: {}", g.title)),
         }
+    }
+
+    /* One slot, one undo: `u` consumes the slot. An older change simply
+       becomes unundoable — a full history is a different product, and the
+       status bar says what the slot holds so the key never surprises. */
+    pub fn undo_last(&mut self) {
+        let Some(undo) = self.undo.take() else {
+            self.say("nothing to undo · the last change had no undo");
+            return;
+        };
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        match undo {
+            Undo::Edit { id, before } => {
+                let title = before.title.clone();
+                vault.replace_entry(before);
+                self.entry_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say(format!("undid edit of {title}"));
+            }
+            Undo::Delete { id, parent, before } => {
+                let title = before.title.clone();
+                vault.restore_entry(before, &parent);
+                self.entry_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say(format!("restored {title}"));
+            }
+            Undo::AddEntry { id, title } => {
+                /* The add is rolled back by removing what it created, and the
+                   undo slot empties instead of growing. */
+                vault.expunge_entry(&id);
+                self.entry_cursor = None;
+                self.snap();
+                self.persist();
+                self.say(format!("removed {title}"));
+            }
+            Undo::Rename { id, before } => {
+                vault.set_group_title(&id, &before);
+                self.snap();
+                self.persist();
+                self.say(format!("restored name {before}"));
+            }
+        }
+    }
+
+    /// What the status bar says the undo slot holds, looked up fresh so a
+    /// later rename or delete still names the thing it would restore.
+    pub fn undo_note(&self) -> Option<String> {
+        let vault = self.vault.as_ref()?;
+        let note = match self.undo.as_ref()? {
+            Undo::Edit { before, .. } => format!("undo: edit of {}", before.title),
+            Undo::Delete { before, .. } => format!("undo: restore {}", before.title),
+            Undo::AddEntry { title, .. } => format!("undo: remove {title}"),
+            Undo::Rename { before, .. } => format!("undo: name {before}"),
+        };
+        Some(note)
+    }
+
+    /* ^s on the form: generate into the password box. Excludes ambiguous
+       glyphs so a password read off this screen can be typed elsewhere —
+       l1IO0 are the ones every font renders alike. Touching the box flips
+       the keep-latch, so submit writes what was generated. */
+    pub fn form_generate(&mut self) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        let generated = match crate::generator::generate(20, Classes::default(), true) {
+            Ok(pw) => pw,
+            Err(e) => {
+                self.say(format!("cannot generate  ·  {e}"));
+                return;
+            }
+        };
+        form.password = generated;
+        form.password_touched = true;
+        form.caret = form.password.chars().count();
+        let bits = crate::generator::entropy_bits(20, crate::generator::Classes::default().alphabet_len(false));
+        self.say(format!("generated 20 chars  ·  ~{bits:.0} bits"));
     }
 }
 
@@ -2771,5 +2911,137 @@ mod tests {
            force the expiry the frame loop would perform, then read. */
         app.expire_now();
         assert!(app.stage.contains("first match"), "{}", app.stage);
+    }
+
+    /* ^s fills the box and flips the keep-latch: submit writes what was
+       generated, not the kept secret. */
+    #[test]
+    fn ctrl_s_generates_into_the_password_box() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_edit_form();
+        app.form_generate();
+        let (filled, touched) = {
+            let form = app.form.as_ref().unwrap();
+            (!form.password.is_empty(), form.password_touched)
+        };
+        assert!(filled, "^s left the box empty");
+        assert!(touched, "^s did not arm the write");
+    }
+
+    #[test]
+    fn u_restores_an_edited_entry_password() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        app.form_generate(); // new secret, touches the latch
+        app.submit_form();
+        let changed = open_password(&app);
+        assert_ne!(changed, "p", "the generated password did not write");
+        app.undo_last();
+        assert_eq!(open_password(&app), "p", "u did not put the old secret back");
+    }
+
+    fn open_password(app: &App) -> String {
+        let id = app.entry_cursor.unwrap();
+        app.vault.as_ref().unwrap().get_entry(&id).unwrap()
+            .password.as_str().to_string()
+    }
+
+    /* u brings a deleted entry back, under the group it came from. */
+    #[test]
+    fn u_restores_a_deleted_entry() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        let id = app.entry_cursor.unwrap();
+        app.ask_delete_entry();
+        let Some(Confirm::DeleteEntry { id: _, .. }) = app.confirm else {
+            panic!("delete did not ask");
+        };
+        app.confirm = None; // handler-takes-first convention
+        app.confirm_delete_entry(id);
+        assert!(app.entry_rows().is_empty(), "the entry did not go");
+        app.undo_last();
+        let rows = app.entry_rows();
+        assert_eq!(rows.len(), 1, "u did not restore the entry");
+        let vault = app.vault.as_ref().unwrap();
+        assert_eq!(
+            vault.parent_group_of_entry(&rows[0]),
+            Some(app.group_cursor.unwrap()),
+            "restored into the wrong group"
+        );
+    }
+
+    /* u rolls an add back by removing what it created. */
+    #[test]
+    fn u_removes_an_just_added_entry() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_add_form();
+        if let Some(form) = app.form.as_mut() {
+            form.title = "fresh".into();
+        }
+        app.submit_form();
+        assert!(
+            app.entry_rows().iter().any(|id| {
+                app.vault.as_ref().unwrap().get_entry(id).unwrap().title == "fresh"
+            }),
+            "the add did not land"
+        );
+        app.undo_last();
+        let titles: Vec<String> = app
+            .entry_rows()
+            .iter()
+            .map(|id| app.vault.as_ref().unwrap().get_entry(id).unwrap().title.clone())
+            .collect();
+        assert!(!titles.contains(&"fresh".to_string()), "u did not remove the add");
+    }
+
+    #[test]
+    fn u_restores_a_group_rename() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        let banks = app.group_cursor.unwrap();
+        app.open_group_prompt_rename();
+        if let Some(prompt) = app.group_prompt.as_mut() {
+            prompt.value = "Savings".into();
+            prompt.caret = 7;
+        }
+        app.submit_group_prompt();
+        assert_eq!(app.vault.as_ref().unwrap().get_group(&banks).unwrap().title, "Savings");
+        app.undo_last();
+        assert_eq!(
+            app.vault.as_ref().unwrap().get_group(&banks).unwrap().title,
+            "Banks",
+            "u did not put the old name back"
+        );
+    }
+
+    /* One slot: once spent, an older change has no undo and the key says so. */
+    #[test]
+    fn the_second_u_says_actually_nothing_to_undo() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        if let Some(form) = app.form.as_mut() {
+            form.notes = "touched".into();
+        }
+        app.submit_form();
+        app.undo_last();
+        app.expire_now(); // promotes the queued 'undid edit of …' flash
+        app.undo_last();
+        app.expire_now(); // promotes 'nothing to undo'
+        assert!(
+            app.stage.contains("nothing to undo"),
+            "{}",
+            app.stage
+        );
+    }
+
+    #[test]
+    fn u_with_no_history_says_so() {
+        let mut app = open_app();
+        app.undo_last();
+        assert!(app.stage.contains("nothing to undo"), "{}", app.stage);
     }
 }
