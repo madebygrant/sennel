@@ -269,7 +269,7 @@ pub struct App {
     pub unlock_file: String,
     /// Where typing lands, as a char index into the focused box (see below).
     pub caret: usize,
-    /// Plain-text password on the unlock screen. `*` flips it, the way the
+    /// Plain-text password on the unlock screen. `^r` flips it, the way the
     /// browser's `*` flips the detail pane; a fresh unlock starts hidden.
     pub unlock_reveal: bool,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
@@ -437,14 +437,15 @@ impl App {
     }
 
     /* Flip the lock screen between bullets and the typed master password.
-       Same contract as the detail pane's `*`: the flip says so out loud, so
-       a reveal never happens silently on the one screen that guards
+       Same contract as the detail pane's `*`, on `^r` because a printable
+       key would steal characters from real passwords. The flip says so out
+       loud, so a reveal never happens silently on the one screen that guards
        everything. Hiding deliberately says nothing — the bullets going back
        are visible proof enough. */
     pub fn toggle_unlock_reveal(&mut self) {
         self.unlock_reveal = !self.unlock_reveal;
         if self.unlock_reveal {
-            self.say("password shown  ·  * hides it");
+            self.say("password shown  ·  ^r hides it");
         }
     }
 

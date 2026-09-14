@@ -404,7 +404,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
 /* One question with two or three boxes: the password always, the key file
    beside it (empty means none), the confirm joining only when creating. Only
    the focused box draws the block, or the popup shows two cursors and neither
-   is where typing lands. The password is bullets end to end unless `*`
+   is where typing lands. The password is bullets end to end unless `^r`
    revealed it — length is otherwise the only thing about it the screen may
    show. */
 fn draw_unlock(frame: &mut Frame, app: &App) {
@@ -435,7 +435,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     };
     let field = |label: &str, value: &str, at: UnlockField, secret: bool| {
         let focused = app.unlock_field == at;
-        /* `*` reveals: the caret is a char index over the raw value, and the
+        /* `^r` reveals: the caret is a char index over the raw value, and the
            masked form has the same char count, so the block lands in the
            same place either way. */
         let shown = if secret && !app.unlock_reveal {
@@ -491,7 +491,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         ));
     }
     rows.push(Line::default());
-    rows.push(Line::from(dim(" tab field   enter unlock   esc clear   * reveal")));
+    rows.push(Line::from(dim(" tab field   enter unlock   esc clear   ^r reveal")));
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, title, rows, width.max(20));
 }
@@ -684,7 +684,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("type", "a–z  0–9", "the boxes take every key"),
             ("move", "tab  ↑ ↓", "between boxes"),
             ("edit", "^u  ^w", "clear box, kill word"),
-            ("reveal", "*", "show the password plainly"),
+            ("reveal", "^r", "show the password plainly"),
             ("go", "enter", "unlock"),
             ("quit", "^c", ""),
         ]
@@ -827,10 +827,11 @@ mod tests {
         assert!(joined.contains("••••••"), "{joined}");
     }
 
-    /* `*` turns the bullets into the typed password, the same reveal the key
-       buys in the browser's detail pane; toggling off hides again. */
+    /* `^r` turns the bullets into the typed password — the lock's sibling of
+       the browser detail pane's `*`, moved to a control key so a star in the
+       password itself stays a password character. Toggling off hides again. */
     #[test]
-    fn star_reveals_the_lock_screen_password_and_star_hides_it() {
+    fn ctrl_r_reveals_the_lock_screen_password_and_hides_it_again() {
         let backend = TestBackend::new(80, 24);
         let mut t = Terminal::new(backend).unwrap();
         let mut app = App::new();

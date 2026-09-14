@@ -365,9 +365,11 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_unlock_field(false),
         KeyCode::Char('u') if ctrl => app.unlock_clear(),
         KeyCode::Char('w') if ctrl => app.unlock_kill_word(),
-        /* `*` flips the password box to plain text, matching the browser's
-           detail-pane key; the same key, the same reveal contract. */
-        KeyCode::Char('*') => app.toggle_unlock_reveal(),
+        /* `^r` flips the password box to plain text, matching the browser's
+           detail-pane reveal on a key a password cannot contain: every
+           printable key here is text, `*` and all — a password with a star
+           in it would have been typed missing it. */
+        KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         KeyCode::Left if !ctrl => app.unlock_move(false),
         KeyCode::Right if !ctrl => app.unlock_move(true),
         KeyCode::Home if !ctrl => app.unlock_end(false),
@@ -503,18 +505,25 @@ mod tests {
         assert_eq!(app.unlock_password, "qh");
     }
 
-    /* `*` on the lock flips the password box to plain text like the browser's
-       toggle does, and `q` still types — the reveal is one key of many. */
+    /* `^r` on the lock flips the password box to plain text like the
+       browser's `*` does — and `*` itself stays a password character, which
+       is exactly why the lock's reveal cannot borrow the browser's key. */
     #[test]
-    fn star_reveals_on_the_lock_screen() {
+    fn ctrl_r_reveals_on_the_lock_screen_and_star_types() {
         let mut app = App::new();
         handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('3'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
-        assert!(app.unlock_reveal, "* typed instead of revealing");
-        assert_eq!(app.unlock_password, "s3");
-        handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
-        assert!(!app.unlock_reveal, "second * did not re-mask");
+        assert!(!app.unlock_reveal, "* revealed instead of typing");
+        assert_eq!(app.unlock_password, "s3*");
+        handle_key(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        );
+        assert!(app.unlock_reveal, "^r did not reveal");
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(!app.unlock_reveal, "second ^r did not re-mask");
     }
 
     /* Enter on the lock with no database configured says what to do rather

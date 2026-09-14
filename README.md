@@ -24,7 +24,9 @@ The first box is the vault file, so one session can point at any vault: type (or
 prefilled from config) a path, `tab` to the password box, `enter` to unlock. The path field is
 editable every time the app locks — idle auto-lock drops the secrets and the editor state, not the
 vault path, so switching vaults after a lock is `esc`, edit the file box, `enter`. A path that
-doesn't exist yet is a new database: confirm, then set the password twice.
+doesn't exist yet is a new database: confirm, then set the password twice. Every printable key on
+this screen is text — a `*` in a password types as `*` — so the reveal is `^r`, not the browser's
+`*`.
 
 ## Keys
 
