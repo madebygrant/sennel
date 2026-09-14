@@ -5,6 +5,11 @@ edition = "2024"
 description = "KeePass-style terminal password manager with one-key clipboard copy, folders and fuzzy search"
 license = "MIT OR Apache-2.0"
 
+# The binary users type is `sennel`; the crate keeps its -tui suffix.
+[[bin]]
+name = "sennel"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

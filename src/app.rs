@@ -269,6 +269,9 @@ pub struct App {
     pub unlock_file: String,
     /// Where typing lands, as a char index into the focused box (see below).
     pub caret: usize,
+    /// Plain-text password on the unlock screen. `*` flips it, the way the
+    /// browser's `*` flips the detail pane; a fresh unlock starts hidden.
+    pub unlock_reveal: bool,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
     dirty: bool,
     /* The modal entry editor. None when closed; the browser hands its keys
@@ -336,6 +339,7 @@ impl App {
             board: None,
             unlock_confirm: String::new(),
             caret: 0,
+            unlock_reveal: false,
             dirty: false,
             form: None,
             group_prompt: None,
@@ -432,6 +436,18 @@ impl App {
         }
     }
 
+    /* Flip the lock screen between bullets and the typed master password.
+       Same contract as the detail pane's `*`: the flip says so out loud, so
+       a reveal never happens silently on the one screen that guards
+       everything. Hiding deliberately says nothing — the bullets going back
+       are visible proof enough. */
+    pub fn toggle_unlock_reveal(&mut self) {
+        self.unlock_reveal = !self.unlock_reveal;
+        if self.unlock_reveal {
+            self.say("password shown  ·  * hides it");
+        }
+    }
+
     /// Wire the OS clipboard from the config timeout. Called once at startup;
     /// `None` until then so tests never touch platform clipboard state.
     pub fn set_board(&mut self, board: Board) {
@@ -517,6 +533,7 @@ impl App {
         self.unlock_password.clear();
         self.unlock_keyfile.clear();
         self.unlock_confirm.clear();
+        self.unlock_reveal = false;
         self.caret = 0;
         self.dirty = false;
         self.view = View::Unlock;
@@ -552,7 +569,7 @@ impl App {
        the vault is the only copy that survives, and it zeroizes on drop. */
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
         let Some(path) = self.db_path.clone() else {
-            self.say("no database configured  ·  sennel --help names --db");
+            self.say("no database configured  ·  run `Sennel --help` for --db");
             password.zeroize();
             return;
         };
@@ -585,6 +602,9 @@ impl App {
                 self.unlock_password.zeroize();
                 self.unlock_password.clear();
                 self.unlock_confirm.clear();
+                /* The next screen opens on bullets again: a reveal is for
+                   reading the box you are on, never a browser-side default. */
+                self.unlock_reveal = false;
                 self.unlock_field = UnlockField::Password;
                 self.caret = 0;
                 self.unlock_new = false;
@@ -594,6 +614,7 @@ impl App {
                 self.say(format!("unlocked {n} {plural}"));
             }
             Err(VaultError::WrongPassword) => {
+                self.unlock_reveal = false;
                 self.say("wrong password or key file  ·  try again");
             }
             Err(e) => self.say(format!("cannot open {}  ·  {e}", path.display())),
@@ -2307,6 +2328,28 @@ mod tests {
         assert!(app.unlock_password.is_empty());
         assert!(app.unlock_confirm.is_empty());
         assert_eq!(app.stage, "unlocked 0 entries");
+    }
+
+    /* A reveal stops at the door: unlocking (or failing to) puts the next
+       lock screen back on bullets, so a plain-text peek never becomes the
+       default view of the password that follows. */
+    #[test]
+    fn reveal_resets_after_unlock_attempts() {
+        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        app.unlock_password = "correct horse".into();
+        app.toggle_unlock_reveal();
+        assert!(app.unlock_reveal);
+        let mut pw = b"correct horse".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser);
+        assert!(!app.unlock_reveal, "reveal followed the unlock out");
+
+        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        app.toggle_unlock_reveal();
+        let mut pw = b"wrong guess".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Unlock);
+        assert!(!app.unlock_reveal, "failed attempt left the box bare");
     }
 
     /* A wrong password keeps the lock and says the next step, and still wipes

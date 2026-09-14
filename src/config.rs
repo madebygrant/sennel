@@ -8,7 +8,7 @@ use serde::Deserialize;
 #[derive(Parser, Debug)]
 #[command(name = "sennel", version, about, long_about = None)]
 pub struct Cli {
-    /// Path to the .kdbx database. Omit it and sennel asks for one.
+    /// Path to the .kdbx database. Omit it and Sennel asks for one.
     #[arg(long, value_name = "PATH")]
     pub db: Option<String>,
 
@@ -48,7 +48,7 @@ pub struct FileConfig {
 }
 
 impl FileConfig {
-    /// `required` when the path came from --config: naming a file sennel
+    /// `required` when the path came from --config: naming a file Sennel
     /// then ignores is worse than no config at all, so only the default
     /// location is allowed to be absent.
     pub fn load(path: &std::path::Path, required: bool) -> Result<Self> {
@@ -59,7 +59,7 @@ impl FileConfig {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        /* A typo'd key silently ignored would look like sennel disregarding
+        /* A typo'd key silently ignored would look like Sennel disregarding
            the setting, so deny_unknown_fields turns it into a startup error. */
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }

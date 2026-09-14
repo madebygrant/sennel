@@ -34,7 +34,7 @@ fn main() -> Result<()> {
        or in CI, crossterm's raw mode fails with an OS error about a device
        that tells nobody which of the two is wrong or what does work here. */
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
-        anyhow::bail!("sennel needs a terminal · --check works without one");
+        anyhow::bail!("Sennel needs a terminal · --check works without one");
     }
 
     let mut terminal = ratatui::init();
@@ -56,11 +56,11 @@ fn main() -> Result<()> {
 }
 
 /* The first thing to run on a new machine and the first thing to ask for in
-   a bug report: what sennel read, and whether the clipboard it copies to is
+   a bug report: what Sennel read, and whether the clipboard it copies to is
    there. Exits non-zero when copying could never work, so a script can act
    on it. */
 fn check(cfg: &Config) -> Result<()> {
-    println!("sennel {}", env!("CARGO_PKG_VERSION"));
+    println!("Sennel {}", env!("CARGO_PKG_VERSION"));
     println!(
         "config    {}",
         cfg.config_file
@@ -365,6 +365,9 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_unlock_field(false),
         KeyCode::Char('u') if ctrl => app.unlock_clear(),
         KeyCode::Char('w') if ctrl => app.unlock_kill_word(),
+        /* `*` flips the password box to plain text, matching the browser's
+           detail-pane key; the same key, the same reveal contract. */
+        KeyCode::Char('*') => app.toggle_unlock_reveal(),
         KeyCode::Left if !ctrl => app.unlock_move(false),
         KeyCode::Right if !ctrl => app.unlock_move(true),
         KeyCode::Home if !ctrl => app.unlock_end(false),
@@ -498,6 +501,20 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
         assert!(!app.show_help, "h opened the overlay over the lock");
         assert_eq!(app.unlock_password, "qh");
+    }
+
+    /* `*` on the lock flips the password box to plain text like the browser's
+       toggle does, and `q` still types — the reveal is one key of many. */
+    #[test]
+    fn star_reveals_on_the_lock_screen() {
+        let mut app = App::new();
+        handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('3'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
+        assert!(app.unlock_reveal, "* typed instead of revealing");
+        assert_eq!(app.unlock_password, "s3");
+        handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
+        assert!(!app.unlock_reveal, "second * did not re-mask");
     }
 
     /* Enter on the lock with no database configured says what to do rather

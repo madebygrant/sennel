@@ -2,7 +2,7 @@
    model (HashMap groups/entries keyed by stable NodeIds, ProtectedStrings
    that zeroize on drop). No parallel model: a second Group/Entry pair would
    need a mapping layer in Wave 2 and every op implemented twice. This module
-   adds only what sennel needs on top: guarded moves/deletes, paths, and
+   adds only what Sennel needs on top: guarded moves/deletes, paths, and
    ordered child views for the panes. File IO lives here too in Wave 2. */
 
 use std::path::{Path, PathBuf};
@@ -383,7 +383,7 @@ impl Vault {
         }
         entry.url = url.to_string();
         entry.notes = ProtectedString::new_protected(notes);
-        /* The editor is the only thing that mutates an entry in sennel, so
+        /* The editor is the only thing that mutates an entry in Sennel, so
            this is where the modification stamp moves forward (Wave 5.3's
            `updated` sort reads it). */
         entry.last_modification_time = DateInstant::now();
