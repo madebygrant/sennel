@@ -1,4 +1,4 @@
-# sennel-tui
+# Sennel
 
 A KeePass-style password manager for the terminal, built with [ratatui](https://github.com/ratatui/ratatui).
 Reads and writes real KDBX4 databases (KeePass compatible), gives every secret one-key clipboard
@@ -9,16 +9,29 @@ macOS and Linux only.
 ## Quick start
 
 ```sh
-sennel-tui                     # opens ~/.config/sennel/config.toml's db, or asks for one
-sennel-tui --db vault.kdbx     # open a specific vault (created on first unlock)
-sennel-tui --check             # print what the app sees: config, paths, clipboard backend
-sennel-tui --list --db v.kdbx  # group and entry inventory (titles only, no secrets)
+sennel                     # opens ~/.config/sennel/config.toml's db, or asks for one
+sennel --db vault.kdbx     # open a specific vault (created on first unlock)
+sennel --check             # print what the app sees: config, paths, clipboard backend
+sennel --list --db v.kdbx  # group and entry inventory (titles only, no secrets)
 ```
+
+Run without installing: `cargo run --release -- --db vault.kdbx`.
+Install onto your PATH: `cargo install --path .`, then just `sennel`.
+
+## The unlock screen
+
+The first box is the vault file, so one session can point at any vault: type (or accept the
+prefilled from config) a path, `tab` to the password box, `enter` to unlock. The path field is
+editable every time the app locks — idle auto-lock drops the secrets and the editor state, not the
+vault path, so switching vaults after a lock is `esc`, edit the file box, `enter`. A path that
+doesn't exist yet is a new database: confirm, then set the password twice.
 
 ## Keys
 
 | Key             | Action                                        |
 | --------------- | --------------------------------------------- |
+| `tab ↑ ↓`       | move between boxes on prompt screens (unlock, forms) |
+| `enter`         | unlock / save the form                        |
 | `j k ↑ ↓`       | move within the pane                          |
 | `Tab`           | groups pane ↔ entries pane                    |
 | `enter`         | open group / focus detail                     |
@@ -48,7 +61,7 @@ has a visible home in the `h` overlay.
 - **Owner-only files.** Saves are atomic (write to a sibling temp file, then rename) and
   `chmod 0600`, so the vault is readable only by your user.
 - **Clipboard auto-clear.** Copies are wiped after a configurable interval (default 15s). A second
-  copy re-arms the timer instead of being wiped early; overwriting happens even if sennel exits.
+  copy re-arms the timer instead of being wiped early; overwriting happens even if Sennel exits.
 - **Idle auto-lock.** After the idle timeout (default 300s, `0` disables) the vault is locked and
   the in-memory secrets are zeroized.
 - **Zeroized in memory.** Password fields, retained database keys, and undo snapshots all wipe on
