@@ -39,9 +39,54 @@ pub enum UnlockField {
 
 /* A question the UI asks on its own account. Nothing is blocked on the
    answer, so it carries no reply channel: the session carries on behind it. */
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/* Copy was dropped when deletes joined: a delete confirm names the entry it
+   is about, and the title text cannot be copied around a String. */
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Confirm {
     Quit,
+    /* The title travels with the id for the prompt line. It is a display
+       copy of a name field, never the password: the confirm popup must stay
+       safe to screenshot with the vault unlocked. */
+    DeleteEntry { id: NodeId, title: String },
+}
+
+/// Which box of the entry form the keys are typing into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum FormField {
+    #[default]
+    Title,
+    Username,
+    Password,
+    Url,
+    Notes,
+}
+
+/* Add or edit. The edit carries the entry id so submit writes to the row the
+   form was opened from, not to wherever the cursor has drifted since. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormKind {
+    Add,
+    Edit(NodeId),
+}
+
+/* The modal entry editor. Values are plain Strings here: the password leaves
+   ProtectedString only while the user is literally looking at it, and the
+   form is closed (or the app exits) in every other state. */
+pub struct Form {
+    pub kind: FormKind,
+    pub field: FormField,
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    pub url: String,
+    pub notes: String,
+    /// Char index into the focused box, same rule as the unlock caret.
+    pub caret: usize,
+    /* Empty means keep — but only while untouched. A user who opened edit,
+       typed over the password, then backspaced it empty meant to clear it,
+       not to keep: so one keystroke in the box flips this latch, and submit
+       reads it rather than guessing from emptiness. */
+    pub password_touched: bool,
 }
 
 /* A flash is timed by its length: four fixed seconds fits "saved" and not a
@@ -123,6 +168,9 @@ pub struct App {
     pub caret: usize,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
     dirty: bool,
+    /* The modal entry editor. None when closed; the browser hands its keys
+       over while Some, the way the unlock screen does. */
+    pub form: Option<Form>,
     /* Idle auto-lock. `None` is off. The deadline is checked once per frame
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
@@ -162,6 +210,7 @@ impl App {
             unlock_confirm: String::new(),
             caret: 0,
             dirty: false,
+            form: None,
             lock_after: None,
             last_activity: Instant::now(),
         }
@@ -700,6 +749,323 @@ impl App {
         };
         self.snap();
     }
+
+    /* ---- Entry form (Wave 5.1) ---- */
+
+    /* Autosave after every mutation. Dirty is set before the attempt and
+       cleared on success, so a failed save leaves the quit guard armed and
+       the flash names the problem instead of pretending nothing happened.
+       An in-memory vault (tests) has no path: it cannot save, so it stays
+       dirty rather than silently discarding. */
+    pub fn persist(&mut self) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        if vault.path().is_none() {
+            self.dirty = true;
+            return;
+        }
+        match vault.save() {
+            Ok(()) => self.dirty = false,
+            Err(e) => {
+                self.dirty = true;
+                self.say(format!("save failed  ·  {e} · kept in memory"));
+            }
+        }
+    }
+
+    /* `a` on the browser: a blank form aimed at the cursor group. Requires a
+       group because an entry must live somewhere, and the root always exists
+       once a vault is open. */
+    pub fn open_add_form(&mut self) {
+        if self.vault.is_none() || self.group_cursor.is_none() {
+            self.say("no vault open to add to");
+            return;
+        }
+        self.form = Some(Form {
+            kind: FormKind::Add,
+            field: FormField::Title,
+            title: String::new(),
+            username: String::new(),
+            password: String::new(),
+            url: String::new(),
+            notes: String::new(),
+            caret: 0,
+            password_touched: false,
+        });
+    }
+
+    /* `e` on an entry: prefilled boxes. The password box starts empty and
+       untouched — the one case where "empty" means keep — so the secret is
+       not even in the form buffer until the user asks for it. */
+    pub fn open_edit_form(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            self.say("no entry here to edit");
+            return;
+        };
+        let id = entry.id;
+        self.form = Some(Form {
+            kind: FormKind::Edit(id),
+            field: FormField::Title,
+            title: entry.title.clone(),
+            username: entry.username.as_str().to_string(),
+            password: String::new(),
+            url: entry.url.clone(),
+            notes: entry.notes.as_str().to_string(),
+            caret: entry.title.chars().count(),
+            password_touched: false,
+        });
+    }
+
+    /* `D` on an entry: ask first. The confirm carries the title for the
+       prompt so the answer is about a row the user can see, not a blind id. */
+    pub fn ask_delete_entry(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            self.say("no entry here to delete");
+            return;
+        };
+        self.confirm = Some(Confirm::DeleteEntry {
+            id: entry.id,
+            title: entry.title.clone(),
+        });
+    }
+
+    /// The yes side of the delete confirm. Kept off the key handler so the
+    /// confirm popup and the delete itself cannot drift apart.
+    pub fn confirm_delete_entry(&mut self, id: NodeId) {
+        let Some(vault) = &mut self.vault else {
+            return;
+        };
+        match vault.delete_entry(&id) {
+            Ok(()) => {
+                self.entry_cursor = None;
+                self.snap();
+                self.persist();
+                self.say("entry deleted");
+            }
+            Err(e) => self.say(format!("cannot delete  ·  {e}")),
+        }
+    }
+
+    /// Tab (or shift-Tab) through the five form boxes, wrapping.
+    pub fn next_form_field(&mut self, forward: bool) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let order = [
+            FormField::Title,
+            FormField::Username,
+            FormField::Password,
+            FormField::Url,
+            FormField::Notes,
+        ];
+        let at = order.iter().position(|f| *f == form.field).unwrap_or(0);
+        let n = order.len();
+        form.field = order[(at + if forward { 1 } else { n - 1 }) % n];
+        // Behind the text, where an edit to a prefilled value starts.
+        form.caret = form_field_value(form, form.field).chars().count();
+    }
+
+    /// The box the form keys are typing into.
+    pub fn active_form_value(&mut self) -> &mut String {
+        let form = self
+            .form
+            .as_mut()
+            .expect("form keys only reach an open form");
+        let field = form.field;
+        form_field_value(form, field)
+    }
+
+    fn form_caret_byte(&self) -> usize {
+        let form = self.form.as_ref().expect("form keys only reach an open form");
+        let value = form_field_value_ref(form, form.field);
+        value
+            .char_indices()
+            .nth(form.caret)
+            .map_or(value.len(), |(at, _)| at)
+    }
+
+    pub fn form_insert(&mut self, c: char) {
+        let at = self.form_caret_byte();
+        let value = self.active_form_value();
+        value.insert(at, c);
+        let form = self.form.as_mut().expect("just inserted");
+        form.caret += 1;
+        if form.field == FormField::Password {
+            form.password_touched = true;
+        }
+    }
+
+    pub fn form_backspace(&mut self) {
+        let caret = match &self.form {
+            Some(f) if f.caret > 0 => f.caret,
+            _ => return,
+        };
+        let at = self.form_caret_byte();
+        let value = self.active_form_value();
+        let prev = value[..at]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i);
+        value.remove(prev);
+        let form = self.form.as_mut().expect("backspacing");
+        form.caret = caret - 1;
+        if form.field == FormField::Password {
+            form.password_touched = true;
+        }
+    }
+
+    pub fn form_delete(&mut self) {
+        let at = self.form_caret_byte();
+        let has_tail = self
+            .active_form_value()
+            .get(at..)
+            .is_some_and(|rest| !rest.is_empty());
+        if has_tail {
+            self.active_form_value().remove(at);
+            let form = self.form.as_mut().expect("deleting");
+            if form.field == FormField::Password {
+                form.password_touched = true;
+            }
+        }
+    }
+
+    pub fn form_move(&mut self, right: bool) {
+        let len = self.active_form_value().chars().count();
+        let form = self.form.as_mut().expect("moving");
+        form.caret = if right {
+            (form.caret + 1).min(len)
+        } else {
+            form.caret.saturating_sub(1)
+        };
+    }
+
+    pub fn form_end(&mut self, end: bool) {
+        let len = self.active_form_value().chars().count();
+        let form = self.form.as_mut().expect("jumping");
+        form.caret = if end { len } else { 0 };
+    }
+
+    /// Clear the focused box.
+    pub fn form_clear(&mut self) {
+        self.active_form_value().clear();
+        let form = self.form.as_mut().expect("clearing");
+        form.caret = 0;
+        if form.field == FormField::Password {
+            form.password_touched = true;
+        }
+    }
+
+    /* The same word delete the unlock box takes. Deletes back to the word
+       start, keeping whatever follows the caret. */
+    pub fn form_kill_word(&mut self) {
+        let at = self.form_caret_byte();
+        let start = {
+            let value = self.active_form_value();
+            let before = value[..at].trim_end();
+            before.rfind(' ').map_or(0, |i| i + 1)
+        };
+        self.active_form_value().drain(start..at);
+        let form = self.form.as_mut().expect("killing a word");
+        form.caret = form_field_value_ref(form, form.field)[..start].chars().count();
+        if form.field == FormField::Password {
+            form.password_touched = true;
+        }
+    }
+
+    /* Enter on the form: write through to the vault and autosave. The title
+       is the only must — a password manager row without a name is unreadable
+       in every list — and the flash names the box rather than failing
+       silently. */
+    pub fn submit_form(&mut self) {
+        let Some(form) = self.form.take() else {
+            return;
+        };
+        if form.title.trim().is_empty() {
+            self.say("a title is the only must  ·  the form stays open");
+            // Reopen the same form on the title box rather than losing input.
+            self.form = Some(form);
+            self.form.as_mut().unwrap().field = FormField::Title;
+            self.form.as_mut().unwrap().caret =
+                self.form.as_ref().unwrap().title.chars().count();
+            return;
+        }
+        let result = match form.kind {
+            FormKind::Add => {
+                let group = self.group_cursor;
+                let vault = self.vault.as_mut().expect("add form needs a vault");
+                let Some(group) = group else {
+                    self.say("no group selected  ·  the form stays open");
+                    self.form = Some(form);
+                    return;
+                };
+                vault
+                    .create_entry(&group, &form.title, &form.username, &form.password, &form.url, &form.notes)
+                    .map(Some)
+            }
+            FormKind::Edit(id) => {
+                /* Empty and untouched keeps the stored password; anything
+                   typed — including backspacing to empty — writes what the
+                   box now holds. */
+                let password = if form.password_touched {
+                    Some(form.password.as_str())
+                } else {
+                    None
+                };
+                let vault = self.vault.as_mut().expect("edit form needs a vault");
+                vault
+                    .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
+                    .map(|()| None)
+            }
+        };
+        match result {
+            Ok(new_id) => {
+                if let Some(id) = new_id {
+                    self.entry_cursor = Some(id);
+                }
+                self.snap();
+                self.persist();
+                self.say(match form.kind {
+                    FormKind::Add => "entry added",
+                    FormKind::Edit(_) => "entry saved",
+                });
+            }
+            Err(e) => {
+                self.say(format!("cannot save  ·  {e}"));
+                self.form = Some(form);
+            }
+        }
+    }
+
+    /// Esc on the form: throw away the boxes, no vault change, no autosave.
+    pub fn cancel_form(&mut self) {
+        if self.form.take().is_some() {
+            self.say("form closed  ·  nothing changed");
+        }
+    }
+}
+
+/* Mutable access to one form box by field. Free function rather than a
+   method so the borrow of `form` stays local and the caret math above can
+   read another field's value without fighting the borrow checker. */
+fn form_field_value(form: &mut Form, field: FormField) -> &mut String {
+    match field {
+        FormField::Title => &mut form.title,
+        FormField::Username => &mut form.username,
+        FormField::Password => &mut form.password,
+        FormField::Url => &mut form.url,
+        FormField::Notes => &mut form.notes,
+    }
+}
+
+fn form_field_value_ref(form: &Form, field: FormField) -> &str {
+    match field {
+        FormField::Title => &form.title,
+        FormField::Username => &form.username,
+        FormField::Password => &form.password,
+        FormField::Url => &form.url,
+        FormField::Notes => &form.notes,
+    }
 }
 
 #[cfg(test)]
@@ -1141,5 +1507,162 @@ mod tests {
         assert!(app.stage.contains("shown"), "{}", app.stage);
         app.toggle_password();
         assert!(!app.show_password);
+    }
+
+    /* ---- Wave 5.1: entry form ---- */
+
+    /* `a` on an open vault opens the form; Enter writes the entry into the
+       cursor group, moves the entry cursor onto it, and the autosave marks
+       an in-memory vault dirty (it has no path to save to). */
+    #[test]
+    fn add_form_creates_the_entry_on_enter() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_add_form();
+        assert!(app.form.is_some());
+        for c in "savings".chars() {
+            app.form_insert(c);
+        }
+        app.next_form_field(true); // username
+        for c in "me".chars() {
+            app.form_insert(c);
+        }
+        app.next_form_field(true); // password
+        for c in "pw".chars() {
+            app.form_insert(c);
+        }
+        app.submit_form();
+        assert!(app.form.is_none());
+        let bank = app.group_cursor.unwrap();
+        let rows = app.entry_rows();
+        assert_eq!(rows.len(), 2, "the new entry did not land");
+        let made = app.vault.as_ref().unwrap().get_entry(&rows[1]).unwrap();
+        assert_eq!(made.title, "savings");
+        assert_eq!(made.username.as_str(), "me");
+        assert_eq!(made.password.as_str(), "pw");
+        assert_eq!(app.entry_cursor, Some(rows[1]), "cursor stayed off the new row");
+        assert!(app.working(), "in-memory add left no dirty flag");
+        assert_eq!(app.stage, "entry added");
+        let _ = bank;
+    }
+
+    /* An edit that never touched the password box keeps the stored secret:
+       the box starts empty so the secret is not even copied into the form. */
+    #[test]
+    fn edit_with_untouched_password_keeps_the_secret() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        app.next_form_field(true);
+        app.next_form_field(true); // password box, empty
+        app.next_form_field(true);
+        app.next_form_field(true); // notes
+        for c in "note".chars() {
+            app.form_insert(c);
+        }
+        app.submit_form();
+        let rows = app.entry_rows();
+        let kept = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
+        assert_eq!(kept.password.as_str(), "p", "empty edit box overwrote the secret");
+        assert_eq!(kept.notes.as_str(), "note");
+    }
+
+    /* Typing in the password box latches: backspacing back to empty writes
+       empty, because a user who cleared the box meant to clear it. */
+    #[test]
+    fn edit_with_touched_password_writes_what_the_box_holds() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        app.next_form_field(true);
+        app.next_form_field(true); // password
+        app.form_insert('x');
+        app.form_backspace(); // empty again, but touched
+        app.submit_form();
+        let rows = app.entry_rows();
+        let cleared = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
+        assert_eq!(cleared.password.as_str(), "", "backspace-to-empty did not clear");
+    }
+
+    /* Esc throws the form away: no vault change, no autosave, no dirty flag. */
+    #[test]
+    fn cancelling_the_form_changes_nothing() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        for c in "renamed".chars() {
+            app.form_insert(c);
+        }
+        app.cancel_form();
+        assert!(app.form.is_none());
+        assert!(!app.working(), "a cancelled form dirtied the vault");
+        let rows = app.entry_rows();
+        assert_eq!(app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap().title, "checking");
+    }
+
+    /* A title is the only must: submit without one reopens the form on the
+       title box instead of writing an unreadable row. */
+    #[test]
+    fn a_titleless_form_stays_open() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_add_form();
+        app.submit_form();
+        assert!(app.form.is_some(), "empty form was accepted");
+        assert!(app.stage.contains("title"), "{}", app.stage);
+        assert_eq!(app.entry_rows().len(), 1, "a nameless row was written");
+    }
+
+    /* D asks first; y deletes, snaps the cursor somewhere real, and the
+       autosave flags an in-memory vault dirty. */
+    #[test]
+    fn delete_asks_then_y_deletes() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.ask_delete_entry();
+        assert!(app.confirm.is_some(), "delete went without asking");
+        let Confirm::DeleteEntry { id, title } = app.confirm.clone().unwrap() else {
+            panic!("wrong question raised");
+        };
+        assert_eq!(title, "checking");
+        // The confirm handler takes the question before acting on the yes.
+        app.confirm = None;
+        app.confirm_delete_entry(id);
+        assert!(app.confirm.is_none());
+        assert!(app.entry_rows().is_empty(), "the row survived the yes");
+        assert!(app.working(), "in-memory delete left no dirty flag");
+    }
+
+    /* Esc on the delete confirm keeps the row: no is the safe answer. */
+    #[test]
+    fn delete_confirm_dismissed_deletes_nothing() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.ask_delete_entry();
+        app.confirm = None; // what Esc leaves behind
+        assert_eq!(app.entry_rows().len(), 1);
+    }
+
+    /* Autosave against a real file: submit writes through, so a reopen sees
+       the new entry without a manual save step. */
+    #[test]
+    fn submit_autosaves_to_disk() {
+        let tmp = temp_path("autosave");
+        let mut seed = Vault::new();
+        seed.save_as(&tmp.0, b"pw", None).unwrap();
+        let mut app = App::new();
+        app.set_db_path(Some(tmp.0.clone()));
+        let mut pw = b"pw".to_vec();
+        app.try_unlock(&mut pw, None);
+        app.open_add_form();
+        for c in "bankcard".chars() {
+            app.form_insert(c);
+        }
+        app.submit_form();
+        assert!(!app.working(), "autosave left the vault dirty");
+        let reopened = Vault::open(&tmp.0, b"pw", None).unwrap();
+        let root = reopened.root_id();
+        assert_eq!(reopened.entries_in(&root).len(), 1);
+        assert_eq!(reopened.entries_in(&root)[0].title, "bankcard");
     }
 }

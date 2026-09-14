@@ -8,8 +8,8 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, Pane, View};
-use crate::theme::{self, CREAM, DIM, GOLD, RULE, SURFACE, TEAL};
+use crate::app::{self, App, Confirm, FormField, FormKind, Pane, View};
+use crate::theme::{self, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
    takes none, so a column padded to a character count steps out of line by
@@ -42,8 +42,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(frame, app);
     }
-    if let Some(what) = app.confirm {
+    if let Some(what) = &app.confirm {
         draw_confirm(frame, app, what);
+    }
+    if app.form.is_some() {
+        draw_form(frame, app);
     }
     recolour(frame);
 }
@@ -484,22 +487,92 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
 /* Its own question rather than a prompt: no vault is blocked on the answer,
    so it carries no reply channel. Only a named key confirms, so an
    unrecognised key must not be an accidental yes. */
-fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
-    let Confirm::Quit = what;
+fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
     let _ = app;
+    let (title, question, yes) = match what {
+        Confirm::Quit => (
+            "quit?",
+            " unsaved changes would be lost".to_string(),
+            Span::styled(" q  quit", Style::new().fg(GOLD)),
+        ),
+        /* The title travels in the confirm so the answer is about a row the
+           user can see. A name is user-chosen text, never a secret. */
+        Confirm::DeleteEntry { title, .. } => (
+            "delete?",
+            format!(" delete entry “{title}”?  this cannot be undone"),
+            Span::styled(" y  delete", Style::new().fg(RED)),
+        ),
+    };
     let lines = vec![
-        Line::from(Span::styled(
-            " unsaved changes would be lost",
-            Style::new().fg(CREAM),
-        )),
+        Line::from(Span::styled(question, Style::new().fg(CREAM))),
+        Line::default(),
+        Line::from(vec![yes, dim("     esc  keep going")]),
+    ];
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    popup(frame, title, lines, width);
+}
+
+/* The modal entry editor: five labelled boxes, the caret block only in the
+   focused one. Shape mirrors the unlock screen so muscle memory carries over.
+   The password box masks as bullets and, on edit, advertises that empty
+   keeps — the one box where emptiness has a meaning. */
+fn draw_form(frame: &mut Frame, app: &App) {
+    let Some(form) = &app.form else {
+        return;
+    };
+    let split_at_char = |text: &str, caret: usize| -> (String, String) {
+        let mut first = text.chars();
+        let head: String = first.by_ref().take(caret).collect();
+        (head, first.collect())
+    };
+    let row = |label: &'static str, field: FormField, value: &str| -> Line<'_> {
+        let focused = form.field == field;
+        let shown = match field {
+            /* The edit password box starts empty on purpose; typed content
+               masks. The hint only shows while the box holds nothing. */
+            FormField::Password if value.is_empty() && !form.password_touched => {
+                "(leave empty to keep)".to_string()
+            }
+            FormField::Password => "•".repeat(value.chars().count()),
+            _ => value.to_string(),
+        };
+        let (head, tail) = split_at_char(&shown, if focused { form.caret } else { 0 });
+        let style = if focused {
+            Style::new().fg(CREAM)
+        } else {
+            Style::new().fg(DIM)
+        };
+        Line::from(vec![
+            Span::styled(format!(" {label:<9}"), style),
+            Span::styled(head, style),
+            /* The block caret sits between the split halves; an unfocused
+               box draws none, so the eye finds the live box first. */
+            Span::styled(if focused { "█" } else { "" }, style),
+            Span::styled(tail, style),
+        ])
+    };
+    let lines = vec![
+        row("title", FormField::Title, &form.title),
+        row("username", FormField::Username, &form.username),
+        row("password", FormField::Password, &form.password),
+        row("url", FormField::Url, &form.url),
+        row("notes", FormField::Notes, &form.notes),
         Line::default(),
         Line::from(vec![
-            Span::styled(" q  quit", Style::new().fg(GOLD)),
-            dim("     esc  keep going"),
+            Span::styled(" enter", Style::new().fg(GOLD)),
+            dim(" save   "),
+            Span::styled("tab", Style::new().fg(GOLD)),
+            dim(" next box   "),
+            Span::styled("esc", Style::new().fg(GOLD)),
+            dim(" throw away"),
         ]),
     ];
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
-    popup(frame, "quit?", lines, width);
+    let title = match form.kind {
+        FormKind::Add => "new entry",
+        FormKind::Edit(_) => "edit entry",
+    };
+    popup(frame, title, lines, width);
 }
 
 /* One entry per line in three aligned columns. Only live keys: a row naming
@@ -518,15 +591,13 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ]
     } else {
         vec![
-            ("move", "j k  ↑ ↓", "wave 1 gives these a list"),
+            ("move", "j k  ↑ ↓", "through the panes"),
             ("quit", "q  ^c", ""),
         ]
     };
     if app.view == View::Browser {
-        rows.insert(
-            1,
-            ("copy", "y p U", "username, password, url"),
-        );
+        rows.insert(1, ("copy", "y p U", "username, password, url"));
+        rows.insert(2, ("edit", "a e D", "add, edit, delete entry"));
     }
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
@@ -694,5 +765,64 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("keys"), "{joined}");
         assert!(joined.contains("sennel"), "{joined}");
+    }
+
+    /* The edit form masks the password box and advertises that empty keeps;
+       the stored secret never reaches the popup buffer. */
+    #[test]
+    fn the_form_masks_the_password_and_names_the_keep_rule() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.open_edit_form();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("edit entry"), "{joined}");
+        assert!(joined.contains("leave empty to keep"), "{joined}");
+        assert!(!joined.contains("s3cret-pw"), "the form leaked the stored secret");
+        // Typed content masks as bullets, one per char. Two Tabs land in
+        // the password box; the caret jumps to the end of an empty box.
+        app.next_form_field(true);
+        app.next_form_field(true);
+        app.form_insert('n');
+        app.form_insert('e');
+        app.form_insert('w');
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("•••"), "{joined}");
+        assert!(!joined.contains("new"), "the form showed the password in clear");
+    }
+
+    /* The delete confirm names the row it is about, so a yes is an answer
+       to a visible question, not a blind id. */
+    #[test]
+    fn the_delete_confirm_names_the_entry() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.ask_delete_entry();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("delete entry"), "{joined}");
+        assert!(joined.contains("checking"), "{joined}");
+        assert!(joined.contains("cannot be undone"), "{joined}");
     }
 }

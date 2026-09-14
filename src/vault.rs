@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use keepass_rs::{
-    open_database, save_database, CompositeKey, Database, DatabaseError, DatabaseVersion, Entry,
-    Group, NodeId, ProtectedString,
+    open_database, save_database, CompositeKey, Database, DatabaseError, DatabaseVersion,
+    DateInstant, Entry, Group, NodeId, ProtectedString,
 };
 
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
@@ -366,6 +366,10 @@ impl Vault {
         }
         entry.url = url.to_string();
         entry.notes = ProtectedString::new_protected(notes);
+        /* The editor is the only thing that mutates an entry in sennel, so
+           this is where the modification stamp moves forward (Wave 5.3's
+           `updated` sort reads it). */
+        entry.last_modification_time = DateInstant::now();
         self.db.mark_modified();
         Ok(())
     }

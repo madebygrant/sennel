@@ -13,7 +13,7 @@ use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use zeroize::Zeroize;
 
-use app::App;
+use app::{App, Confirm};
 use crate::clipboard::Board;
 use config::{Cli, Config};
 
@@ -110,6 +110,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_confirm_key(app, code, mods);
         return;
     }
+    /* The entry form is modal the same way: typing lands in the boxes and
+       the browser behind it must not also act on the key. */
+    if app.form.is_some() {
+        handle_form_key(app, code, mods);
+        return;
+    }
     /* The overlay swallows the next key rather than acting on it: anything
        else makes dismissing it a guess about what the key also did. */
     if app.show_help && !matches!(code, KeyCode::Char('q')) {
@@ -142,9 +148,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
  /* The vault's own keys: movement first, since a stuck cursor reads as a
-    dead tool. Keys owned by later waves (e/D edit, / search) say which wave
-    they belong to rather than going silent: a key that goes silent reads
-    as a broken key. */
+    dead tool. Keys owned by later waves (/ search) say which wave they
+    belong to rather than going silent: a key that goes silent reads as a
+    broken key. */
 fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -167,10 +173,40 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('y') => app.copy_username(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
+        /* Case carries meaning: `a` adds, `A` names a group (wave 5), so
+           the edit keys stay lowercase-shifted apart on purpose. */
+        KeyCode::Char('a') => app.open_add_form(),
+        KeyCode::Char('e') => app.open_edit_form(),
+        KeyCode::Char('D') => app.ask_delete_entry(),
         KeyCode::Char('/') => app.say("search arrives in wave 6"),
-        KeyCode::Char('e') | KeyCode::Char('D') | KeyCode::Char('a') => {
-            app.say("editing arrives in wave 5")
-        }
+        _ => {}
+    }
+}
+
+/* The form owns every printable key while it is open — `q` types a letter,
+   `h` types a letter — so only named chords and Enter/Esc are commands. The
+   shape mirrors the unlock boxes: Tab cycles, ^u/^w clear, Enter submits. */
+fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        /* ^c asks the quit guard rather than dying mid-edit: the form may
+           hold changes the autosave never got to make. */
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
+        KeyCode::Esc => app.cancel_form(),
+        KeyCode::Tab | KeyCode::Down if !ctrl => app.next_form_field(true),
+        KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_form_field(false),
+        KeyCode::Char('u') if ctrl => app.form_clear(),
+        KeyCode::Char('w') if ctrl => app.form_kill_word(),
+        KeyCode::Left if !ctrl => app.form_move(false),
+        KeyCode::Right if !ctrl => app.form_move(true),
+        KeyCode::Home if !ctrl => app.form_end(false),
+        KeyCode::End if !ctrl => app.form_end(true),
+        KeyCode::Char('a') if ctrl => app.form_end(false),
+        KeyCode::Char('e') if ctrl => app.form_end(true),
+        KeyCode::Delete if !ctrl => app.form_delete(),
+        KeyCode::Backspace => app.form_backspace(),
+        KeyCode::Enter => app.submit_form(),
+        KeyCode::Char(c) if !ctrl => app.form_insert(c),
         _ => {}
     }
 }
@@ -246,9 +282,15 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         code,
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('q') | KeyCode::Enter
     ) || (matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL));
-    app.confirm = None;
+    let question = app.confirm.take();
     if yes {
-        app.quit = true;
+        match question {
+            Some(Confirm::Quit) => app.quit = true,
+            /* The delete acts at once: the popup said what it was about, so
+               a yes needs no second popup between answer and effect. */
+            Some(Confirm::DeleteEntry { id, .. }) => app.confirm_delete_entry(id),
+            None => {}
+        }
     }
 }
 
@@ -377,7 +419,8 @@ mod tests {
     }
 
     /* Keys owned by later waves report their wave: silence reads as a
-       broken key. */
+       broken key. `e` is live now (wave 5), so on the entry-less root it
+       names the miss instead of opening a form on nothing. */
     #[test]
     fn future_keys_name_their_wave() {
         /* One app per key: the first flash is still up when the second key
@@ -387,6 +430,52 @@ mod tests {
         assert!(app.stage.contains("wave 6"), "{}", app.stage);
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
-        assert!(app.stage.contains("wave 5"), "{}", app.stage);
+        assert!(app.stage.contains("no entry"), "{}", app.stage);
+    }
+
+    /* The form is modal: `a` opens it, `q` types a letter rather than
+       quitting, Enter writes the row into the cursor group. */
+    #[test]
+    fn a_opens_the_form_and_typing_lands_in_it() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(app.form.is_some(), "a did not open the form");
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit from inside the form");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.form.is_none(), "enter did not submit");
+        let rows = app.entry_rows();
+        assert_eq!(rows.len(), 3, "the typed row was not added");
+        assert_eq!(
+            app.vault.as_ref().unwrap().get_entry(&rows[2]).unwrap().title,
+            "q"
+        );
+    }
+
+    /* D asks, y answers, the row is gone. The full loop through the real
+       key handler, not the app method alone. */
+    #[test]
+    fn d_asks_and_y_deletes() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('D'), KeyModifiers::NONE);
+        assert!(app.confirm.is_some(), "D deleted without asking");
+        handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        // Banks held two rows; one delete leaves the other intact.
+        assert_eq!(app.entry_rows().len(), 1, "y deleted the wrong number of rows");
+        assert!(app.confirm.is_none(), "y left the question open");
+    }
+
+    /* Esc on the form throws it away and returns the keys to the browser. */
+    #[test]
+    fn esc_closes_the_form_without_writing() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.form.is_none());
+        assert_eq!(app.entry_rows().len(), 2, "esc wrote the row anyway");
     }
 }
