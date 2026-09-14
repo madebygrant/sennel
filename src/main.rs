@@ -1,6 +1,7 @@
 mod app;
 mod clipboard;
 mod config;
+mod generator;
 mod search;
 mod theme;
 mod ui;

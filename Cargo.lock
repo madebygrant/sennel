@@ -2015,6 +2015,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "getrandom 0.2.17",
  "keepass-rs",
  "nucleo-matcher",
  "ratatui",
