@@ -408,22 +408,21 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
    only thing about it the screen may reveal. */
 fn draw_unlock(frame: &mut Frame, app: &App) {
     use crate::app::UnlockField;
-    let title = if app.db_path.is_none() {
-        "no database"
-    } else if app.unlock_new {
+    let title = if app.unlock_new && app.db_path.is_some() {
         "new database"
+    } else if app.db_path.is_none() {
+        "no database"
     } else {
         "unlock"
     };
 
     let mut rows: Vec<Line> = Vec::new();
-    match &app.db_path {
-        Some(p) => rows.push(Line::from(dim(format!(" file  {}", p.display())))),
-        /* Not an error state: the next step is a flag away, and the boxes
-           below still take an answer worth keeping once one is named. */
-        None => rows.push(Line::from(dim(" pass --db <file> or set db in the config"))),
+    if app.db_path.is_none() && !app.unlock_new {
+        rows.push(Line::from(dim(
+            " no vault yet  ·  set one in the file box below",
+        )));
+        rows.push(Line::default());
     }
-    rows.push(Line::default());
 
     /* Byte offset of a char-index caret, shared with the editor: a byte index
        lands inside a multi-byte character the moment a path has an accent in
@@ -458,6 +457,15 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             Span::styled(text, style),
         ])
     };
+    /* The file box lives on the popup itself: editing it and pressing Enter
+       re-points the session at another vault, which is how one screen serves
+       many vaults. It is display text, never a secret, so it draws plainly. */
+    rows.push(field(
+        "file",
+        &app.unlock_file,
+        UnlockField::File,
+        false,
+    ));
     rows.push(field(
         "password",
         &app.unlock_password,

@@ -36,6 +36,9 @@ pub enum UnlockField {
     Password,
     KeyFile,
     Confirm,
+    /// The database-path box. Typed as a plain string and applied on Enter,
+    /// so one session can hop between vault files without restarting.
+    File,
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -261,6 +264,9 @@ pub struct App {
     pub unlock_password: String,
     pub unlock_keyfile: String,
     pub unlock_confirm: String,
+    /// The typed vault-file path. Prefilled from the config once; edits here
+    /// stay across auto-locks, so switching vaults is a Tab away.
+    pub unlock_file: String,
     /// Where typing lands, as a char index into the focused box (see below).
     pub caret: usize,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
@@ -326,6 +332,7 @@ impl App {
             unlock_field: UnlockField::Password,
             unlock_password: String::new(),
             unlock_keyfile: String::new(),
+            unlock_file: String::new(),
             board: None,
             unlock_confirm: String::new(),
             caret: 0,
@@ -521,6 +528,14 @@ impl App {
     /// unlock screen reads it, and the refresh follows it.
     pub fn set_db_path(&mut self, path: Option<PathBuf>) {
         self.db_path = path;
+        /* Prefill the typed box only if the user has not typed their own:
+           `set_db_path` runs once at startup, and a later call (vault switch)
+           must not clobber whatever is mid-edit. */
+        if self.unlock_file.is_empty()
+            && let Some(p) = &self.db_path
+        {
+            self.unlock_file = p.display().to_string();
+        }
         self.refresh_db_state();
     }
 
@@ -585,18 +600,20 @@ impl App {
         }
     }
 
-    /// Tab and shift-Tab through the unlock boxes, wrapping. Two boxes except
-    /// in create mode, where the confirm joins them.
+    /// Tab and shift-Tab through the unlock boxes, wrapping. Three boxes, or
+    /// four in create mode where the confirm and the file box join.
     pub fn next_unlock_field(&mut self, forward: bool) {
-        let n = if self.unlock_new { 3 } else { 2 };
+        let n = if self.unlock_new { 4 } else { 3 };
         let at = match self.unlock_field {
-            UnlockField::Password => 0,
-            UnlockField::KeyFile => 1,
-            UnlockField::Confirm => 2,
+            UnlockField::File => 0,
+            UnlockField::Password => 1,
+            UnlockField::KeyFile => 2,
+            UnlockField::Confirm => 3,
         };
         self.unlock_field = match (at + if forward { 1 } else { n - 1 }) % n {
-            0 => UnlockField::Password,
-            1 => UnlockField::KeyFile,
+            0 => UnlockField::File,
+            1 => UnlockField::Password,
+            2 => UnlockField::KeyFile,
             _ => UnlockField::Confirm,
         };
         // Behind the text, which is where an edit to a prefilled value starts.
@@ -606,10 +623,30 @@ impl App {
     /// The box the unlock keys are typing into.
     pub fn active_unlock_value(&mut self) -> &mut String {
         match self.unlock_field {
+            UnlockField::File => &mut self.unlock_file,
             UnlockField::Password => &mut self.unlock_password,
             UnlockField::KeyFile => &mut self.unlock_keyfile,
             UnlockField::Confirm => &mut self.unlock_confirm,
         }
+    }
+
+    /* Enter on the file box: make the typed path the vault this session
+       unlocks. The path is display text, not a secret, and the flash names
+       what it was set to so a typo reads as a typo. */
+    pub fn accept_file_box(&mut self) {
+        let typed = self.unlock_file.trim().to_string();
+        if typed.is_empty() {
+            self.say("type a path first");
+            return;
+        }
+        self.db_path = Some(PathBuf::from(typed));
+        self.refresh_db_state();
+        self.unlock_field = UnlockField::Password;
+        self.caret = 0;
+        self.say(format!(
+            "vault set{}  ·  enter the password",
+            if self.unlock_new { "  ·  new vault" } else { "" }
+        ));
     }
 
     /// Byte offset of the caret, for slicing. The caret is a char index: a
@@ -617,6 +654,7 @@ impl App {
     /// carries an accent, and `String::insert` panics on it.
     fn caret_byte(&self) -> usize {
         let value = match self.unlock_field {
+            UnlockField::File => &self.unlock_file,
             UnlockField::Password => &self.unlock_password,
             UnlockField::KeyFile => &self.unlock_keyfile,
             UnlockField::Confirm => &self.unlock_confirm,
@@ -2098,6 +2136,23 @@ mod tests {
         assert!(app.stage.contains("locked after 60 seconds idle"), "{}", app.stage);
     }
 
+    /* The typed vault file outlives an auto-lock: it names a file, not a
+       secret, and retyping a path to unlock the same or another vault after
+       an idle lock would be overhead for nothing. */
+    #[test]
+    fn the_file_box_survives_the_idle_lock() {
+        let mut app = open_app();
+        app.unlock_file = "/vaults/personal.kdbx".into();
+        app.set_lock_timeout(60);
+        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.check_idle();
+        assert_eq!(app.view, View::Unlock);
+        assert_eq!(
+            app.unlock_file, "/vaults/personal.kdbx",
+            "the path did not survive the lock"
+        );
+    }
+
     /* Any keypress restarts the clock: activity just before the deadline is
        what keeps a working session open. */
     #[test]
@@ -2339,23 +2394,73 @@ mod tests {
         assert_eq!(app.unlock_password, " bar");
     }
 
-    /* Tab walks two boxes, three in create mode, and lands behind the text:
-       an edit to a prefilled key-file path starts at its end. */
+    /* Tab walks three boxes, four in create mode, and lands behind the text:
+       an edit to a prefilled key-file path starts at its end. The file box
+       joins the cycle, so switching vaults is a Tab from the password. */
     #[test]
-    fn tab_walks_two_boxes_three_when_creating() {
+    fn tab_walks_three_boxes_four_when_creating() {
         let mut app = App::new();
         app.next_unlock_field(true);
         assert_eq!(app.unlock_field, UnlockField::KeyFile);
         app.next_unlock_field(true);
-        assert_eq!(app.unlock_field, UnlockField::Password, "wrapped");
+        assert_eq!(app.unlock_field, UnlockField::File, "wrapped through file");
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::Password);
         app.unlock_new = true;
         app.next_unlock_field(false);
-        assert_eq!(app.unlock_field, UnlockField::Confirm);
+        assert_eq!(app.unlock_field, UnlockField::File, "backward now cycles 4");
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::Password, "forward rejoins");
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::KeyFile);
+        app.next_unlock_field(true);
+        assert_eq!(app.unlock_field, UnlockField::Confirm, "create joins confirm");
         app.unlock_keyfile = "/keys/k".into();
         app.unlock_field = UnlockField::Password;
         app.next_unlock_field(true);
         assert_eq!(app.unlock_field, UnlockField::KeyFile);
         assert_eq!(app.caret, 7, "caret did not land behind the path");
+    }
+
+    /* Enter on the file box re-points the session: a second vault is a Tab
+       and a path away, no restart needed. The typed file box is preserved
+       across auto-locks, which is what makes the switch stick. */
+    #[test]
+    fn the_file_box_points_the_session_at_another_vault() {
+        let (mut app, tmp) = locked_app_with_db(b"pw");
+        let other = tmp
+            .0
+            .parent()
+            .unwrap()
+            .join("sennel-test-other.kdbx")
+            .display()
+            .to_string();
+        app.unlock_file = other.clone();
+        app.unlock_field = UnlockField::File;
+        app.accept_file_box();
+        assert_eq!(
+            app.db_path,
+            Some(tmp.0.parent().unwrap().join("sennel-test-other.kdbx")),
+            "path applied"
+        );
+        assert!(app.unlock_new, "a missing file reads as create");
+        assert_eq!(app.unlock_field, UnlockField::Password, "focus went home");
+        assert!(app.stage.contains("vault set"), "{}", app.stage);
+    }
+
+    /* The file box prefill survives a lock–unlock round trip, so the second
+       unlock does not have to retype the path. */
+    #[test]
+    fn the_file_box_prefills_from_the_config_once() {
+        let mut app = App::new();
+        app.set_db_path(Some(PathBuf::from("/vaults/main.kdbx")));
+        assert_eq!(app.unlock_file, "/vaults/main.kdbx", "prefilled once");
+        app.unlock_file = "/vaults/personal.kdbx".into();
+        app.set_db_path(Some(PathBuf::from("/vaults/other.kdbx")));
+        assert_eq!(
+            app.unlock_file, "/vaults/personal.kdbx",
+            "a later set must not clobber a mid-edit"
+        );
     }
 
     /* The dirty guard: a fresh unlock quits straight out, a mutation asks. */

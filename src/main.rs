@@ -373,6 +373,11 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('e') if ctrl => app.unlock_end(true),
         KeyCode::Delete if !ctrl => app.unlock_delete(),
         KeyCode::Backspace => app.unlock_backspace(),
+        /* The file box takes its own Enter: applying it is not an unlock, it
+           names the vault the next unlock opens. */
+        KeyCode::Enter if app.unlock_field == crate::app::UnlockField::File => {
+            app.accept_file_box()
+        }
         KeyCode::Enter => unlock_now(app),
         KeyCode::Char(c) if !ctrl => app.unlock_insert(c),
         _ => {}
