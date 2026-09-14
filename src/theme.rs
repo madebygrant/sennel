@@ -25,6 +25,9 @@ pub const DIM: Color = Color::Rgb(158, 148, 128);
 /// Structure that must not compete with the list.
 pub const RULE: Color = Color::Rgb(92, 84, 66);
 /// Masked secrets and other text that is deliberately unreadable.
+/* Unused today — the masks draw in plain DIM. Kept: it is the palette slot
+   for "readable-but-not-cream", the natural colour for a masked field. */
+#[allow(dead_code)]
 pub const SAND: Color = Color::Rgb(168, 155, 126);
 
 /* Diagonal gradient behind everything, running bottom-left to top-right:
@@ -37,6 +40,10 @@ const FAR: (u8, u8, u8) = (18, 1, 22);
 const STOP: f32 = 0.76;
 
 /// Text on a filled band, where the gradient is covered and cream would glare.
+/* Unused today — no filled band draws. Kept with the palette for the same
+   reason the gradient sits in one file: a future banner should not invent
+   its own ink. */
+#[allow(dead_code)]
 pub const INK: Color = Color::Rgb(24, 18, 16);
 
 /// Popups sit above the gradient, so they need one flat tone of their own or

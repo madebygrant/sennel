@@ -543,13 +543,6 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/* Wide enough for the content, centred, two rows of margin so it never
-   touches the frame edge. `Clear` first: without it the gradient shows
-   through and the popup reads as a hole rather than a surface. */
-fn popup_width(area: Rect) -> u16 {
-    (area.width.saturating_sub(4)).min(72).max(20)
-}
-
 fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
     let height = lines.len() as u16 + 2;
     let area = frame.area();

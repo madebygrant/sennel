@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(long)]
     pub check: bool,
 
+    /// Print the group and entry inventory (titles only, no secrets), then exit
+    #[arg(long, conflicts_with = "check")]
+    pub list: bool,
+
     /// Read this config file instead of the one in ~/.config/sennel
     #[arg(long, value_name = "PATH")]
     pub config: Option<String>,
@@ -87,6 +91,7 @@ pub struct Config {
     /// so cannot be the place a choice is remembered.
     pub config_file: Option<PathBuf>,
     pub check: bool,
+    pub list: bool,
 }
 
 impl Config {
@@ -121,11 +126,15 @@ impl Config {
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             config_file,
             check: cli.check,
+            list: cli.list,
         })
     }
 
     /// Shown in the help overlay, so a session's settings are visible without
     /// remembering which flags were passed.
+    /* Unused until a settings write-back exists; kept because the wording is
+       the one place the effective values are summarised in one line. */
+    #[allow(dead_code)]
     pub fn describe(&self) -> String {
         let db = self
             .db

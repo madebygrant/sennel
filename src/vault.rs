@@ -167,8 +167,20 @@ impl Vault {
         &self.db
     }
 
+    /* Test-only: prod paths go through guarded Vault methods that keep the
+       cursors and the dirty flag consistent. dict_mut escapes those guards,
+       so it stays behind this comment as the documented back door for tests
+       that need to stamp timestamps directly. */
+    #[allow(dead_code)]
     pub fn db_mut(&mut self) -> &mut Database {
         &mut self.db
+    }
+
+    /* Parity read of keepass-rs's own dirty flag; App tracks `dirty` itself
+       because "saved or not" is the question that matters here. */
+    #[allow(dead_code)]
+    pub fn is_modified(&self) -> bool {
+        self.db.data_modified
     }
 
     pub fn root_id(&self) -> NodeId {
@@ -182,10 +194,6 @@ impl Vault {
 
     pub fn get_entry(&self, id: &NodeId) -> Option<&Entry> {
         self.db.get_entry(id)
-    }
-
-    pub fn is_modified(&self) -> bool {
-        self.db.data_modified
     }
 
     /// Total entries across all groups, for the unlock flash.

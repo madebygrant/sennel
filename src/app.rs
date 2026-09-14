@@ -408,6 +408,9 @@ impl App {
     /// Mark the vault as holding unsaved changes. Called by every mutation
     /// path; the unlock path leaves it clear, so a fresh open quits straight
     /// out without interrogation.
+    /* Test-only in practice: prod mutations cascade through persist(). Kept
+       pub so tests can arm the quit guard directly. */
+    #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -1859,7 +1862,10 @@ impl App {
         match undo {
             Undo::Edit { id, before } => {
                 let title = before.title.clone();
-                vault.replace_entry(before);
+                /* Results ignored the way a rollback is: the mutation can
+                   only fail on an id that no longer exists, and persist()
+                   below reports anything the save kept from landing. */
+                let _ = vault.replace_entry(before);
                 self.entry_cursor = Some(id);
                 self.snap();
                 self.persist();
@@ -1867,7 +1873,7 @@ impl App {
             }
             Undo::Delete { id, parent, before } => {
                 let title = before.title.clone();
-                vault.restore_entry(before, &parent);
+                let _ = vault.restore_entry(before, &parent);
                 self.entry_cursor = Some(id);
                 self.snap();
                 self.persist();
@@ -1876,14 +1882,14 @@ impl App {
             Undo::AddEntry { id, title } => {
                 /* The add is rolled back by removing what it created, and the
                    undo slot empties instead of growing. */
-                vault.expunge_entry(&id);
+                let _ = vault.expunge_entry(&id);
                 self.entry_cursor = None;
                 self.snap();
                 self.persist();
                 self.say(format!("removed {title}"));
             }
             Undo::Rename { id, before } => {
-                vault.set_group_title(&id, &before);
+                let _ = vault.set_group_title(&id, &before);
                 self.snap();
                 self.persist();
                 self.say(format!("restored name {before}"));
@@ -1894,7 +1900,6 @@ impl App {
     /// What the status bar says the undo slot holds, looked up fresh so a
     /// later rename or delete still names the thing it would restore.
     pub fn undo_note(&self) -> Option<String> {
-        let vault = self.vault.as_ref()?;
         let note = match self.undo.as_ref()? {
             Undo::Edit { before, .. } => format!("undo: edit of {}", before.title),
             Undo::Delete { before, .. } => format!("undo: restore {}", before.title),

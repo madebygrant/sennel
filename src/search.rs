@@ -37,7 +37,11 @@ fn haystack_from(entry: &Entry, group_path: &str) -> String {
    keypress — the band re-ranks the whole vault on each typed character. */
 pub struct Searcher {
     matcher: Matcher,
+    /* Owned by `rank` (test-only, see there); kept together so the buffers
+       stay allocated rather than rebuilt per call. */
+    #[allow(dead_code)]
     hay_chars: Vec<char>,
+    #[allow(dead_code)]
     needle_chars: Vec<char>,
     /// Scratch for owned haystacks: rank_entry builds a String then borrows
     /// it, and Utf32Str wants a char buffer to fill.
@@ -57,6 +61,10 @@ impl Searcher {
     /// None means "no match": the row is filtered out. An empty needle
     /// matches everything (score 0), which is exactly what an empty band
     /// should do — show all rows.
+    /* Test-only in practice: prod rows go through rank_entry (multi-atom
+       Pattern). Kept because tests pin raw score semantics, and any future
+       score-based ordering needs it. */
+    #[allow(dead_code)]
     pub fn rank(&mut self, needle: &str, hay: &str) -> Option<u16> {
         let needle = Utf32Str::new(needle, &mut self.needle_chars);
         let hay = Utf32Str::new(hay, &mut self.hay_chars);

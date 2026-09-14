@@ -18,12 +18,17 @@ use zeroize::Zeroize;
 use app::{App, Confirm};
 use crate::clipboard::Board;
 use config::{Cli, Config};
+use keepass_rs::NodeId;
+use vault::Vault;
 
 fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
     if cfg.check {
         return check(&cfg);
+    }
+    if cfg.list {
+        return list(&cfg);
     }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
        or in CI, crossterm's raw mode fails with an OS error about a device
@@ -80,6 +85,45 @@ fn check(cfg: &Config) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/* --list: the vault inventory without the secrets. Counts and entry titles
+   only — the point is scripting and inventory, not display. */
+fn list(cfg: &Config) -> Result<()> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let password = rpassword::prompt_password("password: ")?;
+    let vault = Vault::open(path, password.as_bytes(), None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "{} groups · {} entries",
+        vault.db().groups.len(),
+        vault.db().entries.len()
+    );
+    /* Walk the whole tree root-down so the output reads like the browser. */
+    for (id, depth) in walk_groups(&vault) {
+        let indent = "  ".repeat(depth);
+        println!("{}[{}]", indent, vault.db().groups[&id].title);
+        for eid in &vault.db().groups[&id].child_entry_ids {
+            if let Some(e) = vault.db().entries.get(eid) {
+                println!("{}  {}", indent, e.title);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn walk_groups(vault: &Vault) -> Vec<(NodeId, usize)> {
+    let mut out = Vec::new();
+    let mut stack = vec![(vault.root_id(), 0)];
+    while let Some((id, depth)) = stack.pop() {
+        out.push((id, depth));
+        for child in vault.groups_in(&id).iter().rev() {
+            stack.push((child.id, depth + 1));
+        }
+    }
+    out
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
