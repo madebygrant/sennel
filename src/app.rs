@@ -554,6 +554,13 @@ impl App {
             self.unlock_file = p.display().to_string();
         }
         self.refresh_db_state();
+        /* No path from the config or --db: the first thing to fill is the file
+           box, not the password. Default focus is Password (right when a vault
+           is already named); with nothing configured, land on File so a typed
+           path goes where it belongs instead of into the password box. */
+        if self.db_path.is_none() {
+            self.unlock_field = UnlockField::File;
+        }
     }
 
     /* Whether Enter will create rather than open. Cached on keypresses, not
@@ -568,6 +575,17 @@ impl App {
        buffer is zeroized on every path out; the retained CompositeKey inside
        the vault is the only copy that survives, and it zeroizes on drop. */
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
+        /* A path typed in the file box but never confirmed with Enter (Tab
+           jumped to the password instead) is still the vault the user means:
+           apply it here so unlock reads the path off the box it was typed in
+           rather than reporting that no vault was configured. */
+        if self.db_path.is_none() {
+            let typed = self.unlock_file.trim();
+            if !typed.is_empty() {
+                self.db_path = Some(crate::config::expand(typed));
+                self.refresh_db_state();
+            }
+        }
         let Some(path) = self.db_path.clone() else {
             self.say("no database configured  ·  run `Sennel --help` for --db");
             password.zeroize();
@@ -2518,6 +2536,38 @@ mod tests {
         /* Whatever is_file says locally, it must not read as create-only
            when HOME-side path exists; here it is simply expanded. */
         assert_eq!(app.unlock_field, UnlockField::Password, "focus went home");
+    }
+
+    /* The reported bug: a path typed into the file box but Tab-passed (never
+       Enter-committed) still names the vault. Unlock applies it off the box
+       instead of answering "no database configured". */
+    #[test]
+    fn a_path_typed_but_unconfirmed_still_unlocks() {
+        let (mut app, tmp) = locked_app_with_db(b"pw");
+        app.db_path = None;
+        app.unlock_file = String::new();
+        app.unlock_field = UnlockField::Password;
+        app.unlock_file = tmp.0.display().to_string();
+        let mut pw = b"pw".to_vec();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser, "unconfirmed path refused");
+        assert!(app.vault.is_some());
+    }
+
+    /* With no configured vault the file box is focused first: the natural
+       first action is to point Sennel at a database, and typing into the
+       password box by mistake is what made an existing vault unreadable. */
+    #[test]
+    fn no_configured_vault_starts_on_the_file_box() {
+        let mut app = App::new();
+        app.set_db_path(None);
+        assert_eq!(app.unlock_field, UnlockField::File, "file box not focused");
+        let (app, _tmp) = locked_app_with_db(b"pw");
+        assert_eq!(
+            app.unlock_field,
+            UnlockField::Password,
+            "a named vault should start on the password"
+        );
     }
 
     /* The file box prefill survives a lock–unlock round trip, so the second
