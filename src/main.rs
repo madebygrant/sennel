@@ -116,6 +116,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_form_key(app, code, mods);
         return;
     }
+    /* The group prompt is modal on the same terms, one box instead of five. */
+    if app.group_prompt.is_some() {
+        handle_group_prompt_key(app, code, mods);
+        return;
+    }
     /* The overlay swallows the next key rather than acting on it: anything
        else makes dismissing it a guess about what the key also did. */
     if app.show_help && !matches!(code, KeyCode::Char('q')) {
@@ -157,9 +162,13 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.ask_quit(),
-        /* No filter yet (wave 6) and no marks, so Esc has nothing to
-           unwind: it says so rather than quitting, and Esc never quits. */
-        KeyCode::Esc => app.say("this is the top  ·  q quits"),
+        /* Esc unwinds the armed cut before its usual report: a mis-cut is
+           one press from undone, and Esc never quits. */
+        KeyCode::Esc => {
+            if !app.drop_cut() {
+                app.say("this is the top  ·  q quits");
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => app.step_pane(true),
         KeyCode::Char('k') | KeyCode::Up => app.step_pane(false),
         KeyCode::PageDown => app.page_pane(true),
@@ -177,7 +186,14 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            the edit keys stay lowercase-shifted apart on purpose. */
         KeyCode::Char('a') => app.open_add_form(),
         KeyCode::Char('e') => app.open_edit_form(),
+        /* Group keys. A and E name groups from either pane; D follows the
+           pane — the cursor decides what deleting means. */
+        KeyCode::Char('A') => app.open_group_prompt_new(),
+        KeyCode::Char('E') => app.open_group_prompt_rename(),
+        KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),
         KeyCode::Char('D') => app.ask_delete_entry(),
+        KeyCode::Char('X') => app.cut_selected(),
+        KeyCode::Char('V') => app.paste_cut(),
         KeyCode::Char('/') => app.say("search arrives in wave 6"),
         _ => {}
     }
@@ -207,6 +223,29 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Backspace => app.form_backspace(),
         KeyCode::Enter => app.submit_form(),
         KeyCode::Char(c) if !ctrl => app.form_insert(c),
+        _ => {}
+    }
+}
+
+/* The group prompt: one box, so no cycling — just editing keys, Enter and
+   Esc. Same shape as the entry form minus the field movement. */
+fn handle_group_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
+        KeyCode::Esc => app.cancel_group_prompt(),
+        KeyCode::Char('u') if ctrl => app.group_prompt_clear(),
+        KeyCode::Char('w') if ctrl => app.group_prompt_kill_word(),
+        KeyCode::Left if !ctrl => app.group_prompt_move(false),
+        KeyCode::Right if !ctrl => app.group_prompt_move(true),
+        KeyCode::Home if !ctrl => app.group_prompt_end(false),
+        KeyCode::End if !ctrl => app.group_prompt_end(true),
+        KeyCode::Char('a') if ctrl => app.group_prompt_end(false),
+        KeyCode::Char('e') if ctrl => app.group_prompt_end(true),
+        KeyCode::Delete if !ctrl => app.group_prompt_delete(),
+        KeyCode::Backspace => app.group_prompt_backspace(),
+        KeyCode::Enter => app.submit_group_prompt(),
+        KeyCode::Char(c) if !ctrl => app.group_prompt_insert(c),
         _ => {}
     }
 }
@@ -289,6 +328,7 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             /* The delete acts at once: the popup said what it was about, so
                a yes needs no second popup between answer and effect. */
             Some(Confirm::DeleteEntry { id, .. }) => app.confirm_delete_entry(id),
+            Some(Confirm::DeleteGroup { id, .. }) => app.confirm_delete_group(id),
             None => {}
         }
     }
@@ -454,11 +494,13 @@ mod tests {
     }
 
     /* D asks, y answers, the row is gone. The full loop through the real
-       key handler, not the app method alone. */
+       key handler, not the app method alone. Tab first: D follows the pane,
+       and deleting a group is a different question. */
     #[test]
     fn d_asks_and_y_deletes() {
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('D'), KeyModifiers::NONE);
         assert!(app.confirm.is_some(), "D deleted without asking");
         handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
@@ -477,5 +519,47 @@ mod tests {
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.form.is_none());
         assert_eq!(app.entry_rows().len(), 2, "esc wrote the row anyway");
+    }
+
+    /* `A` opens the group prompt and it is modal on the same terms: `q`
+       types a letter rather than quitting. */
+    #[test]
+    fn a_opens_the_group_prompt_and_typing_lands_in_it() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        assert!(app.group_prompt.is_some(), "A did not open the prompt");
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit from inside the prompt");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.group_prompt.is_none(), "enter did not submit");
+        let tree = app.group_tree();
+        let named = tree.iter().any(|(id, _)| {
+            app.vault.as_ref().unwrap().get_group(id).unwrap().title == "q"
+        });
+        assert!(named, "the typed name did not become a group");
+    }
+
+    /* V with an empty shelf says so instead of pasting nothing. */
+    #[test]
+    fn v_without_a_cut_says_so() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('V'), KeyModifiers::NONE);
+        assert!(app.stage.contains("nothing cut"), "{}", app.stage);
+    }
+
+    /* Esc unwinds the armed cut first; only with an empty shelf does it fall
+       through to the top-of-tree report. */
+    #[test]
+    fn esc_drops_the_cut_before_its_usual_report() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+        assert!(app.cut.is_some(), "X did not arm the shelf");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.cut.is_none(), "esc did not drop the cut");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // Second Esc has nothing to unwind: the usual report returns and,
+        // above all, Esc never quits.
+        assert!(!app.quit, "esc quit the session");
     }
 }

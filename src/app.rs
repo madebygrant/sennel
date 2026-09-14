@@ -48,6 +48,10 @@ pub enum Confirm {
        copy of a name field, never the password: the confirm popup must stay
        safe to screenshot with the vault unlocked. */
     DeleteEntry { id: NodeId, title: String },
+    /* Same rule as the entry delete: the title rides along for the prompt
+       line only, and the vault refuses non-empty groups before this ever
+       fires, so a confirmed group delete cannot take a subtree with it. */
+    DeleteGroup { id: NodeId, title: String },
 }
 
 /// Which box of the entry form the keys are typing into.
@@ -87,6 +91,32 @@ pub struct Form {
        not to keep: so one keystroke in the box flips this latch, and submit
        reads it rather than guessing from emptiness. */
     pub password_touched: bool,
+}
+
+/* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
+   so unlike the entry form there is no field cycling — just a value, a caret
+   and the same char-index rule as every other box. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupPromptKind {
+    New,
+    Rename(NodeId),
+}
+
+pub struct GroupPrompt {
+    pub kind: GroupPromptKind,
+    pub value: String,
+    /// Char index into `value`, same rule as the unlock caret.
+    pub caret: usize,
+}
+
+/* Something sitting on the shelf between `X` and `V`. The id travels alone:
+   the title is looked up fresh wherever it is shown, so a rename between the
+   cut and the paste still reads right, and a deleted source disarms itself
+   rather than pasting a ghost. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cut {
+    Entry(NodeId),
+    Group(NodeId),
 }
 
 /* A flash is timed by its length: four fixed seconds fits "saved" and not a
@@ -171,6 +201,12 @@ pub struct App {
     /* The modal entry editor. None when closed; the browser hands its keys
        over while Some, the way the unlock screen does. */
     pub form: Option<Form>,
+    /* The one-box group prompt (A/E). None when closed; same handover rule
+       as the entry form. */
+    pub group_prompt: Option<GroupPrompt>,
+    /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
+       before its usual report so a mis-cut is one press from undone. */
+    pub cut: Option<Cut>,
     /* Idle auto-lock. `None` is off. The deadline is checked once per frame
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
@@ -211,6 +247,8 @@ impl App {
             caret: 0,
             dirty: false,
             form: None,
+            group_prompt: None,
+            cut: None,
             lock_after: None,
             last_activity: Instant::now(),
         }
@@ -608,6 +646,12 @@ impl App {
     pub fn selected_group(&self) -> Option<&Group> {
         let (vault, id) = (self.vault.as_ref()?, self.group_cursor?);
         vault.get_group(&id)
+    }
+
+    /// The root id of the open vault. Only reached from browser paths that
+    /// already know a vault is open.
+    fn root_id(&self) -> NodeId {
+        self.vault.as_ref().expect("browser keys need a vault").root_id()
     }
 
     /* Filtered out means not selected: the entry cursor may name an entry of
@@ -1041,6 +1085,319 @@ impl App {
     pub fn cancel_form(&mut self) {
         if self.form.take().is_some() {
             self.say("form closed  ·  nothing changed");
+        }
+    }
+
+    /* `A`: a new group goes inside the selected one, the way KeePass does it
+       — the tree grows where the eye is, not always at the root. */
+    pub fn open_group_prompt_new(&mut self) {
+        if self.group_cursor.is_none() {
+            self.say("no group selected");
+            return;
+        }
+        self.group_prompt = Some(GroupPrompt {
+            kind: GroupPromptKind::New,
+            value: String::new(),
+            caret: 0,
+        });
+    }
+
+    /* `E`: rename whatever group is selected, from either pane — `e` stays
+       the entry editor, so the case is what carries the target. */
+    pub fn open_group_prompt_rename(&mut self) {
+        let Some(group) = self.selected_group() else {
+            self.say("no group here to rename");
+            return;
+        };
+        let title = group.title.clone();
+        self.group_prompt = Some(GroupPrompt {
+            kind: GroupPromptKind::Rename(group.id),
+            value: title.clone(),
+            caret: title.chars().count(),
+        });
+    }
+
+    /* Enter on the group prompt: write through and autosave. Same single
+       must as the entry form — a nameless group is unreadable in the tree. */
+    pub fn submit_group_prompt(&mut self) {
+        let Some(prompt) = self.group_prompt.take() else {
+            return;
+        };
+        if prompt.value.trim().is_empty() {
+            self.say("a name is the only must  ·  the prompt stays open");
+            self.group_prompt = Some(prompt);
+            return;
+        }
+        let result = match prompt.kind {
+            GroupPromptKind::New => {
+                let parent = self.group_cursor;
+                let vault = self.vault.as_mut().expect("group prompt needs a vault");
+                match parent {
+                    Some(parent) => vault.create_group(&parent, &prompt.value).map(Some),
+                    None => Err(VaultError::GroupNotFound),
+                }
+            }
+            GroupPromptKind::Rename(id) => {
+                let vault = self.vault.as_mut().expect("group prompt needs a vault");
+                vault.rename_group(&id, &prompt.value).map(|()| None)
+            }
+        };
+        match result {
+            Ok(new_id) => {
+                if let Some(id) = new_id {
+                    self.group_cursor = Some(id);
+                }
+                self.snap();
+                self.persist();
+                self.say(match prompt.kind {
+                    GroupPromptKind::New => "group added",
+                    GroupPromptKind::Rename(_) => "group renamed",
+                });
+            }
+            Err(e) => {
+                self.say(format!("cannot save  ·  {e}"));
+                self.group_prompt = Some(prompt);
+            }
+        }
+    }
+
+    /// Esc on the group prompt: throw the box away, no vault change.
+    pub fn cancel_group_prompt(&mut self) {
+        if self.group_prompt.take().is_some() {
+            self.say("prompt closed  ·  nothing changed");
+        }
+    }
+
+    pub fn group_prompt_insert(&mut self, c: char) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        let at = prompt
+            .value
+            .char_indices()
+            .nth(prompt.caret)
+            .map_or(prompt.value.len(), |(at, _)| at);
+        prompt.value.insert(at, c);
+        prompt.caret += 1;
+    }
+
+    pub fn group_prompt_backspace(&mut self) {
+        let caret = match &self.group_prompt {
+            Some(p) if p.caret > 0 => p.caret,
+            _ => return,
+        };
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        let at = prompt
+            .value
+            .char_indices()
+            .nth(caret)
+            .map_or(prompt.value.len(), |(at, _)| at);
+        let prev = prompt.value[..at]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i);
+        prompt.value.remove(prev);
+        prompt.caret = caret - 1;
+    }
+
+    pub fn group_prompt_delete(&mut self) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        let at = prompt
+            .value
+            .char_indices()
+            .nth(prompt.caret)
+            .map_or(prompt.value.len(), |(at, _)| at);
+        if prompt.value.get(at..).is_some_and(|rest| !rest.is_empty()) {
+            prompt.value.remove(at);
+        }
+    }
+
+    pub fn group_prompt_move(&mut self, right: bool) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        let len = prompt.value.chars().count();
+        prompt.caret = if right {
+            (prompt.caret + 1).min(len)
+        } else {
+            prompt.caret.saturating_sub(1)
+        };
+    }
+
+    pub fn group_prompt_end(&mut self, end: bool) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        prompt.caret = if end { prompt.value.chars().count() } else { 0 };
+    }
+
+    pub fn group_prompt_clear(&mut self) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        prompt.value.clear();
+        prompt.caret = 0;
+    }
+
+    /* The same word delete the other boxes take: back to the word start,
+       keeping whatever follows the caret. */
+    pub fn group_prompt_kill_word(&mut self) {
+        let Some(prompt) = &mut self.group_prompt else {
+            return;
+        };
+        let at = prompt
+            .value
+            .char_indices()
+            .nth(prompt.caret)
+            .map_or(prompt.value.len(), |(at, _)| at);
+        let start = prompt.value[..at].trim_end().rfind(' ').map_or(0, |i| i + 1);
+        prompt.value.drain(start..at);
+        prompt.caret = prompt.value[..start].chars().count();
+    }
+
+    /* `D` on the groups pane. The vault refuses non-empty groups, but the
+       refusal is named here so the confirm never opens for a delete that
+       cannot happen — the message points at X, which is the way out. */
+    pub fn ask_delete_group(&mut self) {
+        let Some(group) = self.selected_group() else {
+            self.say("no group here to delete");
+            return;
+        };
+        if group.id == self.root_id() {
+            self.say("the root group cannot be deleted");
+            return;
+        }
+        let has_contents = !self
+            .vault
+            .as_ref()
+            .map(|v| {
+                v.entries_in(&group.id).is_empty() && v.groups_in(&group.id).is_empty()
+            })
+            .unwrap_or(true);
+        if has_contents {
+            self.say("group not empty  ·  move or delete its contents first");
+            return;
+        }
+        self.confirm = Some(Confirm::DeleteGroup {
+            id: group.id,
+            title: group.title.clone(),
+        });
+    }
+
+    /// The yes side of the group delete confirm, kept off the key handler.
+    pub fn confirm_delete_group(&mut self, id: NodeId) {
+        let Some(vault) = &mut self.vault else {
+            return;
+        };
+        match vault.delete_group(&id) {
+            Ok(()) => {
+                /* A cut pointing at the deleted group is a ghost: disarm it
+                   rather than letting V paste nothing. */
+                if self.cut == Some(Cut::Group(id)) {
+                    self.cut = None;
+                }
+                self.group_cursor = None;
+                self.snap();
+                self.persist();
+                self.say("group deleted");
+            }
+            Err(e) => self.say(format!("cannot delete  ·  {e}")),
+        }
+    }
+
+    /* `X`: cut whatever the cursor is on. Groups pane cuts the group, entries
+       pane cuts the entry — one key, pane decides, the status bar says which. */
+    pub fn cut_selected(&mut self) {
+        let Some(cut) = (match self.active_pane {
+            Pane::Groups => match self.selected_group() {
+                Some(g) if g.id != self.root_id() => Some(Cut::Group(g.id)),
+                Some(_) => {
+                    self.say("the root group cannot be cut");
+                    None
+                }
+                None => {
+                    self.say("no group here to cut");
+                    None
+                }
+            },
+            Pane::Entries => match self.selected_entry() {
+                Some(e) => Some(Cut::Entry(e.id)),
+                None => {
+                    self.say("no entry here to cut");
+                    None
+                }
+            },
+        }) else {
+            return;
+        };
+        self.cut = Some(cut);
+        self.say(match cut {
+            Cut::Group(_) => "group cut  ·  v pastes it under another group",
+            Cut::Entry(_) => "entry cut  ·  v moves it to another group",
+        });
+    }
+
+    /* `V`: paste the armed cut into the selected group, from either pane.
+       One-shot: the shelf empties on a successful paste, and a failed one
+       stays armed so a typo in the target costs nothing. */
+    pub fn paste_cut(&mut self) {
+        let Some(cut) = self.cut else {
+            self.say("nothing cut  ·  x arms the shelf");
+            return;
+        };
+        let Some(target) = self.group_cursor else {
+            self.say("no group selected");
+            return;
+        };
+        let Some(vault) = &mut self.vault else {
+            return;
+        };
+        let result = match cut {
+            Cut::Entry(id) => vault.move_entry(&id, &target).map(|()| Some(id)),
+            Cut::Group(id) => vault.move_group(&id, &target).map(|()| Some(id)),
+        };
+        match result {
+            Ok(moved) => {
+                self.cut = None;
+                match cut {
+                    Cut::Entry(_) => self.entry_cursor = moved,
+                    Cut::Group(_) => self.group_cursor = moved,
+                }
+                self.snap();
+                self.persist();
+                self.say(match cut {
+                    Cut::Entry(_) => "entry moved",
+                    Cut::Group(_) => "group moved",
+                });
+            }
+            Err(e) => self.say(format!("cannot paste  ·  {e}")),
+        }
+    }
+
+    /* Esc unwinds the shelf before its usual report: a mis-cut is one press
+       from undone, and the message says so rather than the key reading dead. */
+    pub fn drop_cut(&mut self) -> bool {
+        if self.cut.take().is_some() {
+            self.say("cut dropped");
+            return true;
+        }
+        false
+    }
+
+    /// Status-bar note for an armed cut, with the title looked up fresh.
+    pub fn cut_note(&self) -> Option<String> {
+        let vault = self.vault.as_ref()?;
+        match self.cut? {
+            Cut::Entry(id) => vault
+                .get_entry(&id)
+                .map(|e| format!("cut: {}", e.title)),
+            Cut::Group(id) => vault
+                .get_group(&id)
+                .map(|g| format!("cut: {}", g.title)),
         }
     }
 }
@@ -1664,5 +2021,169 @@ mod tests {
         let root = reopened.root_id();
         assert_eq!(reopened.entries_in(&root).len(), 1);
         assert_eq!(reopened.entries_in(&root)[0].title, "bankcard");
+    }
+
+    /* `A` grows the tree where the eye is: inside the selected group, and
+       the cursor lands on the row it just made. */
+    #[test]
+    fn a_adds_a_group_under_the_selection() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_group_prompt_new();
+        for c in "Cards".chars() {
+            app.group_prompt_insert(c);
+        }
+        app.submit_group_prompt();
+        let tree = app.group_tree();
+        assert!(tree.iter().any(|(id, _)| {
+            app.vault.as_ref().unwrap().get_group(id).unwrap().title == "Cards"
+        }));
+        let cursor = app.group_cursor.unwrap();
+        assert_eq!(
+            app.vault.as_ref().unwrap().get_group(&cursor).unwrap().title,
+            "Cards"
+        );
+    }
+
+    /* `E` renames from the prompt prefilled with the current name; the path
+       read afterwards must show the new name, not the old one. */
+    #[test]
+    fn e_renames_the_selected_group() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_group_prompt_rename();
+        assert_eq!(app.group_prompt.as_ref().unwrap().value, "Banks");
+        app.group_prompt_clear();
+        for c in "Ledgers".chars() {
+            app.group_prompt_insert(c);
+        }
+        app.submit_group_prompt();
+        let path = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .group_path(&app.group_cursor.unwrap());
+        assert!(path.contains(&"Ledgers".to_string()), "{path:?}");
+    }
+
+    #[test]
+    fn an_empty_group_name_stays_open() {
+        let mut app = open_app();
+        app.open_group_prompt_new();
+        app.submit_group_prompt();
+        assert!(app.group_prompt.is_some(), "empty name closed the prompt");
+        assert!(app.stage.contains("only must"), "{}", app.stage);
+    }
+
+    /* The vault refuses non-empty deletes; the app refuses even earlier and
+       names the way out, so the confirm never opens for a delete that
+       cannot happen. */
+    #[test]
+    fn d_on_a_full_group_refuses_and_names_the_way_out() {
+        let mut app = open_app();
+        app.step_group(true); // Banks holds an entry
+        app.ask_delete_group();
+        assert!(app.confirm.is_none(), "a full group opened the confirm");
+        assert!(app.stage.contains("not empty"), "{}", app.stage);
+    }
+
+    #[test]
+    fn d_on_an_empty_group_asks_then_y_deletes() {
+        let mut app = open_app();
+        app.step_group(true); // Banks
+        app.open_group_prompt_new();
+        for c in "Empty".chars() {
+            app.group_prompt_insert(c);
+        }
+        app.submit_group_prompt();
+        app.ask_delete_group();
+        let Confirm::DeleteGroup { id, .. } = app.confirm.clone().unwrap() else {
+            panic!("expected a group delete confirm");
+        };
+        app.confirm = None; // what the handler leaves behind before acting
+        app.confirm_delete_group(id);
+        let titles: Vec<_> = app
+            .group_tree()
+            .iter()
+            .map(|(id, _)| app.vault.as_ref().unwrap().get_group(id).unwrap().title.clone())
+            .collect();
+        assert!(!titles.contains(&"Empty".to_string()), "{titles:?}");
+    }
+
+    /* X on an entry arms the shelf; V moves it into the selected group. The
+       full trip ends with the row living under Root and the shelf empty. */
+    #[test]
+    fn x_cuts_an_entry_and_v_moves_it() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.switch_pane(); // X follows the pane: entries pane cuts the row
+        app.cut_selected();
+        assert!(matches!(app.cut, Some(Cut::Entry(_))));
+        app.step_group(false); // back to Root as the paste target
+        app.paste_cut();
+        assert!(app.cut.is_none(), "paste left the shelf armed");
+        let root = app.root_id();
+        let rows = app.vault.as_ref().unwrap().entries_in(&root);
+        assert_eq!(rows.len(), 1, "the entry did not move to Root");
+    }
+
+    /* A group cut pastes under the selected group; moving Banks under Work
+       leaves it out of the root's child list. */
+    #[test]
+    fn x_cuts_a_group_and_v_moves_it_under_another() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_group(&root, "Work").unwrap();
+        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true); // onto Banks
+        app.cut_selected();
+        app.step_group(true); // onto Work
+        app.paste_cut();
+        assert!(app.cut.is_none(), "paste left the shelf armed");
+        /* The cursor lands on the moved group, so Work is found by name. */
+        let work = app
+            .group_tree()
+            .iter()
+            .map(|(id, _)| *id)
+            .find(|id| app.vault.as_ref().unwrap().get_group(id).unwrap().title == "Work")
+            .unwrap();
+        let under_work = app.vault.as_ref().unwrap().groups_in(&work);
+        assert_eq!(under_work.len(), 1, "Banks did not land under Work");
+        assert_eq!(under_work[0].title, "Banks");
+    }
+
+    /* The cycle guard: pasting a group under itself would vanish it from
+       every path, so the vault refuses and the shelf stays armed. The flash
+       queue holds the message behind the cut notice, so the assertions read
+       state, not the stage text. */
+    #[test]
+    fn pasting_a_group_under_itself_names_the_cycle() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.cut_selected();
+        app.paste_cut(); // target is still Banks
+        assert!(app.cut.is_some(), "a failed paste disarmed the shelf");
+        let banks = app.group_cursor.unwrap();
+        assert_eq!(
+            app.vault.as_ref().unwrap().parent_group(&banks),
+            Some(app.root_id()),
+            "Banks moved despite the cycle guard"
+        );
+    }
+
+    /* Esc unwinds the shelf before its usual report, so a mis-cut is one
+       press from undone. The return value carries the answer; the flash
+       queue holds the wording behind the cut notice. */
+    #[test]
+    fn esc_drops_an_armed_cut_before_its_usual_report() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.cut_selected();
+        assert!(app.drop_cut(), "an armed cut should be dropped");
+        assert!(app.cut.is_none());
+        assert!(!app.drop_cut(), "an empty shelf is not a drop");
     }
 }

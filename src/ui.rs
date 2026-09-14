@@ -8,8 +8,8 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, FormField, FormKind, Pane, View};
-use crate::theme::{self, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
+use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Pane, View};
+use crate::theme::{self, AMBER, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
    takes none, so a column padded to a character count steps out of line by
@@ -47,6 +47,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.form.is_some() {
         draw_form(frame, app);
+    }
+    if app.group_prompt.is_some() {
+        draw_group_prompt(frame, app);
     }
     recolour(frame);
 }
@@ -450,6 +453,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             let e = if entries == 1 { "entry" } else { "entries" };
             spans.push(dim(format!("  {groups} {g} · {entries} {e}   ")));
         }
+        /* An armed cut is one keypress from moving something: the bar names
+           it so X never reads as a silent no-op. */
+        if let Some(note) = app.cut_note() {
+            spans.push(Span::styled(format!("{note} · v pastes  "), Style::new().fg(AMBER)));
+        }
     } else {
         spans.push(dim("   enter unlock   "));
     }
@@ -500,6 +508,11 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
         Confirm::DeleteEntry { title, .. } => (
             "delete?",
             format!(" delete entry “{title}”?  this cannot be undone"),
+            Span::styled(" y  delete", Style::new().fg(RED)),
+        ),
+        Confirm::DeleteGroup { title, .. } => (
+            "delete?",
+            format!(" delete group “{title}”?  this cannot be undone"),
             Span::styled(" y  delete", Style::new().fg(RED)),
         ),
     };
@@ -598,6 +611,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
     if app.view == View::Browser {
         rows.insert(1, ("copy", "y p U", "username, password, url"));
         rows.insert(2, ("edit", "a e D", "add, edit, delete entry"));
+        rows.insert(3, ("groups", "A E D", "add, rename, delete group"));
+        rows.insert(4, ("move", "X V", "cut, paste"));
     }
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
@@ -616,6 +631,41 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3);
+}
+
+/* The one-box group prompt behind A and E. Same field shape as the entry
+   form's rows so the caret and styling read identically, minus the cycling:
+   there is only the name. */
+fn draw_group_prompt(frame: &mut Frame, app: &App) {
+    let Some(prompt) = &app.group_prompt else {
+        return;
+    };
+    /* One box, always focused: the popup only exists while it holds the keys. */
+    let style = Style::new().fg(CREAM);
+    let mut first = prompt.value.chars();
+    let head: String = first.by_ref().take(prompt.caret).collect();
+    let tail: String = first.collect();
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" name     ", style),
+            Span::styled(head, style),
+            Span::styled("█", style),
+            Span::styled(tail, style),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" enter", Style::new().fg(GOLD)),
+            dim(" save   "),
+            Span::styled("esc", Style::new().fg(GOLD)),
+            dim(" throw away"),
+        ]),
+    ];
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    let title = match prompt.kind {
+        GroupPromptKind::New => "new group",
+        GroupPromptKind::Rename(_) => "rename group",
+    };
+    popup(frame, title, lines, width);
 }
 
 /* The row under the cursor is what the next key acts on, so its name is bold
@@ -824,5 +874,68 @@ mod tests {
         assert!(joined.contains("delete entry"), "{joined}");
         assert!(joined.contains("checking"), "{joined}");
         assert!(joined.contains("cannot be undone"), "{joined}");
+    }
+
+    /* The group prompt: one box, named for what it does, prefilled with the
+       current name. */
+    #[test]
+    fn the_group_prompt_draws_a_single_named_box() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_group(&root, "Banks").unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.open_group_prompt_rename();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("rename group"), "{joined}");
+        assert!(joined.contains("name"), "{joined}");
+        assert!(joined.contains("Banks"), "{joined}");
+    }
+
+    /* The group delete confirm names the group, same rule as the entry one. */
+    #[test]
+    fn the_delete_group_confirm_names_the_group() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_group(&root, "Empty").unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.ask_delete_group();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("delete group"), "{joined}");
+        assert!(joined.contains("Empty"), "{joined}");
+    }
+
+    /* An armed cut is named in the status bar, so X never reads as dead. */
+    #[test]
+    fn the_status_bar_names_an_armed_cut() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.switch_pane();
+        app.cut_selected();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("cut: checking"), "{joined}");
+        assert!(joined.contains("v pastes"), "{joined}");
     }
 }
