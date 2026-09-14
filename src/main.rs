@@ -123,8 +123,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     /* The search band is modal the same way: `q` types a letter into the
-       needle, `h` too. Enter and Esc hand the keys back to the browser. */
-    if app.search.is_some() {
+       needle, `h` too. Enter and Esc hand the keys back to the browser —
+       routing reads `band`, not `search.is_some()`, because a kept filter
+       must not swallow the browser's keys. */
+    if app.band {
         handle_search_key(app, code, mods);
         return;
     }
@@ -169,10 +171,11 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.ask_quit(),
-        /* Esc unwinds the armed cut before its usual report: a mis-cut is
-           one press from undone, and Esc never quits. */
+        /* Esc unwinds the armed cut, then a kept filter, before its usual
+           report: a mis-cut is one press from undone, a bad needle one press
+           from gone, and Esc never quits. */
         KeyCode::Esc => {
-            if !app.drop_cut() {
+            if !app.drop_cut() && !app.clear_search() {
                 app.say("this is the top  ·  q quits");
             }
         }
@@ -207,6 +210,10 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Left => app.switch_pane(),
         KeyCode::Right if app.active_pane == app::Pane::Groups => app.expand_group(),
         KeyCode::Char('o') => app.cycle_order(),
+        /* n/N walk the matches while the band is live, and step entries
+           otherwise — the same key, honest in both modes. */
+        KeyCode::Char('n') => app.jump_match(true),
+        KeyCode::Char('N') => app.jump_match(false),
         KeyCode::Char('/') => app.open_search(),
         _ => {}
     }
@@ -674,5 +681,27 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert_eq!(app.order, crate::app::SortOrder::Stored, "o did not wrap");
+    }
+
+    /* n/N walk the matches while the band is live: n moves to the next hit,
+       and running past the end says so instead of wrapping. */
+    #[test]
+    fn n_walks_matches_and_names_the_end() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "savi".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert_eq!(app.entry_rows().len(), 1, "the needle filtered to one");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        // With the band kept, n walks the (single) match list: at the end.
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.stage.contains("last match"), "{}", app.stage);
+        handle_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE);
+        /* 'first match' queues behind the still-live 'last match' flash:
+           force the expiry the frame loop would perform, then read. */
+        app.expire_now();
+        assert!(app.stage.contains("first match"), "{}", app.stage);
     }
 }

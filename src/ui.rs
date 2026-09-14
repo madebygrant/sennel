@@ -267,11 +267,19 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.entry_rows();
+    /* A live needle owns the empty state: "no entries here" would be a lie
+       when the pane is global, and the way out (Esc) is part of the message. */
+    let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
     if rows.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(dim(" no entries here"))),
-            area,
-        );
+        let text = if searching {
+            dim(format!(
+                " nothing matches {} · esc clears it",
+                app.search.as_deref().unwrap_or("")
+            ))
+        } else {
+            dim(" no entries here")
+        };
+        frame.render_widget(Paragraph::new(Line::from(text)), area);
         return;
     }
     let at = rows
@@ -284,11 +292,17 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|id| {
             let selected = Some(*id) == app.entry_cursor;
-            let (title, user) = app
+            let (title, user, group) = app
                 .vault
                 .as_ref()
-                .and_then(|v| v.get_entry(id))
-                .map(|e| (e.title.clone(), e.username.as_str().to_string()))
+                .and_then(|v| {
+                    let entry = v.get_entry(id)?;
+                    let path = v
+                        .parent_group_of_entry(id)
+                        .map(|g| v.group_path(&g).join("/"))
+                        .unwrap_or_default();
+                    Some((entry.title.clone(), entry.username.as_str().to_string(), path))
+                })
                 .unwrap_or_default();
             let name = truncate(&title, width.saturating_sub(2));
             let mark = if selected && live {
@@ -304,6 +318,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             ];
             if !user.is_empty() {
                 spans.push(dim(format!("  {user}")));
+            }
+            /* Global search pulls rows out of their folder, so the pane says
+               where each one lives — the same dim-suffix rule as the user. */
+            if searching && !group.is_empty() {
+                spans.push(dim(format!("  · {group}")));
             }
             ListItem::new(Line::from(spans))
         })
@@ -1051,5 +1070,41 @@ mod tests {
         assert!(joined.contains("/check"), "{joined}");
         assert!(joined.contains("1 of 2 shown"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
+    }
+
+    /* A live needle widens the pane to the whole vault: a hit from another
+       folder carries its group path so it is locatable, and a needle that
+       matches nothing says so instead of leaving a blank pane. */
+    #[test]
+    fn global_search_names_the_folder_and_the_empty_state() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        let work = vault.create_group(&banks, "Work").unwrap();
+        vault
+            .create_entry(&work, "github token", "octo", "s3cret-pw", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.open_search();
+        for ch in "github".chars() {
+            app.search_insert(ch);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("github token"), "{joined}");
+        assert!(joined.contains("Banks/Work"), "{joined}");
+        // Now a needle that matches nothing: the empty state names the way out.
+        app.search_clear();
+        for ch in "zzz".chars() {
+            app.search_insert(ch);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let empty = screen(&t).join("\n");
+        assert!(empty.contains("nothing matches zzz"), "{empty}");
+        assert!(empty.contains("esc clears it"), "{empty}");
     }
 }

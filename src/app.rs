@@ -258,6 +258,10 @@ pub struct App {
        is never touched. `enter` closes the band keeping the filter; Esc
        clears the filter first (and only quits-ish reports once empty). */
     pub search: Option<String>,
+    /* Whether the band has the keyboard. Some-without-band is a kept filter:
+       Enter keeps the needle and hands the keys back to the browser, so key
+       routing reads this flag, never `search.is_some()`. */
+    pub band: bool,
     /// Char index into the search band, same rule as every other caret.
     pub search_caret: usize,
     /// Ranks the current needle against every entry's haystack, reusing its
@@ -307,6 +311,7 @@ impl App {
             group_prompt: None,
             cut: None,
             search: None,
+            band: false,
             search_caret: 0,
             searcher: crate::search::Searcher::new(),
             lock_after: None,
@@ -348,6 +353,14 @@ impl App {
             Some(next) => self.show_flash(next),
             None => self.stage = self.resting.clone(),
         }
+    }
+
+    /// Test hook: forces the current flash to expire so a queued message
+    /// surfaces. The frame loop does this naturally; tests have no loop.
+    #[cfg(test)]
+    pub fn expire_now(&mut self) {
+        self.flash_until = Some(Instant::now() - Duration::from_secs(1));
+        self.expire_flash();
     }
 
     /* `q` is the deliberate way out and stays one key everywhere nothing
@@ -698,16 +711,36 @@ impl App {
         out
     }
 
-    /// Entry ids of the cursor group in the active order. Positions, like the
+    /// Entry ids of the entries pane in the active order. Positions, like the
     /// group tree above: the cursor holds the id, the list is rebuilt per
     /// frame, and the two meet in `snap`.
     /* &mut self, not &self: the matcher scores with internal scratch state,
        so the filter loop borrows it mutably while the vault stays shared. */
     pub fn entry_rows(&mut self) -> Vec<NodeId> {
-        let Some((vault, group)) = self.vault.as_ref().zip(self.group_cursor) else {
+        /* A live needle widens the pane to the whole vault: search is the one
+           question whose answer is rarely "the folder I was already in", and
+           the count in the status bar already promised the matches existed. */
+        let global = self
+            .search
+            .as_deref()
+            .is_some_and(|n| !n.is_empty());
+        let Some(vault) = &self.vault else {
             return Vec::new();
         };
-        let mut entries = vault.entries_in(&group);
+        let mut entries: Vec<&Entry> = if global {
+            let mut all: Vec<&Entry> = vault.db().entries.values().collect();
+            /* The map has no order of its own: a title sort gives the Stored
+               view a stable base — and every other order a deterministic
+               tiebreak — instead of whatever bucket iteration coughed up this
+               frame. */
+            all.sort_by_key(|a| a.title.to_lowercase());
+            all
+        } else {
+            match self.group_cursor {
+                Some(group) => vault.entries_in(&group),
+                None => Vec::new(),
+            }
+        };
         /* Stable sorts: ties keep the file's own order, so equal timestamps
            never shuffle rows between presses of `o`. Missing timestamps sort
            last under Reverse, reading as "oldest". */
@@ -723,23 +756,38 @@ impl App {
                 entries.sort_by_key(|e| std::cmp::Reverse(e.last_modification_time.as_millis()))
             }
         }
-        /* The search needle is a predicate over the sorted view, not a
-            separate mode: sorting and filtering compose instead of fighting
-           over who owns the list. The ids are collected first so the
-           searcher can be borrowed mutably inside the loop without fighting
-           the shared borrow on `entries`. */
-        if let Some(needle) = self.search.clone().filter(|n| !n.is_empty()) {
-            let ids: Vec<NodeId> = entries.iter().map(|e| e.id).collect();
+        let ids: Vec<NodeId> = entries.iter().map(|e| e.id).collect();
+        if global {
             /* rank_entry, not raw rank: multi-word needles ("git octo")
                become Pattern atoms there, and the band must agree with the
                count in `entry_matches`, which uses the same predicate. */
-            let hits: Vec<NodeId> = ids
+            let needle = self.search.clone().unwrap_or_default();
+            let mut hits: Vec<NodeId> = ids
                 .into_iter()
-                .filter(|id| self.searcher.rank_entry(&needle, vault, id).is_some())
+                .filter(|id| {
+                    self.searcher
+                        .rank_entry(&needle, vault, id)
+                        .is_some()
+                })
                 .collect();
+            /* Relevance order while searching: the best hit first, so the
+               cursor lands on the likely answer without a single j. Ties keep
+               the sorted order above. */
+            let mut scored: Vec<(NodeId, u16)> = hits
+                .iter()
+                .map(|id| {
+                    let score = self
+                        .searcher
+                        .rank_entry(&needle, vault, id)
+                        .unwrap_or(0);
+                    (*id, score)
+                })
+                .collect();
+            scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+            hits = scored.into_iter().map(|(id, _)| id).collect();
             return hits;
         }
-        entries.iter().map(|e| e.id).collect()
+        ids
     }
 
     /// How many entries the vault holds in total, for the "N of M shown"
@@ -810,6 +858,7 @@ impl App {
         let prior = self.search.clone().unwrap_or_default();
         self.search_caret = prior.chars().count();
         self.search = Some(prior);
+        self.band = true;
     }
 
     /// Enter on the band: keep the filter, hand the keys back to the browser.
@@ -817,17 +866,19 @@ impl App {
         if self.search.as_deref().is_some_and(str::is_empty) {
             self.search = None;
         }
+        self.band = false;
         self.snap();
     }
 
-    /* Esc on the band clears the filter first. With nothing typed it reports
-       instead — Esc never quits, and a bare Esc on an empty band closing
-       nothing should say so. */
+    /* Esc clears the filter — on the band itself or, once Enter has kept it,
+       from the browser. With nothing to clear it reports false so the caller
+       can fall through to its usual Esc report. */
     pub fn clear_search(&mut self) -> bool {
         let was_live = self.search.is_some();
         if was_live {
             self.search = None;
             self.search_caret = 0;
+            self.band = false;
             self.snap();
         }
         was_live
@@ -956,12 +1007,15 @@ impl App {
 
     /* Filtered out means not selected: the entry cursor may name an entry of
        another group after the group cursor moved, and acting on it would edit
-       a row that is not on screen. */
+       a row that is not on screen. A live search relaxes the rule — the rows
+       list is global then, and a hit from another folder is exactly the row
+       the user asked to act on. */
     pub fn selected_entry(&self) -> Option<&Entry> {
         let (vault, group, id) = (self.vault.as_ref()?, self.group_cursor?, self.entry_cursor?);
-        vault
-            .get_entry(&id)
-            .filter(|_| vault.parent_group_of_entry(&id) == Some(group))
+        let searching = self.search.as_deref().is_some_and(|n| !n.is_empty());
+        vault.get_entry(&id).filter(|_| {
+            searching || vault.parent_group_of_entry(&id) == Some(group)
+        })
     }
 
     /* Puts both cursors back on rows that exist. Called after every mutation
@@ -1061,6 +1115,32 @@ impl App {
         } else {
             rows[0]
         });
+    }
+
+    /* n/N walk the visible rows — which, while a needle is live, are the
+       matches. Clamps at the ends and says so: a jump that quietly wraps
+       reads as a key that did nothing. With no needle this is a plain
+       cursor step, so n stays honest on a browser with no search. */
+    pub fn jump_match(&mut self, next: bool) {
+        let rows = self.entry_rows();
+        if rows.is_empty() {
+            self.say("no matches · esc clears the filter");
+            return;
+        }
+        let at = self
+            .entry_cursor
+            .and_then(|id| rows.iter().position(|e| *e == id))
+            .unwrap_or(0);
+        if next && at + 1 >= rows.len() {
+            self.say("last match");
+            return;
+        }
+        if !next && at == 0 {
+            self.say("first match");
+            return;
+        }
+        self.entry_cursor = Some(rows[if next { at + 1 } else { at - 1 }]);
+        self.entry_scroll = 0;
     }
 
     /// One step in whichever pane has the keys. Tab moves the keys, never
@@ -2606,5 +2686,90 @@ mod tests {
         assert_eq!(app.group_tree().len(), 1, "the tree folded to the root");
         app.collapse_group(); // already folded now
         assert!(app.stage.contains("already folded"), "{}", app.stage);
+    }
+
+    /* A live needle widens the entries pane to the whole vault: a hit in a
+       folder the cursor is not in still shows, and acts on. */
+    #[test]
+    fn a_needle_searches_the_whole_vault() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
+        let work = vault.create_group(&root, "Work").unwrap();
+        vault.create_entry(&work, "github token", "robot", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.open_search();
+        for ch in "github".chars() {
+            app.search_insert(ch);
+        }
+        let rows = app.entry_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let hit = rows[0];
+        assert_eq!(
+            app.vault.as_ref().unwrap().get_entry(&hit).unwrap().title,
+            "github token"
+        );
+        /* The relaxed selection rule: a global hit from another folder is
+           actable — the user searched for it. */
+        assert!(app.selected_entry().is_some());
+    }
+
+    /* An empty state must name the way out: the pane going blank under a
+       bad needle is a filter, not an empty vault. */
+    #[test]
+    fn an_empty_search_state_is_a_filter_message() {
+        let mut app = open_app();
+        app.step_group(true); // root holds no entries; Banks does
+        app.open_search();
+        for ch in "zzz".chars() {
+            app.search_insert(ch);
+        }
+        assert!(app.entry_rows().is_empty());
+        /* The draw path renders the words; here we pin the predicate that
+           drives them: needle live, rows gone, band still open. */
+        assert!(app.search.is_some());
+        assert!(app.clear_search());
+        assert!(!app.entry_rows().is_empty(), "esc restored the rows");
+    }
+
+    /* n/N walk the matches with no wrap: the ends say so. Relevance order
+       can tie, so the walk is asserted relative to the rows list, not to a
+       guessed starting row. */
+    #[test]
+    fn n_and_n_walk_matches_without_wrapping() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "one mail", "u", "p", "", "").unwrap();
+        vault.create_entry(&banks, "two mail", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.open_search();
+        for ch in "mail".chars() {
+            app.search_insert(ch);
+        }
+        assert_eq!(app.entry_rows().len(), 2, "both entries match 'mail'");
+        let start = app.entry_cursor.unwrap();
+        app.jump_match(true); // n to the other match
+        let rows = app.entry_rows();
+        let at = rows.iter().position(|e| *e == start).unwrap_or(0);
+        assert_eq!(
+            app.entry_cursor,
+            Some(rows[(at + 1).min(rows.len() - 1)]),
+            "n moved to the neighbouring match"
+        );
+        let second = app.entry_cursor.unwrap();
+        app.jump_match(true); // already last
+        assert!(app.stage.contains("last match"), "{}", app.stage);
+        app.jump_match(false); // N back
+        assert_ne!(app.entry_cursor, Some(second), "N walked back");
+        app.jump_match(false); // already first
+        /* 'first match' queued behind the still-live 'last match' flash:
+           force the expiry the frame loop would perform, then read. */
+        app.expire_now();
+        assert!(app.stage.contains("first match"), "{}", app.stage);
     }
 }
