@@ -655,8 +655,13 @@ impl App {
        unlocks. The path is display text, not a secret, and the flash names
        what it was set to so a typo reads as a typo. */
     pub fn accept_file_box(&mut self) {
-        let typed = self.unlock_file.trim().to_string();
-        if typed.is_empty() {
+        /* Not taken literally: `~` means home the way it does in the config
+           file, so a typed `~/Downloads/x.kdbx` finds the vault instead of
+           opening a file literally named `~` and offering to create one. */
+        let typed = crate::config::expand(self.unlock_file.trim())
+            .display()
+            .to_string();
+        if self.unlock_file.trim().is_empty() {
             self.say("type a path first");
             return;
         }
@@ -2489,6 +2494,30 @@ mod tests {
         assert!(app.unlock_new, "a missing file reads as create");
         assert_eq!(app.unlock_field, UnlockField::Password, "focus went home");
         assert!(app.stage.contains("vault set"), "{}", app.stage);
+    }
+
+    /* A `~` path types like it reads: the file box expands it against HOME
+       the way the config file does, so an existing vault is found rather
+       than read as a new file literally named `~`. */
+    #[test]
+    fn the_file_box_expands_a_home_path() {
+        let (mut app, _tmp) = locked_app_with_db(b"pw");
+        app.unlock_file = "~/Downloads/sites.kdbx".into();
+        app.unlock_field = UnlockField::File;
+        app.accept_file_box();
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            app.db_path,
+            Some(
+                std::path::PathBuf::from(home)
+                    .join("Downloads")
+                    .join("sites.kdbx")
+            ),
+            "tilda stayed literal"
+        );
+        /* Whatever is_file says locally, it must not read as create-only
+           when HOME-side path exists; here it is simply expanded. */
+        assert_eq!(app.unlock_field, UnlockField::Password, "focus went home");
     }
 
     /* The file box prefill survives a lock–unlock round trip, so the second
