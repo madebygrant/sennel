@@ -10,6 +10,7 @@
    HMAC errors on vanilla KDBX 3.1 and 4.1). The `keepass` crate round-trips
    with keepassxc-cli in both directions, which is the bar. */
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use keepass::{
@@ -137,7 +138,10 @@ impl Vault {
        garbage that fails the final padding check (InvalidPadding). Both are
        "the key did not open it". A genuinely bad password on a corrupt file
        keeps arriving as one of these, which is exactly what users see in
-       KeePass clients. */
+       KeePass clients. The converse is inherent to KDBX3 (it has no header
+       HMAC): a corrupt or truncated KDBX3 body also fails the padding check
+       and reports as WrongPassword even with the right key. No client can
+       tell those apart before decrypting, so we do not pretend to. */
     fn map_db_error(e: DatabaseOpenError) -> VaultError {
         match e {
             DatabaseOpenError::Key(ref key_err)
@@ -219,13 +223,34 @@ impl Vault {
             std::fs::create_dir_all(dir).map_err(|e| VaultError::Io(e.to_string()))?;
         }
         let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-        let mut out = std::fs::File::create(&temp).map_err(|e| VaultError::Io(e.to_string()))?;
-        db.save(&mut out, key.clone())
-            .map_err(|e| VaultError::Db(e.to_string()))?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| VaultError::Io(e.to_string()))?;
-        std::fs::rename(&temp, path).map_err(|e| VaultError::Io(e.to_string()))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        /* 0600 from the first byte: File::create + set_permissions afterwards
+           would leave a umask-wide window holding a full plaintext-free but
+           still sensitive copy of the vault. */
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(|e| VaultError::Io(e.to_string()));
+        let mut out = match opened {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        };
+        if let Err(e) = db.save(&mut out, key.clone()) {
+            drop(out);
+            let _ = std::fs::remove_file(&temp);
+            return Err(VaultError::Db(e.to_string()));
+        }
+        drop(out);
+        if let Err(e) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(VaultError::Io(e.to_string()));
+        }
         Ok(())
     }
 
@@ -262,7 +287,7 @@ impl Vault {
 
     /// Total entries across all groups, for the unlock flash.
     pub fn entry_count(&self) -> usize {
-        self.db.num_entries()
+        self.db.num_entries() - self.recycled().len()
     }
 
     /// Total groups, for the --list header.
@@ -270,15 +295,38 @@ impl Vault {
         self.db.num_groups()
     }
 
-    /// Every entry id in the file, for the global search scope.
-    pub fn all_entry_ids(&self) -> Vec<EntryId> {
-        self.db.iter_all_entries().map(|e| e.id()).collect()
+    /* Recycle-bin entries are trash: the group walk still surfaces the bin to
+       a user who goes looking for it (it is a group like any other), but
+       counts and the flattened global scope skip its subtree. A real
+       KeePassXC vault parks deleted entries there, and an honest
+       "unlocked N entries" or search hit must not include deleted things. */
+    fn recycled(&self) -> HashSet<EntryId> {
+        let mut out = HashSet::new();
+        let Some(bin) = self.db.recycle_bin() else {
+            return out;
+        };
+        let mut stack = vec![bin.id()];
+        while let Some(id) = stack.pop() {
+            let Some(group) = self.db.group(id) else {
+                continue;
+            };
+            out.extend(group.entry_ids());
+            stack.extend(group.group_ids());
+        }
+        out
     }
 
-    /// Every entry as a ref in one borrowed batch: the entries-pane views
-    /// sort and filter across all of them per call.
+    /// Every live entry id in the file, for the global search scope.
+    pub fn all_entry_ids(&self) -> Vec<EntryId> {
+        let dead = self.recycled();
+        self.db.iter_all_entries().map(|e| e.id()).filter(|id| !dead.contains(id)).collect()
+    }
+
+    /// Every live entry as a ref in one borrowed batch: the entries-pane
+    /// views sort and filter across all of them per call.
     pub fn entry_refs(&self) -> Vec<EntryRef<'_>> {
-        self.db.iter_all_entries().collect()
+        let dead = self.recycled();
+        self.db.iter_all_entries().filter(|e| !dead.contains(&e.id())).collect()
     }
 
     /* Expansion is presentation, not data: toggling it does not mark the vault
@@ -396,6 +444,10 @@ impl Vault {
         Ok(())
     }
 
+    /* Notes ride protected here where KeePass convention stores them in the
+       clear. It round-trips (a keepassxc-cli-written fixture's notes read
+       back; our files open there too) and protecting them only ever hides
+       more — left as-is deliberately. */
     pub fn create_entry(
         &mut self,
         group: &GroupId,
@@ -490,6 +542,13 @@ impl Vault {
     /// snapshot carries the record but not its slot in the child list, and
     /// a one-level undo that restores content is worth the position it
     /// cannot bring back.
+    /* The caller must hand back the parent the snapshot was taken from —
+       that is what the undo slot records — because the whole-record clone
+       also carries the snapshot's own back-pointer, and a different parent
+       would leave group child list and entry pointing at different places
+       (Entry's parent field is crate-private, so we cannot fix it here).
+       DuplicateEntryIdError maps to EntryNotFound as "cannot restore into
+       a slot that is not empty": the entry exists where it should not. */
     pub fn restore_entry(&mut self, entry: &Entry, parent: &GroupId) -> Result<(), VaultError> {
         let Some(mut group) = self.db.group_mut(*parent) else {
             return Err(VaultError::GroupNotFound);
@@ -751,5 +810,37 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "the save widened who can read the vault");
+    }
+
+    /* The file this whole migration exists for: a vault written by
+       KeePassXC, not by our own library. keepass-rs 0.2 round-tripped
+       perfectly with itself and still could not open these — every test
+       passed while the real thing failed. This fixture is generated by
+       keepassxc-cli (see the git history of this test) with a known
+       password, so it pins the third-party-writer class of bug for good.
+       Synthetic vault only: real .kdbx files must never enter the repo. */
+    #[test]
+    fn a_keepassxc_written_vault_opens_with_the_right_password() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/keepassxc3.kdbx");
+        let vault = Vault::open(&path, "sennel-fixture", None).unwrap();
+        let ids = vault.all_entry_ids();
+        let entry = vault.get_entry(&ids[0]).unwrap();
+        assert_eq!(entry.title(), "xc entry");
+        assert_eq!(entry.username(), "octo");
+        assert_eq!(entry.url(), "https://example.test");
+        assert_eq!(entry.password(), "sennel-entry-pw");
+    }
+
+    /* And the failure mode has to stay honest: wrong key on a real-world
+       file says the key was wrong, not that the file is broken. */
+    #[test]
+    fn a_keepassxc_written_vault_names_a_wrong_password_honestly() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/keepassxc3.kdbx");
+        assert!(matches!(
+            Vault::open(&path, "not the password", None),
+            Err(VaultError::WrongPassword)
+        ));
     }
 }

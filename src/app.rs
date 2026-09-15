@@ -470,8 +470,8 @@ impl App {
         self.copy_field("url", |e| e.url().to_string());
     }
 
-        /* EntryRef derefs to Entry, so the &'_ bound accepts both a ref and the
-       record type the crate hands back. */
+    /* EntryRef derefs to Entry, so the take closure reads both the ref the
+       selection hands over and the record type the crate stores. */
     fn copy_field(&mut self, label: &str, take: impl FnOnce(&keepass::db::Entry) -> String) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to copy from");
@@ -575,7 +575,7 @@ impl App {
 
     /* Unlock with the typed password (and optional key file), or create the
        database when the file is missing and the confirm matches. The password
-       buffer is zeroized on every path out; the retained CompositeKey inside
+       buffer is zeroized on every path out; the retained DatabaseKey inside
        the vault is the only copy that survives, and it zeroizes on drop. */
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
         /* A path typed in the file box but never confirmed with Enter (Tab
@@ -599,7 +599,16 @@ impl App {
             password.zeroize();
             return;
         }
-        let pw = String::from_utf8_lossy(password).into_owned();
+        /* Borrow, do not copy: a lossy into_owned() would leave an extra
+           plaintext master password that nothing zeroizes, and it would
+           silently rewrite non-UTF8 bytes into a different (wrong) password.
+           keepass 0.13's DatabaseKey speaks &str, so refuse raw-byte
+           passwords honestly instead of guessing at them. */
+        let Ok(pw) = std::str::from_utf8(password) else {
+            self.say("password has bytes that are not text · keepass cannot use it");
+            password.zeroize();
+            return;
+        };
         let result = if self.unlock_new {
             if self.unlock_confirm.as_bytes() != password.as_slice() {
                 self.say("passwords differ  ·  retype both fields");
@@ -609,9 +618,9 @@ impl App {
                 return;
             }
             let mut vault = Vault::new();
-            vault.save_as(&path, &pw, key_file).map(|()| vault)
+            vault.save_as(&path, pw, key_file).map(|()| vault)
         } else {
-            Vault::open(&path, &pw, key_file)
+            Vault::open(&path, pw, key_file)
         };
         // The typed bytes have served: the key inside the vault is a copy.
         password.zeroize();
@@ -680,14 +689,11 @@ impl App {
         /* Not taken literally: `~` means home the way it does in the config
            file, so a typed `~/Downloads/x.kdbx` finds the vault instead of
            opening a file literally named `~` and offering to create one. */
-        let typed = crate::config::expand(self.unlock_file.trim())
-            .display()
-            .to_string();
         if self.unlock_file.trim().is_empty() {
             self.say("type a path first");
             return;
         }
-        self.db_path = Some(PathBuf::from(typed));
+        self.db_path = Some(crate::config::expand(self.unlock_file.trim()));
         self.refresh_db_state();
         self.unlock_field = UnlockField::Password;
         self.caret = 0;
