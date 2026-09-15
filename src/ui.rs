@@ -9,6 +9,7 @@ use ratatui::widgets::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Pane, View, char_index_to_byte};
+use crate::vault::EntryExt;
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
@@ -224,7 +225,7 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 .vault
                 .as_ref()
                 .and_then(|v| v.get_group(id))
-                .map(|g| (g.title.clone(), g.is_expanded))
+                .map(|g| (g.name.clone(), g.is_expanded))
                 .unwrap_or_default();
             /* ▸/▾ only where folding means something: a leaf gets blanks so
                names still line up down the pane. */
@@ -301,7 +302,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                         .parent_group_of_entry(id)
                         .map(|g| v.group_path(&g).join("/"))
                         .unwrap_or_default();
-                    Some((entry.title.clone(), entry.username.as_str().to_string(), path))
+                    Some((
+                        EntryExt::title(&entry).to_string(),
+                        EntryExt::username(&entry).to_string(),
+                        path,
+                    ))
                 })
                 .unwrap_or_default();
             let name = truncate(&title, width.saturating_sub(2));
@@ -361,35 +366,35 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let faint = Style::new().fg(DIM);
     let mut lines = vec![
         Line::from(Span::styled(
-            truncate(&entry.title, width),
+            truncate(entry.title(), width),
             row_style(true),
         )),
         Line::default(),
         row(
             "user",
-            truncate(entry.username.as_str(), width.saturating_sub(10)),
+            truncate(entry.username(), width.saturating_sub(10)),
             cream,
         ),
         row(
             "pass",
             if app.show_password {
-                truncate(entry.password.as_str(), width.saturating_sub(10))
+                truncate(entry.password(), width.saturating_sub(10))
             } else {
                 "••••••••".to_string()
             },
             cream,
         ),
     ];
-    if !entry.url.is_empty() {
+    if !entry.url().is_empty() {
         lines.push(row(
             "url",
-            truncate(&entry.url, width.saturating_sub(10)),
+            truncate(entry.url(), width.saturating_sub(10)),
             faint,
         ));
     }
     /* First line only: the row is one row, and a note that wraps the pane is
        a detail view of its own, which is Wave 7's editor to give. */
-    let notes = entry.notes.as_str().lines().next().unwrap_or("");
+    let notes = entry.notes().lines().next().unwrap_or("");
     if !notes.is_empty() {
         lines.push(row(
             "notes",

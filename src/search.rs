@@ -1,4 +1,4 @@
-use keepass_rs::{Entry, NodeId};
+use keepass::db::{EntryId, EntryRef};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Utf32Str, Utf32String};
@@ -10,7 +10,7 @@ use crate::vault::Vault;
    user did not mean. Title, user, url and the group path are the fields a
    person reaches for when looking for an entry. If notes search is ever
    wanted, it becomes an opt-in toggle, not a default. */
-pub fn haystack(vault: &Vault, id: &NodeId) -> String {
+pub fn haystack(vault: &Vault, id: &EntryId) -> String {
     let Some(entry) = vault.get_entry(id) else {
         return String::new();
     };
@@ -18,15 +18,15 @@ pub fn haystack(vault: &Vault, id: &NodeId) -> String {
         .parent_group_of_entry(id)
         .map(|g| vault.group_path(&g).join("/"))
         .unwrap_or_default();
-    haystack_from(entry, &group)
+    haystack_from(&entry, &group)
 }
 
 /// Split from `haystack` for tests: the same join without needing the vault.
-fn haystack_from(entry: &Entry, group_path: &str) -> String {
+fn haystack_from(entry: &EntryRef<'_>, group_path: &str) -> String {
     [
-        entry.title.as_str(),
-        entry.username.as_str(),
-        entry.url.as_str(),
+        crate::vault::EntryExt::title(entry),
+        crate::vault::EntryExt::username(entry),
+        crate::vault::EntryExt::url(entry),
         group_path,
     ]
     .join(" ")
@@ -76,7 +76,7 @@ impl Searcher {
     /// and Smart casing/normalisation come along for free. Pattern scores
     /// u32 and never returns Some(0) for a real hit below 1, so the cast
     /// stays lossless in practice; clamp keeps the u16 ceiling honest.
-    pub fn rank_entry(&mut self, needle: &str, vault: &Vault, id: &NodeId) -> Option<u16> {
+    pub fn rank_entry(&mut self, needle: &str, vault: &Vault, id: &EntryId) -> Option<u16> {
         let pattern = Pattern::new(
             needle,
             CaseMatching::Smart,
@@ -100,7 +100,7 @@ impl Default for Searcher {
 mod tests {
     use super::*;
 
-    fn vault_with(title: &str, user: &str, url: &str, group: &str) -> (Vault, NodeId) {
+    fn vault_with(title: &str, user: &str, url: &str, group: &str) -> (Vault, EntryId) {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let g = vault.create_group(&root, group).unwrap();

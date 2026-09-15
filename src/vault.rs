@@ -1,16 +1,74 @@
-/* Thin wrapper over keepass-rs's Database, which already is the domain
-   model (HashMap groups/entries keyed by stable NodeIds, ProtectedStrings
-   that zeroize on drop). No parallel model: a second Group/Entry pair would
-   need a mapping layer in Wave 2 and every op implemented twice. This module
-   adds only what Sennel needs on top: guarded moves/deletes, paths, and
-   ordered child views for the panes. File IO lives here too in Wave 2. */
+/* Thin adapter over the `keepass` crate's Database, which already is the
+   domain model (groups/entries keyed by stable uuid ids, secrets held in
+   zeroizing SecretBoxes). No parallel model: a second Group/Entry pair would
+   need a mapping layer and every op implemented twice. This module adds only
+   what Sennel needs on top: guarded moves/deletes, paths, and ordered child
+   views for the panes. File IO lives here too.
+
+   Why keepass 13 not keepass-rs 02: keepass-rs 0.2 cannot read real
+   KeePassXC files — a correct password fails parsing (CBC padding / header
+   HMAC errors on vanilla KDBX 3.1 and 4.1). The `keepass` crate round-trips
+   with keepassxc-cli in both directions, which is the bar. */
 
 use std::path::{Path, PathBuf};
 
-use keepass_rs::{
-    open_database, save_database, CompositeKey, Database, DatabaseError, DatabaseVersion,
-    DateInstant, Entry, Group, NodeId, ProtectedString,
+use keepass::{
+    db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
+    error::{
+        CryptographyError, DatabaseKeyError, DatabaseOpenError, DestinationGroupNotFoundError,
+        DuplicateEntryIdError, MoveGroupError,
+    },
+    Database, DatabaseKey,
 };
+
+/* The five standard field names. Strings rather than the crate's constants:
+   they are stable parts of the KDBX format, and one less re-export to chase. */
+pub const TITLE: &str = "Title";
+pub const USERNAME: &str = "UserName";
+pub const PASSWORD: &str = "Password";
+pub const URL: &str = "URL";
+pub const NOTES: &str = "Notes";
+
+/// Field reads as plain strings, defaulting to "" — KDBX entries may omit
+/// any field, and the UI and search want a printable &str, not Options.
+pub trait EntryExt {
+    fn title(&self) -> &str;
+    fn username(&self) -> &str;
+    fn password(&self) -> &str;
+    fn url(&self) -> &str;
+    fn notes(&self) -> &str;
+}
+
+/* Field reads as plain strings, defaulting to "" — KDBX entries may omit
+   any field, and the UI and search want a printable &str, not Options.
+   Macro-read: the same five reads apply to the owned record and to the
+   crate's borrowed Ref wrappers (the blanket-impl route collides because
+   Deref overlaps Entry itself). */
+macro_rules! impl_entry_ext {
+    ($t:ty) => {
+        impl EntryExt for $t {
+            fn title(&self) -> &str {
+                self.get_title().unwrap_or("")
+            }
+            fn username(&self) -> &str {
+                self.get_username().unwrap_or("")
+            }
+            fn password(&self) -> &str {
+                self.get_password().unwrap_or("")
+            }
+            fn url(&self) -> &str {
+                self.get_url().unwrap_or("")
+            }
+            fn notes(&self) -> &str {
+                self.get(NOTES).unwrap_or("")
+            }
+        }
+    };
+}
+
+impl_entry_ext!(Entry);
+impl_entry_ext!(EntryRef<'_>);
+impl_entry_ext!(EntryMut<'_>);
 
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
@@ -55,21 +113,18 @@ pub struct Vault {
     db: Database,
     /* The key stays with the vault so `save` needs no password prompt:
        re-asking on every save would train "type it without thinking".
-       CompositeKey zeroizes on drop, so holding it is holding secrets right. */
-    key: Option<CompositeKey>,
+       DatabaseKey zeroizes on drop, so holding it is holding secrets right.
+       It is held by value: `save` consumes a clone of it. */
+    key: Option<DatabaseKey>,
     path: Option<PathBuf>,
 }
 
 impl Vault {
-    /// Fresh KDBX4 database with one empty root group. `Database::new` leaves
-    /// `root_group_id` unset, and every op below assumes a root exists.
+    /// Fresh KDBX4 database with one empty root group. `Database::new`
+    /// generates the root itself; this just names it.
     pub fn new() -> Self {
-        let mut db = Database::new(DatabaseVersion::KDBX4);
-        let mut root = Group::new(NodeId::new_uuid());
-        root.title = "Root".into();
-        let id = root.id;
-        db.groups.insert(id, root);
-        db.root_group_id = Some(id);
+        let mut db = Database::new();
+        db.root_mut().name = "Root".into();
         Vault {
             db,
             key: None,
@@ -77,38 +132,51 @@ impl Vault {
         }
     }
 
-    /* KDBX4 verifies the header HMAC before decrypting, so a wrong password
-       arrives as DecryptionError("Header HMAC mismatch") rather than
-       InvalidCredentials. An HMAC mismatch is cryptographically
-       indistinguishable from a wrong key, which is why KeePass clients report
-       both the same way; a genuinely corrupt file just keeps saying it. */
-    fn map_db_error(e: DatabaseError) -> VaultError {
+    /* A wrong key shows differently by version: KDBX4 verifies the header
+       HMAC first (IncorrectKey), while a KDBX3 file decrypts your key into
+       garbage that fails the final padding check (InvalidPadding). Both are
+       "the key did not open it". A genuinely bad password on a corrupt file
+       keeps arriving as one of these, which is exactly what users see in
+       KeePass clients. */
+    fn map_db_error(e: DatabaseOpenError) -> VaultError {
         match e {
-            DatabaseError::InvalidKey
-            | DatabaseError::InvalidCredentials
-            | DatabaseError::DecryptionError(_) => VaultError::WrongPassword,
+            DatabaseOpenError::Key(ref key_err)
+                if matches!(key_err, DatabaseKeyError::IncorrectKey) =>
+            {
+                VaultError::WrongPassword
+            }
+            DatabaseOpenError::Cryptography(ref crypto_err) => {
+                if matches!(crypto_err, CryptographyError::InvalidPadding(_)) {
+                    VaultError::WrongPassword
+                } else {
+                    VaultError::Db(e.to_string())
+                }
+            }
             other => VaultError::Db(other.to_string()),
         }
     }
 
-    fn build_key(password: &[u8], key_file: Option<&[u8]>) -> CompositeKey {
-        let mut key = CompositeKey::new().with_password(password);
+    fn build_key(password: &str, key_file: Option<&[u8]>) -> Result<DatabaseKey, VaultError> {
+        let mut key = DatabaseKey::new().with_password(password);
         if let Some(data) = key_file {
-            key = key.with_key_file(data);
+            /* with_keyfile wants a reader, not bytes. */
+            key = key
+                .with_keyfile(&mut std::io::Cursor::new(data))
+                .map_err(|e| VaultError::Io(e.to_string()))?;
         }
-        key
+        Ok(key)
     }
 
-    /// Open an existing `.kdbx` file. The password bytes are copied into the
+    /// Open an existing `.kdbx` file. The password string is copied into the
     /// retained key; the caller zeroizes its own buffer.
     pub fn open(
         path: &Path,
-        password: &[u8],
+        password: &str,
         key_file: Option<&[u8]>,
     ) -> Result<Self, VaultError> {
-        let file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
-        let key = Self::build_key(password, key_file);
-        let db = open_database(file, &key).map_err(Self::map_db_error)?;
+        let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
+        let key = Self::build_key(password, key_file)?;
+        let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
         Ok(Vault {
             db,
             key: Some(key),
@@ -129,10 +197,10 @@ impl Vault {
     pub fn save_as(
         &mut self,
         path: &Path,
-        password: &[u8],
+        password: &str,
         key_file: Option<&[u8]>,
     ) -> Result<(), VaultError> {
-        let key = Self::build_key(password, key_file);
+        let key = Self::build_key(password, key_file)?;
         Self::write_file(&self.db, &key, path)?;
         self.key = Some(key);
         self.path = Some(path.to_path_buf());
@@ -143,19 +211,17 @@ impl Vault {
         self.path.as_deref()
     }
 
-    /* Beside the target and renamed over it: `save_database` truncates first
-       through an interrupted write, and a half-written kdbx opens as nothing.
-       Mode 0600, because this file holds every secret at once. */
-    fn write_file(db: &Database, key: &CompositeKey, path: &Path) -> Result<(), VaultError> {
+    /* Beside the target and renamed over it: a truncated write turns a
+       half-written kdbx into nothing. Mode 0600, because this file holds
+       every secret at once. */
+    fn write_file(db: &Database, key: &DatabaseKey, path: &Path) -> Result<(), VaultError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| VaultError::Io(e.to_string()))?;
         }
-        let temp = path.with_extension(format!(
-            "{}.tmp",
-            std::process::id()
-        ));
+        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
         let mut out = std::fs::File::create(&temp).map_err(|e| VaultError::Io(e.to_string()))?;
-        save_database(&mut out, db, key).map_err(Self::map_db_error)?;
+        db.save(&mut out, key.clone())
+            .map_err(|e| VaultError::Db(e.to_string()))?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| VaultError::Io(e.to_string()))?;
@@ -163,12 +229,17 @@ impl Vault {
         Ok(())
     }
 
+    /* Escape hatch for exceptional reads. The 0.13 rewrite left no prod
+       caller (previous uses read password strings and entry maps), but it
+       stays as the sanctioned read-only back door so tests and future
+       scripts do not bypass the guarded methods. */
+    #[allow(dead_code)]
     pub fn db(&self) -> &Database {
         &self.db
     }
 
     /* Test-only: prod paths go through guarded Vault methods that keep the
-       cursors and the dirty flag consistent. dict_mut escapes those guards,
+       cursors and the dirty flag consistent. db_mut escapes those guards,
        so it stays behind this comment as the documented back door for tests
        that need to stamp timestamps directly. */
     #[allow(dead_code)]
@@ -176,195 +247,183 @@ impl Vault {
         &mut self.db
     }
 
-    /* Parity read of keepass-rs's own dirty flag; App tracks `dirty` itself
-       because "saved or not" is the question that matters here. */
-    #[allow(dead_code)]
-    pub fn is_modified(&self) -> bool {
-        self.db.data_modified
-    }
-
-    pub fn root_id(&self) -> NodeId {
+    pub fn root_id(&self) -> GroupId {
         /* Set by new() and never cleared: root deletion is refused below. */
-        self.db.root_group_id.expect("vault without a root group")
+        self.db.root().id()
     }
 
-    pub fn get_group(&self, id: &NodeId) -> Option<&Group> {
-        self.db.get_group(id)
+    pub fn get_group(&self, id: &GroupId) -> Option<GroupRef<'_>> {
+        self.db.group(*id)
     }
 
-    pub fn get_entry(&self, id: &NodeId) -> Option<&Entry> {
-        self.db.get_entry(id)
+    pub fn get_entry(&self, id: &EntryId) -> Option<EntryRef<'_>> {
+        self.db.entry(*id)
     }
 
     /// Total entries across all groups, for the unlock flash.
     pub fn entry_count(&self) -> usize {
-        self.db.entries.len()
+        self.db.num_entries()
+    }
+
+    /// Total groups, for the --list header.
+    pub fn num_groups(&self) -> usize {
+        self.db.num_groups()
+    }
+
+    /// Every entry id in the file, for the global search scope.
+    pub fn all_entry_ids(&self) -> Vec<EntryId> {
+        self.db.iter_all_entries().map(|e| e.id()).collect()
+    }
+
+    /// Every entry as a ref in one borrowed batch: the entries-pane views
+    /// sort and filter across all of them per call.
+    pub fn entry_refs(&self) -> Vec<EntryRef<'_>> {
+        self.db.iter_all_entries().collect()
     }
 
     /* Expansion is presentation, not data: toggling it does not mark the vault
        dirty, so folding the tree never triggers the quit guard. KeePass does
        store the flag, so it rides along on the next real save. */
-    pub fn set_expanded(&mut self, id: &NodeId, expanded: bool) {
-        if let Some(group) = self.db.get_group_mut(id) {
-            group.is_expanded = expanded;
+    pub fn set_expanded(&mut self, id: &GroupId, expanded: bool) {
+        if let Some(mut group) = self.db.group_mut(*id) {
+            group.edit(|g| g.is_expanded = expanded);
         }
     }
 
     /// Children of a group in stored order. Order is a view concern (Wave 5
     /// sorts on top of this); the vec order is insertion order.
-    pub fn groups_in(&self, parent: &NodeId) -> Vec<&Group> {
+    pub fn groups_in(&self, parent: &GroupId) -> Vec<GroupRef<'_>> {
         self.db
-            .get_group(parent)
-            .map(|g| {
-                g.child_group_ids
-                    .iter()
-                    .filter_map(|id| self.db.get_group(id))
-                    .collect()
-            })
+            .group(*parent)
+            .map(|g| g.group_ids().filter_map(|id| self.db.group(id)).collect())
             .unwrap_or_default()
     }
 
-    pub fn entries_in(&self, group: &NodeId) -> Vec<&Entry> {
-        self.db.get_entries_in_group(group)
+    pub fn entries_in(&self, group: &GroupId) -> Vec<EntryRef<'_>> {
+        self.db
+            .group(*group)
+            .map(|g| g.entry_ids().filter_map(|id| self.db.entry(id)).collect())
+            .unwrap_or_default()
     }
 
     /// Titles from the root down to `id`, for the "General / Banks" breadcrumb
     /// and the search haystack. Root itself yields one element.
-    pub fn group_path(&self, id: &NodeId) -> Vec<String> {
+    pub fn group_path(&self, id: &GroupId) -> Vec<String> {
         let mut path = Vec::new();
         let mut at = *id;
         loop {
-            let Some(group) = self.db.get_group(&at) else {
+            let Some(group) = self.db.group(at) else {
                 return Vec::new();
             };
-            path.push(group.title.clone());
-            let Some(parent) = self.parent_group(&at) else {
+            path.push(group.name.clone());
+            let Some(parent) = group.parent() else {
                 break;
             };
-            at = parent;
+            at = parent.id();
         }
         path.reverse();
         path
     }
 
-    /// Parent found by scan: groups hold no back-pointer, and NodeIds are the
-    /// only stable handle (positions shift under every mutation).
-    pub fn parent_group(&self, id: &NodeId) -> Option<NodeId> {
-        self.db
-            .groups
-            .iter()
-            .find(|(_, g)| g.child_group_ids.contains(id))
-            .map(|(pid, _)| *pid)
+    /// Parent of a group via the stored back-pointer.
+    #[allow(dead_code)]
+    pub fn parent_group(&self, id: &GroupId) -> Option<GroupId> {
+        self.db.group(*id).map(|g| g.parent().map(|p| p.id())).unwrap_or(None)
     }
 
-    pub fn parent_group_of_entry(&self, id: &NodeId) -> Option<NodeId> {
-        self.db.find_parent_group_of_entry(id)
+    pub fn parent_group_of_entry(&self, id: &EntryId) -> Option<GroupId> {
+        self.db.entry(*id).map(|e| e.parent().id())
     }
 
-    pub fn create_group(&mut self, parent: &NodeId, name: &str) -> Result<NodeId, VaultError> {
-        if self.db.get_group(parent).is_none() {
+    pub fn create_group(&mut self, parent: &GroupId, name: &str) -> Result<GroupId, VaultError> {
+        if self.db.group(*parent).is_none() {
             return Err(VaultError::GroupNotFound);
         }
-        let mut group = Group::new(NodeId::new_uuid());
-        group.title = name.to_string();
-        let id = group.id;
-        /* add_group links into the parent's child list and marks modified. */
-        self.db.add_group(group, parent);
-        Ok(id)
+        let mut parent = self
+            .db
+            .group_mut(*parent)
+            .expect("just checked the group exists");
+        let mut child = parent.add_group();
+        child.name = name.to_string();
+        Ok(child.id())
     }
 
-    pub fn rename_group(&mut self, id: &NodeId, name: &str) -> Result<(), VaultError> {
-        let Some(group) = self.db.get_group_mut(id) else {
+    pub fn rename_group(&mut self, id: &GroupId, name: &str) -> Result<(), VaultError> {
+        let Some(mut group) = self.db.group_mut(*id) else {
             return Err(VaultError::GroupNotFound);
         };
-        group.title = name.to_string();
-        self.db.mark_modified();
+        group.name = name.to_string();
         Ok(())
     }
 
     /* A group moves with its whole subtree: children live behind the group's
-       id, so only the two child lists change. The cycle walk goes up from the
-       destination, since a group moved under its own descendant would vanish
-       from every path computation. */
-    pub fn move_group(&mut self, id: &NodeId, new_parent: &NodeId) -> Result<(), VaultError> {
+       id, so only the child lists change. The move_to guard mirrors ours. */
+    pub fn move_group(&mut self, id: &GroupId, new_parent: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotMoveRoot);
         }
-        if self.db.get_group(id).is_none() || self.db.get_group(new_parent).is_none() {
+        if self.db.group(*new_parent).is_none() {
             return Err(VaultError::GroupNotFound);
         }
-        let mut at = *new_parent;
-        loop {
-            if at == *id {
-                return Err(VaultError::WouldCycle);
-            }
-            match self.parent_group(&at) {
-                Some(p) => at = p,
-                None => break,
-            }
-        }
-        if let Some(old) = self.parent_group(id)
-            && let Some(parent) = self.db.get_group_mut(&old)
-        {
-            parent.child_group_ids.retain(|g| g != id);
-        }
-        if let Some(parent) = self.db.get_group_mut(new_parent) {
-            parent.child_group_ids.retain(|g| g != id);
-            parent.child_group_ids.push(*id);
-        }
-        self.db.mark_modified();
-        Ok(())
+        let Some(mut group) = self.db.group_mut(*id) else {
+            return Err(VaultError::GroupNotFound);
+        };
+        group.move_to(*new_parent).map_err(|e| match e {
+            MoveGroupError::CannotMoveRoot => VaultError::CannotMoveRoot,
+            MoveGroupError::NotFound(_) => VaultError::GroupNotFound,
+            MoveGroupError::WouldCreateCycle => VaultError::WouldCycle,
+            _ => VaultError::Db(e.to_string()),
+        })
     }
 
     /* Refuses non-empty groups rather than deleting recursively: a recursive
-       delete is one keypress from losing a subtree, and keepass-rs's own
-       remove_group does recurse, which is why this doesn't call it. */
-    pub fn delete_group(&mut self, id: &NodeId) -> Result<(), VaultError> {
+       delete is one keypress from losing a subtree. The guard runs before
+       GroupMut::remove, which recurses, so the recursion never fires here. */
+    pub fn delete_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotDeleteRoot);
         }
-        let Some(group) = self.db.get_group(id) else {
+        let Some(group) = self.db.group(*id) else {
             return Err(VaultError::GroupNotFound);
         };
-        if !group.child_group_ids.is_empty() || !group.child_entry_ids.is_empty() {
+        if group.entry_ids().next().is_some() || group.group_ids().next().is_some() {
             return Err(VaultError::GroupNotEmpty);
         }
-        if let Some(old) = self.parent_group(id)
-            && let Some(parent) = self.db.get_group_mut(&old)
-        {
-            parent.child_group_ids.retain(|g| g != id);
-        }
-        self.db.groups.remove(id);
-        self.db.mark_modified();
+        let Some(group) = self.db.group_mut(*id) else {
+            return Err(VaultError::GroupNotFound);
+        };
+        group.remove();
         Ok(())
     }
 
     pub fn create_entry(
         &mut self,
-        group: &NodeId,
+        group: &GroupId,
         title: &str,
         username: &str,
         password: &str,
         url: &str,
         notes: &str,
-    ) -> Result<NodeId, VaultError> {
-        if self.db.get_group(group).is_none() {
+    ) -> Result<EntryId, VaultError> {
+        if self.db.group(*group).is_none() {
             return Err(VaultError::GroupNotFound);
         }
-        let mut entry = Entry::new(NodeId::new_uuid());
-        entry.title = title.to_string();
-        entry.username = ProtectedString::new_protected(username);
-        entry.password = ProtectedString::new_protected(password);
-        entry.url = url.to_string();
-        entry.notes = ProtectedString::new_protected(notes);
-        let id = entry.id;
-        self.db.add_entry(entry, group);
-        Ok(id)
+        let mut parent = self
+            .db
+            .group_mut(*group)
+            .expect("just checked the group exists");
+        let mut entry = parent.add_entry();
+        entry.set_unprotected(TITLE, title);
+        entry.set_unprotected(USERNAME, username);
+        entry.set_protected(PASSWORD, password);
+        entry.set_unprotected(URL, url);
+        entry.set_protected(NOTES, notes);
+        Ok(entry.id())
     }
 
     pub fn update_entry(
         &mut self,
-        id: &NodeId,
+        id: &EntryId,
         title: &str,
         username: &str,
         password: Option<&str>,
@@ -373,67 +432,57 @@ impl Vault {
     ) -> Result<(), VaultError> {
         /* Password is Option: the edit form sends None when the box was left
            untouched, so an edit that never looked at the secret keeps it. */
-        let Some(entry) = self.db.get_entry_mut(id) else {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
         };
-        entry.title = title.to_string();
-        entry.username = ProtectedString::new_protected(username);
+        entry.set_unprotected(TITLE, title);
+        entry.set_unprotected(USERNAME, username);
         if let Some(pw) = password {
-            entry.password = ProtectedString::new_protected(pw);
+            entry.set_protected(PASSWORD, pw);
         }
-        entry.url = url.to_string();
-        entry.notes = ProtectedString::new_protected(notes);
+        entry.set_unprotected(URL, url);
+        entry.set_protected(NOTES, notes);
         /* The editor is the only thing that mutates an entry in Sennel, so
-           this is where the modification stamp moves forward (Wave 5.3's
-           `updated` sort reads it). */
-        entry.last_modification_time = DateInstant::now();
-        self.db.mark_modified();
+           this is where the modification stamp moves forward (`updated`
+           sort reads it). */
+        entry.times.last_modification = Some(Times::now());
         Ok(())
     }
 
-    /* keepass-rs's move_entry is private and remove_entry leaves a tombstone,
-       so a move does its own child-list surgery: no tombstone for an id that
-       still exists. */
-    pub fn move_entry(&mut self, id: &NodeId, new_group: &NodeId) -> Result<(), VaultError> {
-        if self.db.get_entry(id).is_none() {
-            return Err(VaultError::EntryNotFound);
-        }
-        if self.db.get_group(new_group).is_none() {
+    /* EntryMut::move_to keeps both child lists and the back-pointer in step
+       with one call. */
+    pub fn move_entry(&mut self, id: &EntryId, new_group: &GroupId) -> Result<(), VaultError> {
+        if self.db.group(*new_group).is_none() {
             return Err(VaultError::GroupNotFound);
         }
-        if let Some(old) = self.db.find_parent_group_of_entry(id)
-            && let Some(parent) = self.db.get_group_mut(&old)
-        {
-            parent.child_entry_ids.retain(|e| e != id);
-        }
-        if let Some(parent) = self.db.get_group_mut(new_group) {
-            parent.child_entry_ids.retain(|e| e != id);
-            parent.child_entry_ids.push(*id);
-        }
-        self.db.mark_modified();
-        Ok(())
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry
+            .move_to(*new_group)
+            .map_err(|_: DestinationGroupNotFoundError| VaultError::GroupNotFound)
     }
 
-    /* Direct delete, no recycle bin in v1: Wave 7 decides whether deleted
-       entries go somewhere recoverable. The confirm prompt is what guards it. */
-    pub fn delete_entry(&mut self, id: &NodeId) -> Result<(), VaultError> {
-        match self.db.remove_entry(id, false) {
-            Some(_) => Ok(()),
-            None => Err(VaultError::EntryNotFound),
-        }
+    /* Direct delete, no recycle bin in v1: the vault keeps deleted objects in
+       the file's recycle bin only if KeePass itself routed them there, and
+       the confirm prompt is what guards it here. */
+    pub fn delete_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
+        let Some(entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.remove();
+        Ok(())
     }
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
        here to restore them. */
     /// Swap an entry wholesale — the original timestamps ride along, which
     /// an update_entry-based undo would not preserve.
-    pub fn replace_entry(&mut self, entry: Entry) -> Result<(), VaultError> {
-        let id = entry.id;
-        if !self.db.entries.contains_key(&id) {
+    pub fn replace_entry(&mut self, entry: &Entry) -> Result<(), VaultError> {
+        let Some(mut slot) = self.db.entry_mut(entry.id()) else {
             return Err(VaultError::EntryNotFound);
-        }
-        self.db.entries.insert(id, entry);
-        self.db.mark_modified();
+        };
+        *slot = entry.clone();
         Ok(())
     }
 
@@ -441,41 +490,29 @@ impl Vault {
     /// snapshot carries the record but not its slot in the child list, and
     /// a one-level undo that restores content is worth the position it
     /// cannot bring back.
-    pub fn restore_entry(&mut self, entry: Entry, parent: &NodeId) -> Result<(), VaultError> {
-        let id = entry.id;
-        if self.db.get_group(parent).is_none() {
+    pub fn restore_entry(&mut self, entry: &Entry, parent: &GroupId) -> Result<(), VaultError> {
+        let Some(mut group) = self.db.group_mut(*parent) else {
             return Err(VaultError::GroupNotFound);
-        }
-        self.db.entries.insert(id, entry);
-        if let Some(group) = self.db.get_group_mut(parent) {
-            group.child_entry_ids.push(id);
-        }
-        self.db.mark_modified();
+        };
+        let mut slot = group
+            .add_entry_with_id(entry.id())
+            .map_err(|_: DuplicateEntryIdError| VaultError::EntryNotFound)?;
+        *slot = entry.clone();
         Ok(())
     }
 
     /// Hard-remove an entry an undo needs to disappear again (an add that
     /// `u` takes back). No tombstone — this rolls back, it does not delete.
-    pub fn expunge_entry(&mut self, id: &NodeId) -> Result<(), VaultError> {
-        if self.db.entries.remove(id).is_none() {
-            return Err(VaultError::EntryNotFound);
-        }
-        if let Some(old) = self.db.find_parent_group_of_entry(id)
-            && let Some(parent) = self.db.get_group_mut(&old)
-        {
-            parent.child_entry_ids.retain(|e| e != id);
-        }
-        self.db.mark_modified();
-        Ok(())
+    pub fn expunge_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
+        self.delete_entry(id)
     }
 
     /// Title write for rename undo.
-    pub fn set_group_title(&mut self, id: &NodeId, title: &str) -> Result<(), VaultError> {
-        let Some(group) = self.db.get_group_mut(id) else {
+    pub fn set_group_title(&mut self, id: &GroupId, title: &str) -> Result<(), VaultError> {
+        let Some(mut group) = self.db.group_mut(*id) else {
             return Err(VaultError::GroupNotFound);
         };
-        group.title = title.to_string();
-        self.db.mark_modified();
+        group.name = title.to_string();
         Ok(())
     }
 }
@@ -498,7 +535,7 @@ mod tests {
     fn a_new_vault_holds_one_empty_root() {
         let v = vault();
         let root = v.root_id();
-        assert_eq!(v.get_group(&root).unwrap().title, "Root");
+        assert_eq!(v.get_group(&root).unwrap().name, "Root");
         assert!(v.groups_in(&root).is_empty());
         assert!(v.entries_in(&root).is_empty());
     }
@@ -511,9 +548,9 @@ mod tests {
         let savings = v.create_group(&banks, "Savings").unwrap();
         v.rename_group(&banks, "Money").unwrap();
 
-        assert_eq!(v.get_group(&banks).unwrap().title, "Money");
+        assert_eq!(v.get_group(&banks).unwrap().name, "Money");
         assert_eq!(v.group_path(&savings), vec!["Root", "Money", "Savings"]);
-        let kids: Vec<NodeId> = v.groups_in(&root).iter().map(|g| g.id).collect();
+        let kids: Vec<GroupId> = v.groups_in(&root).iter().map(|g| g.id()).collect();
         assert_eq!(kids, vec![banks]);
     }
 
@@ -527,7 +564,7 @@ mod tests {
         assert_eq!(v.delete_group(&g), Err(VaultError::GroupNotEmpty));
         assert!(v.get_group(&g).is_some(), "refused delete still removed it");
 
-        let e = v.entries_in(&g)[0].id;
+        let e = v.entries_in(&g)[0].id();
         v.delete_entry(&e).unwrap();
         v.delete_group(&g).unwrap();
         assert!(v.get_group(&g).is_none());
@@ -579,8 +616,8 @@ mod tests {
         v.update_entry(&e, "github", "octo2", None, "https://x", "n")
             .unwrap();
         let kept = v.get_entry(&e).unwrap();
-        assert_eq!(kept.username.as_str(), "octo2");
-        assert_eq!(kept.password.as_str(), "s3cret", "untouched password changed");
+        assert_eq!(kept.username(), "octo2");
+        assert_eq!(kept.password(), "s3cret", "untouched password changed");
 
         v.move_entry(&e, &root).unwrap();
         assert_eq!(v.parent_group_of_entry(&e), Some(root));
@@ -594,10 +631,11 @@ mod tests {
     #[test]
     fn unknown_ids_are_an_error_not_a_panic() {
         let mut v = vault();
-        let ghost = NodeId::new_uuid();
+        let ghost = GroupId::new();
+        let ghost_entry = EntryId::new();
         let root = v.root_id();
         assert_eq!(v.rename_group(&ghost, "x"), Err(VaultError::GroupNotFound));
-        assert_eq!(v.move_entry(&ghost, &root), Err(VaultError::EntryNotFound));
+        assert_eq!(v.move_entry(&ghost_entry, &root), Err(VaultError::EntryNotFound));
         assert!(v.group_path(&ghost).is_empty());
     }
 
@@ -631,7 +669,7 @@ mod tests {
         let banks = v.create_group(&root, "Banks").unwrap();
         v.create_entry(&banks, "checking", "octo", "s3cret", "https://x", "n")
             .unwrap();
-        v.save_as(&file.path, b"correct horse", None).unwrap();
+        v.save_as(&file.path, "correct horse", None).unwrap();
         v
     }
 
@@ -641,13 +679,13 @@ mod tests {
         let saved = saved_vault(&file);
         assert_eq!(saved.path(), Some(file.path.as_path()));
 
-        let open = Vault::open(&file.path, b"correct horse", None).unwrap();
-        let banks = open.groups_in(&open.root_id())[0].id;
+        let open = Vault::open(&file.path, "correct horse", None).unwrap();
+        let banks = open.groups_in(&open.root_id())[0].id();
         assert_eq!(open.group_path(&banks), vec!["Root", "Banks"]);
-        let entry = open.entries_in(&banks)[0];
-        assert_eq!(entry.title, "checking");
-        assert_eq!(entry.username.as_str(), "octo");
-        assert_eq!(entry.password.as_str(), "s3cret");
+        let entry = &open.entries_in(&banks)[0];
+        assert_eq!(entry.title(), "checking");
+        assert_eq!(entry.username(), "octo");
+        assert_eq!(entry.password(), "s3cret");
         assert_eq!(open.path(), Some(file.path.as_path()));
     }
 
@@ -657,7 +695,7 @@ mod tests {
         saved_vault(&file);
         assert!(
             matches!(
-                Vault::open(&file.path, b"wrong battery", None),
+                Vault::open(&file.path, "wrong battery", None),
                 Err(VaultError::WrongPassword)
             ),
             "a wrong password came back as something else"
@@ -672,7 +710,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&missing);
         assert!(matches!(
-            Vault::open(&missing, b"pw", None),
+            Vault::open(&missing, "pw", None),
             Err(VaultError::Io(_))
         ));
     }
@@ -687,16 +725,16 @@ mod tests {
     fn edits_save_through_the_retained_key_and_path() {
         let file = Temp::new("resave");
         let mut v = saved_vault(&file);
-        let banks = v.groups_in(&v.root_id())[0].id;
-        let e = v.entries_in(&banks)[0].id;
+        let banks = v.groups_in(&v.root_id())[0].id();
+        let e = v.entries_in(&banks)[0].id();
         v.update_entry(&e, "checking", "octo2", None, "https://x", "n")
             .unwrap();
         v.save().unwrap();
 
-        let open = Vault::open(&file.path, b"correct horse", None).unwrap();
-        let entry = open.entries_in(&banks)[0];
-        assert_eq!(entry.username.as_str(), "octo2");
-        assert_eq!(entry.password.as_str(), "s3cret", "untouched password changed");
+        let open = Vault::open(&file.path, "correct horse", None).unwrap();
+        let entry = &open.entries_in(&banks)[0];
+        assert_eq!(entry.username(), "octo2");
+        assert_eq!(entry.password(), "s3cret", "untouched password changed");
     }
 
     /* The file holds every secret at once: group-readable is a leak, and the

@@ -18,8 +18,8 @@ use zeroize::Zeroize;
 use app::{App, Confirm};
 use crate::clipboard::Board;
 use config::{Cli, Config};
-use keepass_rs::NodeId;
-use vault::Vault;
+use keepass::db::GroupId;
+use vault::{EntryExt, Vault};
 
 fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
@@ -94,33 +94,26 @@ fn list(cfg: &Config) -> Result<()> {
         anyhow::bail!("no database given · pass --db <file>");
     };
     let password = rpassword::prompt_password("password: ")?;
-    let vault = Vault::open(path, password.as_bytes(), None)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!(
-        "{} groups · {} entries",
-        vault.db().groups.len(),
-        vault.db().entries.len()
-    );
+    let vault = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
         let indent = "  ".repeat(depth);
-        println!("{}[{}]", indent, vault.db().groups[&id].title);
-        for eid in &vault.db().groups[&id].child_entry_ids {
-            if let Some(e) = vault.db().entries.get(eid) {
-                println!("{}  {}", indent, e.title);
-            }
+        println!("{}[{}]", indent, vault.get_group(&id).unwrap().name);
+        for entry in vault.entries_in(&id) {
+            println!("{}  {}", indent, entry.title());
         }
     }
     Ok(())
 }
 
-fn walk_groups(vault: &Vault) -> Vec<(NodeId, usize)> {
+fn walk_groups(vault: &Vault) -> Vec<(GroupId, usize)> {
     let mut out = Vec::new();
     let mut stack = vec![(vault.root_id(), 0)];
     while let Some((id, depth)) = stack.pop() {
         out.push((id, depth));
         for child in vault.groups_in(&id).iter().rev() {
-            stack.push((child.id, depth + 1));
+            stack.push((child.id(), depth + 1));
         }
     }
     out
@@ -654,7 +647,7 @@ mod tests {
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 3, "the typed row was not added");
         assert_eq!(
-            app.vault.as_ref().unwrap().get_entry(&rows[2]).unwrap().title,
+            app.vault.as_ref().unwrap().get_entry(&rows[2]).unwrap().title(),
             "q"
         );
     }
@@ -700,7 +693,7 @@ mod tests {
         assert!(app.group_prompt.is_none(), "enter did not submit");
         let tree = app.group_tree();
         let named = tree.iter().any(|(id, _)| {
-            app.vault.as_ref().unwrap().get_group(id).unwrap().title == "q"
+            app.vault.as_ref().unwrap().get_group(id).unwrap().name == "q"
         });
         assert!(named, "the typed name did not become a group");
     }
@@ -818,6 +811,6 @@ mod tests {
             .unwrap()
             .get_entry(&app.entry_cursor.unwrap())
             .unwrap();
-        assert_eq!(entry.notes.as_str(), "", "u did not restore the notes");
+        assert_eq!(entry.notes(), "", "u did not restore the notes");
     }
 }

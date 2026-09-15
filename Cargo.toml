@@ -18,7 +18,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 unicode-normalization = "0.1"
 unicode-width = "0.2"
-keepass-rs = "0.2"
+# keepass (not keepass-rs): keepass-rs 0.2 cannot decrypt KeePassXC files
+# (CBC length / header HMAC errors on correct passwords); the keepass crate
+# opens them and is maintained. save_kdbx4 is what lets us write vaults back.
+keepass = { version = "0.13", features = ["save_kdbx4"] }
 rpassword = "7"
 arboard = "3"
 nucleo-matcher = "0.3"

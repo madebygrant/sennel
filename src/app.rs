@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use keepass_rs::{Entry, Group, NodeId};
+use keepass::db::{Entry, EntryId, GroupId};
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
 use crate::generator::Classes;
-use crate::vault::{Vault, VaultError};
+use crate::vault::{EntryExt, Vault, VaultError};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
    the browser has nothing to act on, so it is a screen and not a prompt. */
@@ -51,11 +51,11 @@ pub enum Confirm {
     /* The title travels with the id for the prompt line. It is a display
        copy of a name field, never the password: the confirm popup must stay
        safe to screenshot with the vault unlocked. */
-    DeleteEntry { id: NodeId, title: String },
+    DeleteEntry { id: EntryId, title: String },
     /* Same rule as the entry delete: the title rides along for the prompt
        line only, and the vault refuses non-empty groups before this ever
        fires, so a confirmed group delete cannot take a subtree with it. */
-    DeleteGroup { id: NodeId, title: String },
+    DeleteGroup { id: GroupId, title: String },
 }
 
 /// Which box of the entry form the keys are typing into.
@@ -74,7 +74,7 @@ pub enum FormField {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FormKind {
     Add,
-    Edit(NodeId),
+    Edit(EntryId),
 }
 
 /* The modal entry editor. Values are plain Strings here: the password leaves
@@ -103,7 +103,7 @@ pub struct Form {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GroupPromptKind {
     New,
-    Rename(NodeId),
+    Rename(GroupId),
 }
 
 pub struct GroupPrompt {
@@ -119,8 +119,8 @@ pub struct GroupPrompt {
    rather than pasting a ghost. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cut {
-    Entry(NodeId),
-    Group(NodeId),
+    Entry(EntryId),
+    Group(GroupId),
 }
 
 /* One slot, one undo. The snapshot carries the whole entry — secrets
@@ -130,17 +130,17 @@ pub enum Cut {
    its contents were moved or deleted through paths that arm their own undo. */
 pub enum Undo {
     /// Before-state of an edited entry; restore swaps it wholesale.
-    Edit { id: NodeId, before: Entry },
+    Edit { id: EntryId, before: Entry },
     /// A deleted entry, where it lived, and what it was.
     Delete {
-        id: NodeId,
-        parent: NodeId,
+        id: EntryId,
+        parent: GroupId,
         before: Entry,
     },
     /// An added entry that `u` removes again.
-    AddEntry { id: NodeId, title: String },
+    AddEntry { id: EntryId, title: String },
     /// A group rename that `u` turns back.
-    Rename { id: NodeId, before: String },
+    Rename { id: GroupId, before: String },
 }
 
 /* How the entries pane orders itself. `Stored` is the file's own order; the
@@ -230,15 +230,15 @@ pub struct App {
     /// A question the UI raised itself, waiting on y or n.
     pub confirm: Option<Confirm>,
     pub quit: bool,
-    /* Selection state. Cursors hold NodeIds, never row positions: rows shift
+    /* Selection state. Cursors hold ids, never row positions: rows shift
        under every mutation and under the Wave 5/6 sort and filter views, while
        an id still names the same group or entry. */
     /// The open vault. None while locked; `try_unlock` opens real KDBX here.
     pub vault: Option<Vault>,
     /// Selected group. Always valid once a vault is open (`snap` keeps it so).
-    pub group_cursor: Option<NodeId>,
+    pub group_cursor: Option<GroupId>,
     /// Selected entry within the cursor group. None when the group is empty.
-    pub entry_cursor: Option<NodeId>,
+    pub entry_cursor: Option<EntryId>,
     pub active_pane: Pane,
     /// Per-pane list offsets, carried across frames (see `scroll_to`).
     pub group_scroll: usize,
@@ -459,23 +459,25 @@ impl App {
        copying an empty string would wipe whatever the user is holding in the
        clipboard to protect nothing, and silence reads as a broken key. */
     pub fn copy_username(&mut self) {
-        self.copy_field("username", |e| e.username.as_str().to_string());
+        self.copy_field("username", |e| e.username().to_string());
     }
 
     pub fn copy_password(&mut self) {
-        self.copy_field("password", |e| e.password.as_str().to_string());
+        self.copy_field("password", |e| e.password().to_string());
     }
 
     pub fn copy_url(&mut self) {
-        self.copy_field("url", |e| e.url.clone());
+        self.copy_field("url", |e| e.url().to_string());
     }
 
-    fn copy_field(&mut self, label: &str, take: impl FnOnce(&Entry) -> String) {
+        /* EntryRef derefs to Entry, so the &'_ bound accepts both a ref and the
+       record type the crate hands back. */
+    fn copy_field(&mut self, label: &str, take: impl FnOnce(&keepass::db::Entry) -> String) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to copy from");
             return;
         };
-        let text = take(entry);
+        let text = take(&entry);
         if text.is_empty() {
             self.say(format!("no {label} on this entry"));
             return;
@@ -597,6 +599,7 @@ impl App {
             password.zeroize();
             return;
         }
+        let pw = String::from_utf8_lossy(password).into_owned();
         let result = if self.unlock_new {
             if self.unlock_confirm.as_bytes() != password.as_slice() {
                 self.say("passwords differ  ·  retype both fields");
@@ -606,9 +609,9 @@ impl App {
                 return;
             }
             let mut vault = Vault::new();
-            vault.save_as(&path, password, key_file).map(|()| vault)
+            vault.save_as(&path, &pw, key_file).map(|()| vault)
         } else {
-            Vault::open(&path, password, key_file)
+            Vault::open(&path, &pw, key_file)
         };
         // The typed bytes have served: the key inside the vault is a copy.
         password.zeroize();
@@ -785,7 +788,7 @@ impl App {
     pub fn open_vault(&mut self, vault: Vault) {
         let root = vault.root_id();
         self.group_cursor = Some(root);
-        self.entry_cursor = vault.entries_in(&root).first().map(|e| e.id);
+        self.entry_cursor = vault.entries_in(&root).first().map(|e| e.id());
         self.active_pane = Pane::Groups;
         self.group_scroll = 0;
         self.entry_scroll = 0;
@@ -797,7 +800,7 @@ impl App {
        reads this, not the raw child lists: one flat list means one cursor and
        one scroll, and collapse (Wave 5) prunes it without touching the vault.
        Root is always first, so an empty tree still shows one row. */
-    pub fn group_tree(&self) -> Vec<(NodeId, usize)> {
+    pub fn group_tree(&self) -> Vec<(GroupId, usize)> {
         let Some(vault) = &self.vault else {
             return Vec::new();
         };
@@ -807,14 +810,14 @@ impl App {
             out.push((id, depth));
             /* A collapsed group hides its subtree but stays visible itself, so
                the cursor on it keeps a row and Right re-opens it. Groups are
-               born expanded (keepass-rs defaults the flag true), so the tree
+               born expanded (KeePass defaults the flag true), so the tree
                only shrinks after an explicit Left. */
             let collapsed = vault.get_group(&id).is_some_and(|g| !g.is_expanded);
             if !collapsed {
                 /* Reversed so the first child pops first and order matches the
                    stored child list. */
                 for child in vault.groups_in(&id).iter().rev() {
-                    stack.push((child.id, depth + 1));
+                    stack.push((child.id(), depth + 1));
                 }
             }
         }
@@ -826,7 +829,7 @@ impl App {
     /// frame, and the two meet in `snap`.
     /* &mut self, not &self: the matcher scores with internal scratch state,
        so the filter loop borrows it mutably while the vault stays shared. */
-    pub fn entry_rows(&mut self) -> Vec<NodeId> {
+    pub fn entry_rows(&mut self) -> Vec<EntryId> {
         /* A live needle widens the pane to the whole vault: search is the one
            question whose answer is rarely "the folder I was already in", and
            the count in the status bar already promised the matches existed. */
@@ -837,13 +840,13 @@ impl App {
         let Some(vault) = &self.vault else {
             return Vec::new();
         };
-        let mut entries: Vec<&Entry> = if global {
-            let mut all: Vec<&Entry> = vault.db().entries.values().collect();
-            /* The map has no order of its own: a title sort gives the Stored
+        let mut entries: Vec<keepass::db::EntryRef<'_>> = if global {
+            let mut all: Vec<keepass::db::EntryRef<'_>> = vault.entry_refs();
+            /* The store has no order of its own: a title sort gives the Stored
                view a stable base — and every other order a deterministic
                tiebreak — instead of whatever bucket iteration coughed up this
                frame. */
-            all.sort_by_key(|a| a.title.to_lowercase());
+            all.sort_by_key(|a| a.title().to_lowercase());
             all
         } else {
             match self.group_cursor {
@@ -857,22 +860,22 @@ impl App {
         match self.order {
             SortOrder::Stored => {}
             SortOrder::Name => entries.sort_by(|a, b| {
-                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+                a.title().to_lowercase().cmp(&b.title().to_lowercase())
             }),
             SortOrder::Recent => {
-                entries.sort_by_key(|e| std::cmp::Reverse(e.creation_time.as_millis()))
+                entries.sort_by_key(|e| std::cmp::Reverse(e.times.creation))
             }
             SortOrder::Updated => {
-                entries.sort_by_key(|e| std::cmp::Reverse(e.last_modification_time.as_millis()))
+                entries.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification))
             }
         }
-        let ids: Vec<NodeId> = entries.iter().map(|e| e.id).collect();
+        let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
         if global {
             /* rank_entry, not raw rank: multi-word needles ("git octo")
                become Pattern atoms there, and the band must agree with the
                count in `entry_matches`, which uses the same predicate. */
             let needle = self.search.clone().unwrap_or_default();
-            let mut hits: Vec<NodeId> = ids
+            let mut hits: Vec<EntryId> = ids
                 .into_iter()
                 .filter(|id| {
                     self.searcher
@@ -883,7 +886,7 @@ impl App {
             /* Relevance order while searching: the best hit first, so the
                cursor lands on the likely answer without a single j. Ties keep
                the sorted order above. */
-            let mut scored: Vec<(NodeId, u16)> = hits
+            let mut scored: Vec<(EntryId, u16)> = hits
                 .iter()
                 .map(|id| {
                     let score = self
@@ -915,8 +918,7 @@ impl App {
         let Some(vault) = &self.vault else {
             return 0;
         };
-        let ids: Vec<NodeId> = vault.db().entries.keys().copied().collect();
-        ids.iter().filter(|id| self.search_hit(**id)).count()
+        vault.all_entry_ids().iter().filter(|id| self.search_hit(**id)).count()
     }
 
     /* `o` cycles the entries-pane order. `snap` re-points the cursor because
@@ -1094,7 +1096,7 @@ impl App {
 
     /// Whether the current needle passes an entry. The single predicate the
     /// rows list and the status count both read, so they can never disagree.
-    pub fn search_hit(&mut self, id: NodeId) -> bool {
+    pub fn search_hit(&mut self, id: EntryId) -> bool {
         let Some(needle) = self.search.as_deref().filter(|n| !n.is_empty()) else {
             return true;
         };
@@ -1104,14 +1106,14 @@ impl App {
         self.searcher.rank_entry(needle, vault, &id).is_some()
     }
 
-    pub fn selected_group(&self) -> Option<&Group> {
+    pub fn selected_group(&self) -> Option<keepass::db::GroupRef<'_>> {
         let (vault, id) = (self.vault.as_ref()?, self.group_cursor?);
         vault.get_group(&id)
     }
 
     /// The root id of the open vault. Only reached from browser paths that
     /// already know a vault is open.
-    fn root_id(&self) -> NodeId {
+    fn root_id(&self) -> GroupId {
         self.vault.as_ref().expect("browser keys need a vault").root_id()
     }
 
@@ -1120,7 +1122,7 @@ impl App {
        a row that is not on screen. A live search relaxes the rule — the rows
        list is global then, and a hit from another folder is exactly the row
        the user asked to act on. */
-    pub fn selected_entry(&self) -> Option<&Entry> {
+    pub fn selected_entry(&self) -> Option<keepass::db::EntryRef<'_>> {
         let (vault, group, id) = (self.vault.as_ref()?, self.group_cursor?, self.entry_cursor?);
         let searching = self.search.as_deref().is_some_and(|n| !n.is_empty());
         vault.get_entry(&id).filter(|_| {
@@ -1342,16 +1344,16 @@ impl App {
             self.say("no entry here to edit");
             return;
         };
-        let id = entry.id;
+        let id = entry.id();
         self.form = Some(Form {
             kind: FormKind::Edit(id),
             field: FormField::Title,
-            title: entry.title.clone(),
-            username: entry.username.as_str().to_string(),
+            title: entry.title().to_string(),
+            username: entry.username().to_string(),
             password: String::new(),
-            url: entry.url.clone(),
-            notes: entry.notes.as_str().to_string(),
-            caret: entry.title.chars().count(),
+            url: entry.url().to_string(),
+            notes: entry.notes().to_string(),
+            caret: entry.title().chars().count(),
             password_touched: false,
         });
     }
@@ -1364,19 +1366,20 @@ impl App {
             return;
         };
         self.confirm = Some(Confirm::DeleteEntry {
-            id: entry.id,
-            title: entry.title.clone(),
+            id: entry.id(),
+            title: entry.title().to_string(),
         });
     }
 
     /// The yes side of the delete confirm. Kept off the key handler so the
     /// confirm popup and the delete itself cannot drift apart.
-    pub fn confirm_delete_entry(&mut self, id: NodeId) {
+    pub fn confirm_delete_entry(&mut self, id: EntryId) {
         /* Snapshot before the delete — undo puts the whole entry back
            (restore appends it to its old parent; the list position is not
            reconstructible and does not matter). */
         let parent = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id));
-        let before = self.vault.as_ref().and_then(|v| v.get_entry(&id).cloned());
+        let before: Option<keepass::db::Entry> =
+            self.vault.as_ref().and_then(|v| v.get_entry(&id).map(|e| e.clone()));
         if let (Some(vault), Some(parent), Some(before)) =
             (self.vault.as_mut(), parent, before)
         {
@@ -1631,9 +1634,9 @@ impl App {
             self.say("no group here to rename");
             return;
         };
-        let title = group.title.clone();
+        let title = group.name.clone();
         self.group_prompt = Some(GroupPrompt {
-            kind: GroupPromptKind::Rename(group.id),
+            kind: GroupPromptKind::Rename(group.id()),
             value: title.clone(),
             caret: title.chars().count(),
         });
@@ -1666,7 +1669,7 @@ impl App {
                 if let Some(group) = vault.get_group(&id) {
                     self.undo = Some(Undo::Rename {
                         id,
-                        before: group.title.clone(),
+                        before: group.name.clone(),
                     });
                 }
                 vault.rename_group(&id, &prompt.value).map(|()| None)
@@ -1797,7 +1800,7 @@ impl App {
             self.say("no group here to delete");
             return;
         };
-        if group.id == self.root_id() {
+        if group.id() == self.root_id() {
             self.say("the root group cannot be deleted");
             return;
         }
@@ -1805,7 +1808,7 @@ impl App {
             .vault
             .as_ref()
             .map(|v| {
-                v.entries_in(&group.id).is_empty() && v.groups_in(&group.id).is_empty()
+                v.entries_in(&group.id()).is_empty() && v.groups_in(&group.id()).is_empty()
             })
             .unwrap_or(true);
         if has_contents {
@@ -1813,13 +1816,13 @@ impl App {
             return;
         }
         self.confirm = Some(Confirm::DeleteGroup {
-            id: group.id,
-            title: group.title.clone(),
+            id: group.id(),
+            title: group.name.clone(),
         });
     }
 
     /// The yes side of the group delete confirm, kept off the key handler.
-    pub fn confirm_delete_group(&mut self, id: NodeId) {
+    pub fn confirm_delete_group(&mut self, id: GroupId) {
         let Some(vault) = &mut self.vault else {
             return;
         };
@@ -1844,7 +1847,7 @@ impl App {
     pub fn cut_selected(&mut self) {
         let Some(cut) = (match self.active_pane {
             Pane::Groups => match self.selected_group() {
-                Some(g) if g.id != self.root_id() => Some(Cut::Group(g.id)),
+                Some(g) if g.id() != self.root_id() => Some(Cut::Group(g.id())),
                 Some(_) => {
                     self.say("the root group cannot be cut");
                     None
@@ -1855,7 +1858,7 @@ impl App {
                 }
             },
             Pane::Entries => match self.selected_entry() {
-                Some(e) => Some(Cut::Entry(e.id)),
+                Some(e) => Some(Cut::Entry(e.id())),
                 None => {
                     self.say("no entry here to cut");
                     None
@@ -1886,25 +1889,29 @@ impl App {
         let Some(vault) = &mut self.vault else {
             return;
         };
-        let result = match cut {
-            Cut::Entry(id) => vault.move_entry(&id, &target).map(|()| Some(id)),
-            Cut::Group(id) => vault.move_group(&id, &target).map(|()| Some(id)),
-        };
-        match result {
-            Ok(moved) => {
-                self.cut = None;
-                match cut {
-                    Cut::Entry(_) => self.entry_cursor = moved,
-                    Cut::Group(_) => self.group_cursor = moved,
+        /* The two ids split by arm: a cut knows which kind it is, so each
+           arm sets exactly the cursor that kind owns. */
+        match cut {
+            Cut::Entry(id) => match vault.move_entry(&id, &target) {
+                Ok(()) => {
+                    self.cut = None;
+                    self.entry_cursor = Some(id);
+                    self.snap();
+                    self.persist();
+                    self.say("entry moved");
                 }
-                self.snap();
-                self.persist();
-                self.say(match cut {
-                    Cut::Entry(_) => "entry moved",
-                    Cut::Group(_) => "group moved",
-                });
-            }
-            Err(e) => self.say(format!("cannot paste  ·  {e}")),
+                Err(e) => self.say(format!("cannot paste  ·  {e}")),
+            },
+            Cut::Group(id) => match vault.move_group(&id, &target) {
+                Ok(()) => {
+                    self.cut = None;
+                    self.group_cursor = Some(id);
+                    self.snap();
+                    self.persist();
+                    self.say("group moved");
+                }
+                Err(e) => self.say(format!("cannot paste  ·  {e}")),
+            },
         }
     }
 
@@ -1924,10 +1931,10 @@ impl App {
         match self.cut? {
             Cut::Entry(id) => vault
                 .get_entry(&id)
-                .map(|e| format!("cut: {}", e.title)),
+                .map(|e| format!("cut: {}", e.title())),
             Cut::Group(id) => vault
                 .get_group(&id)
-                .map(|g| format!("cut: {}", g.title)),
+                .map(|g| format!("cut: {}", g.name)),
         }
     }
 
@@ -1944,19 +1951,19 @@ impl App {
         };
         match undo {
             Undo::Edit { id, before } => {
-                let title = before.title.clone();
+                let title = before.title().to_string();
                 /* Results ignored the way a rollback is: the mutation can
                    only fail on an id that no longer exists, and persist()
                    below reports anything the save kept from landing. */
-                let _ = vault.replace_entry(before);
+                let _ = vault.replace_entry(&before);
                 self.entry_cursor = Some(id);
                 self.snap();
                 self.persist();
                 self.say(format!("undid edit of {title}"));
             }
             Undo::Delete { id, parent, before } => {
-                let title = before.title.clone();
-                let _ = vault.restore_entry(before, &parent);
+                let title = before.title().to_string();
+                let _ = vault.restore_entry(&before, &parent);
                 self.entry_cursor = Some(id);
                 self.snap();
                 self.persist();
@@ -1984,8 +1991,8 @@ impl App {
     /// later rename or delete still names the thing it would restore.
     pub fn undo_note(&self) -> Option<String> {
         let note = match self.undo.as_ref()? {
-            Undo::Edit { before, .. } => format!("undo: edit of {}", before.title),
-            Undo::Delete { before, .. } => format!("undo: restore {}", before.title),
+            Undo::Edit { before, .. } => format!("undo: edit of {}", before.title()),
+            Undo::Delete { before, .. } => format!("undo: restore {}", before.title()),
             Undo::AddEntry { title, .. } => format!("undo: remove {title}"),
             Undo::Rename { before, .. } => format!("undo: name {before}"),
         };
@@ -2245,7 +2252,7 @@ mod tests {
         let names: Vec<(String, usize)> = app
             .group_tree()
             .iter()
-            .map(|(id, d)| (vault.get_group(id).unwrap().title.clone(), *d))
+            .map(|(id, d)| (vault.get_group(id).unwrap().name.clone(), *d))
             .collect();
         assert_eq!(names, vec![
             ("Root".to_string(), 0),
@@ -2283,7 +2290,7 @@ mod tests {
         app.step_group(true);
         let banks = app.group_cursor.unwrap();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&banks).unwrap().title,
+            app.vault.as_ref().unwrap().get_group(&banks).unwrap().name,
             "Banks"
         );
         assert!(app.selected_entry().is_some());
@@ -2300,7 +2307,7 @@ mod tests {
     fn an_entry_of_another_group_is_not_selected() {
         let mut app = open_app();
         let banks = app.group_tree()[1].0;
-        let eid = app.vault.as_ref().unwrap().entries_in(&banks)[0].id;
+        let eid = app.vault.as_ref().unwrap().entries_in(&banks)[0].id();
         // Still on root: the Banks entry must not resolve.
         app.entry_cursor = Some(eid);
         assert!(app.selected_entry().is_none());
@@ -2328,7 +2335,7 @@ mod tests {
     }
 
     /// A real KDBX file on disk behind a locked app, as main.rs builds it.
-    fn locked_app_with_db(password: &[u8]) -> (App, TempPath) {
+    fn locked_app_with_db(password: &str) -> (App, TempPath) {
         let tmp = temp_path("unlock");
         let mut seed = Vault::new();
         seed.save_as(&tmp.0, password, None).unwrap();
@@ -2342,9 +2349,9 @@ mod tests {
        copy, and it zeroizes on drop. */
     #[test]
     fn right_password_unlocks_and_wipes_the_buffers() {
-        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        let (mut app, _tmp) = locked_app_with_db("correct horse");
         assert!(!app.unlock_new, "an existing file reads as create");
-        let mut pw = b"correct horse".to_vec();
+        let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
         assert!(app.vault.is_some());
@@ -2359,18 +2366,18 @@ mod tests {
        default view of the password that follows. */
     #[test]
     fn reveal_resets_after_unlock_attempts() {
-        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        let (mut app, _tmp) = locked_app_with_db("correct horse");
         app.unlock_password = "correct horse".into();
         app.toggle_unlock_reveal();
         assert!(app.unlock_reveal);
-        let mut pw = b"correct horse".to_vec();
+        let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
         assert!(!app.unlock_reveal, "reveal followed the unlock out");
 
-        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
+        let (mut app, _tmp) = locked_app_with_db("correct horse");
         app.toggle_unlock_reveal();
-        let mut pw = b"wrong guess".to_vec();
+        let mut pw = "wrong guess".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
         assert!(!app.unlock_reveal, "failed attempt left the box bare");
@@ -2380,8 +2387,8 @@ mod tests {
        the typed bytes: a failed guess is exactly what must not linger. */
     #[test]
     fn wrong_password_stays_locked_and_says_so() {
-        let (mut app, _tmp) = locked_app_with_db(b"correct horse");
-        let mut pw = b"wrong guess".to_vec();
+        let (mut app, _tmp) = locked_app_with_db("correct horse");
+        let mut pw = "wrong guess".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
         assert!(app.vault.is_none());
@@ -2398,12 +2405,12 @@ mod tests {
         app.set_db_path(Some(tmp.0.clone()));
         assert!(app.unlock_new, "a missing file must read as create");
         app.unlock_confirm = "new secret".into();
-        let mut pw = b"new secret".to_vec();
+        let mut pw = "new secret".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
         assert!(tmp.0.is_file(), "create wrote no file");
         // And the created file opens with the same password.
-        assert!(Vault::open(&tmp.0, b"new secret", None).is_ok());
+        assert!(Vault::open(&tmp.0, "new secret", None).is_ok());
     }
 
     /* A mismatched confirm writes nothing: one stray keystroke must not mint
@@ -2414,7 +2421,7 @@ mod tests {
         let mut app = App::new();
         app.set_db_path(Some(tmp.0.clone()));
         app.unlock_confirm = "something else".into();
-        let mut pw = b"new secret".to_vec();
+        let mut pw = "new secret".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
         assert!(!tmp.0.exists(), "a mismatch still wrote a file");
@@ -2426,7 +2433,7 @@ mod tests {
     #[test]
     fn no_database_configured_says_what_to_do() {
         let mut app = App::new();
-        let mut pw = b"whatever".to_vec();
+        let mut pw = "whatever".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
         assert!(app.stage.contains("--db"), "{}", app.stage);
@@ -2494,7 +2501,7 @@ mod tests {
        across auto-locks, which is what makes the switch stick. */
     #[test]
     fn the_file_box_points_the_session_at_another_vault() {
-        let (mut app, tmp) = locked_app_with_db(b"pw");
+        let (mut app, tmp) = locked_app_with_db("pw");
         let other = tmp
             .0
             .parent()
@@ -2520,7 +2527,7 @@ mod tests {
        than read as a new file literally named `~`. */
     #[test]
     fn the_file_box_expands_a_home_path() {
-        let (mut app, _tmp) = locked_app_with_db(b"pw");
+        let (mut app, _tmp) = locked_app_with_db("pw");
         app.unlock_file = "~/Downloads/sites.kdbx".into();
         app.unlock_field = UnlockField::File;
         app.accept_file_box();
@@ -2544,12 +2551,12 @@ mod tests {
        instead of answering "no database configured". */
     #[test]
     fn a_path_typed_but_unconfirmed_still_unlocks() {
-        let (mut app, tmp) = locked_app_with_db(b"pw");
+        let (mut app, tmp) = locked_app_with_db("pw");
         app.db_path = None;
         app.unlock_file = String::new();
         app.unlock_field = UnlockField::Password;
         app.unlock_file = tmp.0.display().to_string();
-        let mut pw = b"pw".to_vec();
+        let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser, "unconfirmed path refused");
         assert!(app.vault.is_some());
@@ -2563,7 +2570,7 @@ mod tests {
         let mut app = App::new();
         app.set_db_path(None);
         assert_eq!(app.unlock_field, UnlockField::File, "file box not focused");
-        let (app, _tmp) = locked_app_with_db(b"pw");
+        let (app, _tmp) = locked_app_with_db("pw");
         assert_eq!(
             app.unlock_field,
             UnlockField::Password,
@@ -2589,13 +2596,13 @@ mod tests {
     /* The dirty guard: a fresh unlock quits straight out, a mutation asks. */
     #[test]
     fn the_dirty_guard_asks_only_after_a_mutation() {
-        let (mut app, _tmp) = locked_app_with_db(b"pw");
-        let mut pw = b"pw".to_vec();
+        let (mut app, _tmp) = locked_app_with_db("pw");
+        let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         app.ask_quit();
         assert!(app.quit, "a clean vault interrogated the quit");
-        let (mut app, _tmp) = locked_app_with_db(b"pw");
-        let mut pw = b"pw".to_vec();
+        let (mut app, _tmp) = locked_app_with_db("pw");
+        let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         app.mark_dirty();
         app.ask_quit();
@@ -2652,9 +2659,9 @@ mod tests {
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 2, "the new entry did not land");
         let made = app.vault.as_ref().unwrap().get_entry(&rows[1]).unwrap();
-        assert_eq!(made.title, "savings");
-        assert_eq!(made.username.as_str(), "me");
-        assert_eq!(made.password.as_str(), "pw");
+        assert_eq!(made.title(), "savings");
+        assert_eq!(made.username(), "me");
+        assert_eq!(made.password(), "pw");
         assert_eq!(app.entry_cursor, Some(rows[1]), "cursor stayed off the new row");
         assert!(app.working(), "in-memory add left no dirty flag");
         assert_eq!(app.stage, "entry added");
@@ -2678,8 +2685,8 @@ mod tests {
         app.submit_form();
         let rows = app.entry_rows();
         let kept = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
-        assert_eq!(kept.password.as_str(), "p", "empty edit box overwrote the secret");
-        assert_eq!(kept.notes.as_str(), "note");
+        assert_eq!(kept.password(), "p", "empty edit box overwrote the secret");
+        assert_eq!(kept.notes(), "note");
     }
 
     /* Typing in the password box latches: backspacing back to empty writes
@@ -2696,7 +2703,7 @@ mod tests {
         app.submit_form();
         let rows = app.entry_rows();
         let cleared = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
-        assert_eq!(cleared.password.as_str(), "", "backspace-to-empty did not clear");
+        assert_eq!(cleared.password(), "", "backspace-to-empty did not clear");
     }
 
     /* Esc throws the form away: no vault change, no autosave, no dirty flag. */
@@ -2712,7 +2719,7 @@ mod tests {
         assert!(app.form.is_none());
         assert!(!app.working(), "a cancelled form dirtied the vault");
         let rows = app.entry_rows();
-        assert_eq!(app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap().title, "checking");
+        assert_eq!(app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap().title(), "checking");
     }
 
     /* A title is the only must: submit without one reopens the form on the
@@ -2764,10 +2771,10 @@ mod tests {
     fn submit_autosaves_to_disk() {
         let tmp = temp_path("autosave");
         let mut seed = Vault::new();
-        seed.save_as(&tmp.0, b"pw", None).unwrap();
+        seed.save_as(&tmp.0, "pw", None).unwrap();
         let mut app = App::new();
         app.set_db_path(Some(tmp.0.clone()));
-        let mut pw = b"pw".to_vec();
+        let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         app.open_add_form();
         for c in "bankcard".chars() {
@@ -2775,10 +2782,10 @@ mod tests {
         }
         app.submit_form();
         assert!(!app.working(), "autosave left the vault dirty");
-        let reopened = Vault::open(&tmp.0, b"pw", None).unwrap();
+        let reopened = Vault::open(&tmp.0, "pw", None).unwrap();
         let root = reopened.root_id();
         assert_eq!(reopened.entries_in(&root).len(), 1);
-        assert_eq!(reopened.entries_in(&root)[0].title, "bankcard");
+        assert_eq!(reopened.entries_in(&root)[0].title(), "bankcard");
     }
 
     /* `A` grows the tree where the eye is: inside the selected group, and
@@ -2794,11 +2801,11 @@ mod tests {
         app.submit_group_prompt();
         let tree = app.group_tree();
         assert!(tree.iter().any(|(id, _)| {
-            app.vault.as_ref().unwrap().get_group(id).unwrap().title == "Cards"
+            app.vault.as_ref().unwrap().get_group(id).unwrap().name == "Cards"
         }));
         let cursor = app.group_cursor.unwrap();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&cursor).unwrap().title,
+            app.vault.as_ref().unwrap().get_group(&cursor).unwrap().name,
             "Cards"
         );
     }
@@ -2863,7 +2870,7 @@ mod tests {
         let titles: Vec<_> = app
             .group_tree()
             .iter()
-            .map(|(id, _)| app.vault.as_ref().unwrap().get_group(id).unwrap().title.clone())
+            .map(|(id, _)| app.vault.as_ref().unwrap().get_group(id).unwrap().name.clone())
             .collect();
         assert!(!titles.contains(&"Empty".to_string()), "{titles:?}");
     }
@@ -2906,11 +2913,11 @@ mod tests {
             .group_tree()
             .iter()
             .map(|(id, _)| *id)
-            .find(|id| app.vault.as_ref().unwrap().get_group(id).unwrap().title == "Work")
+            .find(|id| app.vault.as_ref().unwrap().get_group(id).unwrap().name == "Work")
             .unwrap();
         let under_work = app.vault.as_ref().unwrap().groups_in(&work);
         assert_eq!(under_work.len(), 1, "Banks did not land under Work");
-        assert_eq!(under_work[0].title, "Banks");
+        assert_eq!(under_work[0].name, "Banks");
     }
 
     /* The cycle guard: pasting a group under itself would vanish it from
@@ -2970,8 +2977,8 @@ mod tests {
                     .unwrap()
                     .get_entry(id)
                     .unwrap()
-                    .title
-                    .clone()
+                    .title()
+                    .to_string()
             })
             .collect()
     }
@@ -2993,12 +3000,23 @@ mod tests {
     #[test]
     fn updated_order_puts_the_newest_first() {
         let mut app = sorted_app();
-        /* Stamp the middle entry newest directly: the editor is the only
-           mutator in prod, and a test should not depend on clock ticks. */
-        let id = app.entry_rows()[1];
+        /* Stamp every entry but 'apple' oldest directly: the editor is the
+           only mutator in prod, and a test should not depend on clock ticks. */
+        let other: Vec<_> = app
+            .entry_rows()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, id)| *id)
+            .collect();
         let vault = app.vault.as_mut().unwrap();
-        vault.db_mut().get_entry_mut(&id).unwrap().last_modification_time =
-            keepass_rs::DateInstant::EpochMillis(9_000_000_000_000);
+        for id in other {
+            vault
+                .db_mut()
+                .entry_mut(id)
+                .unwrap()
+                .edit(|e| e.times.last_modification = Some(keepass::db::Times::epoch()));
+        }
         app.cycle_order(); // Name first — cycle once more for Updated.
         app.cycle_order();
         app.cycle_order();
@@ -3081,7 +3099,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         let hit = rows[0];
         assert_eq!(
-            app.vault.as_ref().unwrap().get_entry(&hit).unwrap().title,
+            app.vault.as_ref().unwrap().get_entry(&hit).unwrap().title(),
             "github token"
         );
         /* The relaxed selection rule: a global hit from another folder is
@@ -3178,7 +3196,7 @@ mod tests {
     fn open_password(app: &App) -> String {
         let id = app.entry_cursor.unwrap();
         app.vault.as_ref().unwrap().get_entry(&id).unwrap()
-            .password.as_str().to_string()
+            .password().to_string()
     }
 
     /* u brings a deleted entry back, under the group it came from. */
@@ -3188,7 +3206,7 @@ mod tests {
         app.step_group(true); // onto Banks
         let id = app.entry_cursor.unwrap();
         app.ask_delete_entry();
-        let Some(Confirm::DeleteEntry { id: _, .. }) = app.confirm else {
+        let Some(Confirm::DeleteEntry { .. }) = app.confirm else {
             panic!("delete did not ask");
         };
         app.confirm = None; // handler-takes-first convention
@@ -3217,7 +3235,7 @@ mod tests {
         app.submit_form();
         assert!(
             app.entry_rows().iter().any(|id| {
-                app.vault.as_ref().unwrap().get_entry(id).unwrap().title == "fresh"
+                app.vault.as_ref().unwrap().get_entry(id).unwrap().title() == "fresh"
             }),
             "the add did not land"
         );
@@ -3225,7 +3243,7 @@ mod tests {
         let titles: Vec<String> = app
             .entry_rows()
             .iter()
-            .map(|id| app.vault.as_ref().unwrap().get_entry(id).unwrap().title.clone())
+            .map(|id| app.vault.as_ref().unwrap().get_entry(id).unwrap().title().to_string())
             .collect();
         assert!(!titles.contains(&"fresh".to_string()), "u did not remove the add");
     }
@@ -3241,10 +3259,10 @@ mod tests {
             prompt.caret = 7;
         }
         app.submit_group_prompt();
-        assert_eq!(app.vault.as_ref().unwrap().get_group(&banks).unwrap().title, "Savings");
+        assert_eq!(app.vault.as_ref().unwrap().get_group(&banks).unwrap().name, "Savings");
         app.undo_last();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&banks).unwrap().title,
+            app.vault.as_ref().unwrap().get_group(&banks).unwrap().name,
             "Banks",
             "u did not put the old name back"
         );
