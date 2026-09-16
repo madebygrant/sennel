@@ -641,12 +641,17 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     const KEYS: &str = "h keys";
     let width = area.width as usize;
+    /* The lock screen takes every printable key as text, so its bar names
+       only chords: `h` there types an h, and a bar promising "h keys" on the
+       first screen anybody sees was promising a key that does not exist. */
     if app.view != View::Browser {
+        const LOCK_KEYS: &str = "F1 keys";
+        let left = "  enter unlock   ^r reveal   ^c quit";
         let spans = vec![
             Span::raw(" "),
-            dim("  enter unlock"),
-            Span::raw(" ".repeat(pad(width, cols("   enter unlock"), cols(KEYS)))),
-            dim(KEYS),
+            dim(left),
+            Span::raw(" ".repeat(pad(width, cols(left) + 1, cols(LOCK_KEYS)))),
+            dim(LOCK_KEYS),
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -892,6 +897,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("edit", "^u  ^w", "clear box, kill word"),
             ("reveal", "^r", "show the password plainly"),
             ("go", "enter", "unlock · apply path from the file box"),
+            ("close", "any key", "dismisses this table"),
             ("quit", "^c", ""),
         ]
     } else {
@@ -911,7 +917,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("find", "/", "fuzzy search"),
             ("match", "n N", "next, previous match"),
             ("undo", "u", "one level"),
+            ("save", "^s  ^r", "save now · reload the file on disk"),
             ("lock", "^l", "lock now"),
+            ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
         ]
     };
@@ -1019,7 +1027,7 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("Sennel"), "{joined}");
         assert!(joined.contains("database"), "{joined}");
-        assert!(joined.contains("h keys"), "{joined}");
+        assert!(joined.contains("F1 keys"), "{joined}");
     }
 
     /* The password box shows bullets end to end: length is the only thing
@@ -1185,11 +1193,12 @@ mod tests {
         app.show_help = true;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        for key in ["enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/"] {
+        for key in ["enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/", "^s", "esc"] {
             assert!(joined.contains(key), "the overlay forgot {key}: {joined}");
         }
-        // ^s belongs to the form, which advertises it itself.
-        assert!(!joined.contains("^s"), "the overlay claimed a form-only key");
+        // ^s here is save-now; the form's generate is advertised by the form.
+        assert!(joined.contains("save now"), "{joined}");
+        assert!(!joined.contains("generate"), "the overlay claimed a form-only key");
     }
 
     /* Enter means three things on the lock screen, and the hint names the one

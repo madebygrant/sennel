@@ -189,9 +189,20 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     /* The overlay swallows the next key rather than acting on it: anything
-       else makes dismissing it a guess about what the key also did. */
-    if app.show_help && !matches!(code, KeyCode::Char('q')) {
+       else makes dismissing it a guess about what the key also did. `q`
+       included — it used to fall through, which quit the session on the
+       browser and typed a character into the master password on the lock
+       screen, with the popup still up over the box it landed in. */
+    if app.show_help {
         app.show_help = false;
+        return;
+    }
+    /* The lock screen owns every printable key, so the overlay needs one no
+       password can contain: `h` there types an h, which left the bar's "h
+       keys" promising a key that does not exist on the first screen anybody
+       sees. */
+    if matches!(code, KeyCode::F(1)) {
+        app.show_help = true;
         return;
     }
     /* The lock screen owns its own keys: typing `q` or `h` must land in the
@@ -250,8 +261,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            and it is the retry when a save failed or was refused. */
         KeyCode::Char('s') if ctrl => app.save_now(),
         KeyCode::Char('r') if ctrl => app.reload_vault(),
-        KeyCode::Char('g') => app.jump_pane(false),
-        KeyCode::Char('G') => app.jump_pane(true),
+        KeyCode::Char('g') | KeyCode::Home => app.jump_pane(false),
+        KeyCode::Char('G') | KeyCode::End => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
         KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') => app.copy_username(),
@@ -274,6 +285,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Left if app.active_pane == app::Pane::Groups => app.collapse_group(),
         KeyCode::Left => app.switch_pane(),
         KeyCode::Right if app.active_pane == app::Pane::Groups => app.expand_group(),
+        // Left hops back to the tree, so Right goes forward into the entry.
+        KeyCode::Right => app.open_detail(),
         KeyCode::Char('o') => app.cycle_order(),
         /* n/N walk the matches while the band is live, and step entries
            otherwise — the same key, honest in both modes. */
@@ -282,6 +295,18 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `u` undoes the last one-slot change; ^u stays page-up. */
         KeyCode::Char('u') => app.undo_last(),
         KeyCode::Char('/') => app.open_search(),
+        /* The near misses of a keymap that means case: silence here reads as
+           a broken key, and the message is the only thing that teaches the
+           shift. */
+        KeyCode::Char(c @ ('x' | 'v' | 'd')) => app.say(format!(
+            "{} is {} here  ·  shift matters in this keymap",
+            c,
+            match c {
+                'x' => "X (cut)",
+                'v' => "V (paste)",
+                _ => "D (delete)",
+            }
+        )),
         /* Enter opens what the cursor is on: a group unfolds and hands over
            its entries, an entry opens the detail popup. */
         KeyCode::Enter => app.open_selection(),
@@ -324,6 +349,13 @@ fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Enter => app.keep_search(),
+        /* The list the band is filtering is the list the arrows move. Typing
+           a needle and reaching for ↓ is what every fuzzy finder has taught,
+           and the caret keys stay on ←/→ where the text is. */
+        KeyCode::Down => app.step_entry(true),
+        KeyCode::Up => app.step_entry(false),
+        KeyCode::Char('n') if ctrl => app.step_entry(true),
+        KeyCode::Char('p') if ctrl => app.step_entry(false),
         KeyCode::Char('u') if ctrl => app.search_clear(),
         KeyCode::Char('w') if ctrl => app.search_kill_word(),
         KeyCode::Left if !ctrl => app.search_move(false),
@@ -547,6 +579,81 @@ mod tests {
             assert!(app.confirm.is_none(), "{code:?} left the question open");
             assert!(!app.quit, "{code:?} quit through the delete confirm");
         }
+    }
+
+    /* The overlay swallows whatever dismisses it. `q` used to fall through:
+       on the browser that quit the session outright, and on the lock screen
+       it typed into the master password while the popup stayed up. */
+    #[test]
+    fn any_key_closes_the_overlay_and_reaches_nothing_behind_it() {
+        let mut app = open_browser();
+        app.show_help = true;
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.quit, "q quit from behind the overlay");
+        assert!(!app.show_help, "q left the overlay open");
+
+        let mut app = App::new();
+        app.show_help = true;
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(app.unlock_password, "", "a key reached the password box");
+        assert!(!app.show_help, "q left the overlay open");
+    }
+
+    /* F1, because the lock screen takes every printable key as text and the
+       bar promises a keys table there. */
+    #[test]
+    fn f1_opens_the_overlay_on_the_lock_screen() {
+        let mut app = App::new();
+        handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(!app.show_help, "h opened the overlay instead of typing");
+        assert_eq!(app.unlock_password, "h");
+        handle_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        assert!(app.show_help, "F1 did not open the overlay");
+        assert_eq!(app.unlock_password, "h", "F1 typed into the password");
+    }
+
+    /* The band filters a list, and the arrows move it: Enter first was the
+       only way to touch the results, which no fuzzy finder asks for. */
+    #[test]
+    fn the_band_moves_the_entry_cursor_while_it_filters() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        let first = app.entry_cursor;
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_ne!(app.entry_cursor, first, "↓ did nothing inside the band");
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.entry_cursor, first, "↑ did not come back");
+    }
+
+    /* A kept filter is about entries, so Enter leaves the keys there rather
+       than on a tree the user has stopped looking at. */
+    #[test]
+    fn keeping_a_filter_hands_the_keys_to_the_results() {
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "check".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.active_pane, crate::app::Pane::Entries);
+    }
+
+    /* Near misses of a keymap that means case answer instead of going quiet,
+       and Right goes forward into the entry the way Left goes back. */
+    #[test]
+    fn the_near_miss_keys_say_what_the_real_one_is() {
+        for (typed, wanted) in [('x', "X (cut)"), ('v', "V (paste)"), ('d', "D (delete)")] {
+            let mut app = open_browser();
+            handle_key(&mut app, KeyCode::Char(typed), KeyModifiers::NONE);
+            assert!(app.stage.contains(wanted), "{typed}: {}", app.stage);
+        }
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert!(app.detail, "Right did not open the entry");
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what

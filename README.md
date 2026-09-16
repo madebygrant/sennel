@@ -43,6 +43,7 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `*`             | show/hide the password (needs the detail pane or popup) |
 | `/`             | fuzzy search (`enter` keeps, `esc` clears)    |
 | `n` `N`         | next / previous match                         |
+| `↑ ↓` (in search) | move through the results while still typing |
 | `a` `e` `D`     | add / edit / delete entry                     |
 | `A` `E`         | add / rename group                            |
 | `D` (on groups) | delete group (refused while not empty)        |
@@ -54,7 +55,7 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `^s`            | save now (every change already autosaves)     |
 | `^r`            | reload from disk (offered when the file changed under you) |
 | `^s`            | generate a password into the edit form        |
-| `h` `?`         | keys overlay                                  |
+| `h` `?` `F1`    | keys overlay (`F1` on the lock screen, where letters are text) |
 | `esc`           | unwind: drop cut, clear filter, then report   |
 | `q` `^c`        | quit (asks when unsaved changes; `qq` answers) |
 

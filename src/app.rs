@@ -1150,10 +1150,17 @@ impl App {
 
     /// Enter on the band: keep the filter, hand the keys back to the browser.
     pub fn keep_search(&mut self) {
-        if self.search.as_deref().is_some_and(str::is_empty) {
+        let kept = !self.search.as_deref().unwrap_or_default().is_empty();
+        if !kept {
             self.search = None;
         }
         self.band = false;
+        /* The filter is about entries, so the keys go where the results are:
+           Enter used to hand them back to the groups pane, and `j` then moved
+           a tree the user had stopped looking at. */
+        if kept {
+            self.active_pane = Pane::Entries;
+        }
         self.snap();
     }
 
