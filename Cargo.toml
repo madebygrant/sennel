@@ -17,7 +17,7 @@ clap = { version = "4", features = ["derive"] }
 # definition it parses with, so they cannot drift from the flags that exist.
 # Both are thin layers over clap itself rather than new machinery.
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
@@ -28,7 +28,7 @@ unicode-width = "0.2"
 # opens them and is maintained. save_kdbx4 is what lets us write vaults back.
 # totp: KeePassXC writes `otp` on entries, and an entry whose code Sennel
 # cannot show is an entry the user has to open another app for.
-keepass = { version = "0.13", features = ["save_kdbx4", "totp"] }
+keepass = { version = "0.14", features = ["save_kdbx4", "totp"] }
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -36,8 +36,7 @@ rpassword = "7"
 arboard = "3"
 nucleo-matcher = "0.3"
 zeroize = "1"
-secrecy = "0.8"
-getrandom = "0.2"
+getrandom = "0.4"
 # Two calls only: no core dumps, and no ptrace by the rest of this user's
 # software — a dump of this process holds every secret at once.
 libc = "0.2"

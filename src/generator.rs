@@ -83,7 +83,7 @@ impl Classes {
 /// the caller names them rather than silently degrading to a weak source.
 fn os_byte() -> Result<u8, String> {
     let mut buf = [0u8; 1];
-    getrandom::getrandom(&mut buf).map_err(|e| format!("os randomness failed: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| format!("os randomness failed: {e}"))?;
     Ok(buf[0])
 }
 
