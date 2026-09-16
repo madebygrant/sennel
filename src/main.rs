@@ -29,6 +29,14 @@ use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
 fn main() -> Result<()> {
+    /* First, before a config is read or a vault is opened. Every path below
+       this can end up holding secrets — `get` sleeps out the clipboard wipe
+       holding one, `audit --pwned` walks every password in the vault waiting
+       on the network, `import` holds the lot twice — and all three used to
+       reach that state with core dumps still enabled and, on Linux, still
+       attachable. It sat further down, on the TUI path only, so a subcommand
+       was one `return` away from missing it; up here a new one inherits it. */
+    harden();
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
     if cfg.check {
@@ -73,7 +81,6 @@ fn main() -> Result<()> {
        name in the title bar. `ratatui::init` restores raw mode and the
        alternate screen on panic; mouse capture and the title are ours, so
        they are chained onto the same hook. */
-    harden();
     let mut terminal = ratatui::init();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -130,6 +137,19 @@ fn main() -> Result<()> {
    user — which is the whole machine's worth of software the user has ever
    installed. Best effort: a platform that refuses either call is no worse
    off than before. */
+/// Whether core dumps are actually off, read back rather than assumed. Shown
+/// by `--check`, which is how the hardening becomes something a test outside
+/// this process can see — and `--check` is itself an early return, so seeing
+/// it there proves `harden` ran before any of them.
+fn core_dumps_off() -> bool {
+    let mut limit = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 1,
+    };
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
+    read == 0 && limit.rlim_cur == 0
+}
+
 fn harden() {
     unsafe {
         let no_core = libc::rlimit {
@@ -175,6 +195,17 @@ fn check(cfg: &Config) -> Result<()> {
         Some(_) => println!("vault     not there yet · unlocking creates it"),
         None => println!("vault     (none)"),
     }
+    println!(
+        "hardened  {}",
+        match core_dumps_off() {
+            true => "core dumps off",
+            /* Named rather than hidden: a machine where the limit will not
+               take is one where a crash writes every secret to disk, and the
+               user should hear that from --check and not from a forensics
+               report. */
+            false => "core dumps STILL ON · this machine refused the limit",
+        }
+    );
     println!("theme     {}", cfg.theme.name());
     for note in &cfg.theme_warnings {
         println!("          ! {note}");
@@ -290,9 +321,14 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
-    let text = std::fs::read_to_string(config::expand(file))
+    let mut text = std::fs::read_to_string(config::expand(file))
         .with_context(|| format!("reading {file}"))?;
-    let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+    let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"));
+    /* The whole export, every password in it, in one buffer. Wiped as soon as
+       it has been parsed rather than left for the allocator — the rows that
+       came out of it wipe themselves on drop. */
+    text.zeroize();
+    let found = found?;
     if found.rows.is_empty() {
         anyhow::bail!("{file} has a header and no entries");
     }
@@ -1209,17 +1245,14 @@ mod tests {
     }
 
     /* The hardening is two syscalls whose only proof is the limit they set:
-       a core dump of this process would hold every secret at once. */
+       a core dump of this process would hold every secret at once. The
+       companion check — that every entry point reaches it, not only the TUI —
+       is `every_entry_point_disables_core_dumps` in tests/get.rs, which has
+       to be out of process to see a real `main`. */
     #[test]
     fn hardening_forbids_core_dumps() {
         harden();
-        let mut limit = libc::rlimit {
-            rlim_cur: 1,
-            rlim_max: 1,
-        };
-        let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
-        assert_eq!(read, 0, "getrlimit failed");
-        assert_eq!(limit.rlim_cur, 0, "core dumps are still allowed");
+        assert!(core_dumps_off(), "core dumps are still allowed");
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what

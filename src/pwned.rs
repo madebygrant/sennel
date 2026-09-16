@@ -21,7 +21,11 @@
 
 /// SHA-1 of a string, upper-case hex — the shape HIBP's API answers in.
 pub fn sha1_hex(text: &str) -> String {
+    use zeroize::Zeroize;
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    /* A second copy of the password, made only so the padding can be appended
+       to it. Wiped before this returns: the caller's copy is the vault's
+       business, but this one is ours. */
     let mut message = text.as_bytes().to_vec();
     let bits = (message.len() as u64) * 8;
     message.push(0x80);
@@ -64,6 +68,7 @@ pub fn sha1_hex(text: &str) -> String {
         h[3] = h[3].wrapping_add(d);
         h[4] = h[4].wrapping_add(e);
     }
+    message.zeroize();
     h.iter().map(|word| format!("{word:08X}")).collect()
 }
 
@@ -173,6 +178,21 @@ mod tests {
         assert_eq!(count_in(body, "0018A45C4D1DEF81644B54AB7F969B88D65"), 1);
         assert_eq!(count_in(body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), 0);
         assert_eq!(count_in("", "anything"), 0);
+
+        /* The branch that decides "clean", against a response the size the
+           api really sends: a miss among 800 near-misses has to read as zero
+           and not as the count of whichever line happened to be last. */
+        let mut crowd = String::new();
+        for n in 0..800u32 {
+            crowd.push_str(&format!("{:035X}:{}\r\n", n, n + 1));
+        }
+        assert_eq!(count_in(&crowd, "00000000000000000000000000000000000"), 1);
+        assert_eq!(count_in(&crowd, "0000000000000000000000000000000031F"), 800);
+        assert_eq!(
+            count_in(&crowd, "1E4C9B93F3F0682250B6CF8331B7EE68FD8"),
+            0,
+            "a password nobody has breached read as breached"
+        );
     }
 
     /* The prefix is ours, not the user's, but it still goes into a url. */

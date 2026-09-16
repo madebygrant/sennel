@@ -2346,6 +2346,42 @@ mod tests {
         assert!(screen(&t).join("\n").contains("8888-4444"), "* revealed nothing");
     }
 
+    /* Extracting the same attachment twice hits the exclusive-create that
+       stops a planted symlink redirecting the write. Correct, but the bare
+       "File exists" it produced named neither the file nor the reason. */
+    #[test]
+    fn extracting_an_attachment_twice_says_which_file_is_in_the_way() {
+        use crate::vault::Vault;
+        let dir = std::env::temp_dir().join(format!("sennel-x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.kdbx");
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(dir.join("key.pem")).ok();
+
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        vault.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+        vault.save_as(&path, "pw", None).unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.entry_cursor = Some(id);
+        app.open_fields();
+
+        app.fields_save();
+        assert!(dir.join("key.pem").exists(), "{}", app.stage);
+        assert!(app.stage.contains("wrote"), "{}", app.stage);
+
+        app.expire_now();
+        app.fields_save();
+        assert!(app.stage.contains("already there"), "{}", app.stage);
+        assert!(app.stage.contains("key.pem"), "{}", app.stage);
+        // And the file that was there is untouched.
+        assert_eq!(std::fs::read(dir.join("key.pem")).unwrap(), b"-----BEGIN-----");
+        std::fs::remove_file(dir.join("key.pem")).ok();
+        std::fs::remove_file(&path).ok();
+    }
+
     /* `D` removes the row under the cursor, and the list has to stop showing
        what is no longer there. */
     #[test]

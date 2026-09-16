@@ -213,3 +213,44 @@ fn completions_and_the_man_page_need_no_vault() {
     assert!(page.starts_with(".ie"), "not roff: {}", &page[..40.min(page.len())]);
     assert!(page.contains(".TH sennel 1"), "{page}");
 }
+
+/* Hardening has to cover every way into the program, not just the TUI. It
+   used to sit on the TUI path only, so `get`, `audit` and `import` unlocked
+   the vault with core dumps still enabled — and those are the two paths that
+   sit around holding secrets, one sleeping out the clipboard wipe and one
+   waiting on the network.
+
+   Launched through `sh -c 'ulimit -c unlimited'`, because the limit is
+   already 0 on a default macOS shell: spawning sennel directly would pass
+   whether or not it hardens anything, which is what the first version of
+   this test did. The parent raises the limit, so only sennel can lower it.
+
+   `--check` reads the limit back rather than assuming it, and `--check` is
+   itself one of the early returns, so seeing it there is the proof that
+   `harden` runs ahead of all of them. */
+#[test]
+fn every_entry_point_disables_core_dumps() {
+    let exe = env!("CARGO_BIN_EXE_sennel");
+    let raised = Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -c unlimited 2>/dev/null; exec {exe} --check --no-config"))
+        .output()
+        .expect("could not run sennel under sh");
+    let text = String::from_utf8_lossy(&raised.stdout);
+    assert!(text.contains("hardened  core dumps off"), "{text}");
+    assert!(!text.contains("STILL ON"), "{text}");
+
+    /* And the check is not simply printing a constant: with the limit raised
+       and the hardening skipped, it has to say so. `--version` exits before
+       anything, so this asks the shell itself what it sees. */
+    let unhardened = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -c unlimited 2>/dev/null; ulimit -c")
+        .output()
+        .unwrap();
+    let limit = String::from_utf8_lossy(&unhardened.stdout).trim().to_string();
+    assert!(
+        limit == "unlimited" || limit.parse::<u64>().unwrap_or(0) > 0,
+        "this machine will not raise the core limit, so the test above proves nothing · got {limit:?}"
+    );
+}

@@ -13,6 +13,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroize;
+
 use keepass::{
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
@@ -189,6 +191,10 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
 pub const STANDARD: [&str; 6] = [TITLE, USERNAME, PASSWORD, URL, NOTES, "otp"];
 
 /// One line of the `F` screen: a custom string field, or a file.
+/* Carries the decrypted value, which for a custom field is a recovery code or
+   an api key as often as not — so it wipes on drop, the same rule the typed
+   boxes follow. Freeing a String without zeroizing it leaves the bytes in the
+   allocation, which is the distinction this codebase draws everywhere else. */
 #[derive(Clone, PartialEq, Debug)]
 pub enum Extra {
     Field {
@@ -201,6 +207,24 @@ pub enum Extra {
         name: String,
         bytes: usize,
     },
+}
+
+impl Extra {
+    /* What `Drop` does, split out so a test can watch it work on a value it
+       still owns. Reading a freed allocation to check a zeroize landed proves
+       nothing: the allocator writes its own bookkeeping into the block, so
+       the secret is usually gone from it whether or not anybody wiped it. */
+    pub fn wipe(&mut self) {
+        if let Extra::Field { value, .. } = self {
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for Extra {
+    fn drop(&mut self) {
+        self.wipe();
+    }
 }
 
 impl Extra {
@@ -270,6 +294,8 @@ pub fn all_tags(vault: &Vault) -> Vec<String> {
 }
 
 /// One old version of an entry, as the history screen reads it.
+/* Every row is a password somebody used to have, which is the whole reason
+   the screen exists — so it wipes on drop like the boxes that type one. */
 #[derive(Clone, PartialEq, Debug)]
 pub struct Version {
     /// Newest first, so 0 is the version just before the current one.
@@ -279,6 +305,19 @@ pub struct Version {
     pub password: String,
     /// When that version was last modified, UTC as KDBX stores it.
     pub modified: Option<chrono::NaiveDateTime>,
+}
+
+impl Version {
+    /// What `Drop` does, observable on a live value. See `Extra::wipe`.
+    pub fn wipe(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+impl Drop for Version {
+    fn drop(&mut self) {
+        self.wipe();
+    }
 }
 
 /* Old versions of an entry, newest first. Sennel writes none of these — its
@@ -1595,6 +1634,53 @@ mod tests {
             "the old password is still in the file"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    /* These two carry decrypted secrets out of the vault — a custom field's
+       value and an old password — so they wipe like the typed boxes do.
+
+       Checked on a live value, not a freed one. Reading a freed allocation
+       proves nothing either way: the allocator writes its own bookkeeping
+       into the block, so the secret is usually gone from it whether or not
+       anybody wiped it. (The older zeroize tests in app.rs do read freed
+       memory, and pass with `zeroize` swapped for `clear` — they are not
+       measuring what they claim to.) */
+    #[test]
+    fn the_screens_that_hold_secrets_wipe_them() {
+        let mut field = Extra::Field {
+            name: "recovery".into(),
+            value: "recovery-8888-4444".repeat(8),
+            secret: true,
+        };
+        let (ptr, cap) = match &field {
+            Extra::Field { value, .. } => (value.as_ptr(), value.capacity()),
+            Extra::File { .. } => unreachable!(),
+        };
+        field.wipe();
+        // SAFETY: still owned and still allocated; `wipe` empties the String
+        // but leaves the capacity, which is what makes this readable at all.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(8).any(|w| w == b"recovery"),
+            "a custom field value survived the wipe"
+        );
+        assert!(bytes.iter().all(|b| *b == 0), "the buffer was not zeroed");
+
+        let mut version = Version {
+            at: 0,
+            title: "mail".into(),
+            username: "octo".into(),
+            password: "old-password-nobody-should-keep".repeat(8),
+            modified: None,
+        };
+        let (ptr, cap) = (version.password.as_ptr(), version.password.capacity());
+        version.wipe();
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(8).any(|w| w == b"password"),
+            "an old password survived the wipe"
+        );
+        assert!(bytes.iter().all(|b| *b == 0), "the buffer was not zeroed");
     }
 
     /* Custom fields and attachments used to be a count and nothing else.

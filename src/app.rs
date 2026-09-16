@@ -2623,27 +2623,35 @@ impl App {
                 } else {
                     None
                 };
-                /* Snapshot before the write, and before the mutable borrow:
-                   undo restores the entry as the form found it, password
-                   included. */
+                /* Taken before the write, because afterwards the old values
+                   are gone — but pushed only once the write has landed.
+
+                   Defensive, not a fix for a live bug: the snapshot and the
+                   write do the same `entry(id)` lookup, so `before` is Some
+                   exactly when the write will succeed, and no input reaches
+                   the failing combination. There is deliberately no test,
+                   because none can fail without this. It is one validation
+                   inside `update_entry` — an empty-title check, a read-only
+                   guard — away from arming an undo step for a change that
+                   never happened, and the ordering costs nothing. */
                 let before = self
                     .vault
                     .as_ref()
                     .and_then(|v| v.get_entry(&id).map(|e| e.clone()));
-                if let Some(before) = before {
-                    self.push_undo(Undo::Edit { id, before });
-                }
                 let tags = split_tags(&form.tags);
                 let vault = self.vault.as_mut().expect("edit form needs a vault");
-                vault
+                let wrote = vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
                     .and_then(|()| vault.set_tags(&id, &tags))
                     .and_then(|()| match otp.as_ref() {
                         // Untouched keeps whatever the entry already carried.
                         None => Ok(()),
                         Some(url) => vault.set_otp(&id, url.as_deref()),
-                    })
-                    .map(|()| None)
+                    });
+                if wrote.is_ok() && let Some(before) = before {
+                    self.push_undo(Undo::Edit { id, before });
+                }
+                wrote.map(|()| None)
             }
         };
         match result {
@@ -2731,17 +2739,19 @@ impl App {
                 }
             }
             GroupPromptKind::Rename(id) => {
-                /* Snapshot the old name before the rename, and before the
-                   mutable borrow, so one `u` puts it back. */
+                /* Taken before the rename, pushed after it lands — same rule,
+                   and the same "defensive, untestable today" caveat as the
+                   entry edit above. */
                 let before = self
                     .vault
                     .as_ref()
                     .and_then(|v| v.get_group(&id).map(|g| g.name.clone()));
-                if let Some(before) = before {
+                let vault = self.vault.as_mut().expect("group prompt needs a vault");
+                let wrote = vault.rename_group(&id, &prompt.value);
+                if wrote.is_ok() && let Some(before) = before {
                     self.push_undo(Undo::Rename { id, before });
                 }
-                let vault = self.vault.as_mut().expect("group prompt needs a vault");
-                vault.rename_group(&id, &prompt.value).map(|()| None)
+                wrote.map(|()| None)
             }
         };
         match result {
@@ -3035,6 +3045,14 @@ impl App {
             .filter(|n| !n.is_empty() && n != "." && n != "..")
             .unwrap_or_else(|| "attachment".to_string());
         let at = dir.join(&leaf);
+        /* Named before the write is attempted. `write_owner_only` creates
+           exclusively — which is what stops a symlink planted at the path
+           redirecting it — so a second extraction fails with a bare
+           "File exists" that says nothing about which file or why. */
+        if at.exists() {
+            self.warn(format!("{} is already there  ·  move it first", at.display()));
+            return;
+        }
         match crate::vault::write_owner_only(&at, &bytes) {
             Ok(()) => self.warn(format!(
                 "wrote {} ·  {} bytes, owner-only, outside the vault",

@@ -12,6 +12,10 @@
    about sixty lines' worth of quoting rules. */
 
 /// One row of an export, in Sennel's terms.
+/* Holds a password and a one-time seed in the clear, so it wipes on drop. The
+   file it came from is plaintext on disk either way — which is why `import`
+   tells the user to delete it — but that is a reason to handle the copy in
+   memory properly, not a reason to stop bothering. */
 #[derive(Debug, PartialEq, Default)]
 pub struct Row {
     pub group: String,
@@ -22,6 +26,23 @@ pub struct Row {
     pub notes: String,
     /// An `otpauth://` url or a bare seed; the vault decides which.
     pub otp: String,
+}
+
+impl Row {
+    /// What `Drop` does, observable on a live value. See `vault::Extra::wipe`.
+    pub fn wipe(&mut self) {
+        use zeroize::Zeroize;
+        self.password.zeroize();
+        self.otp.zeroize();
+        // Notes in an export routinely hold recovery codes and PINs.
+        self.notes.zeroize();
+    }
+}
+
+impl Drop for Row {
+    fn drop(&mut self) {
+        self.wipe();
+    }
 }
 
 /// What a header column is, whatever the exporting tool called it.
@@ -310,6 +331,42 @@ mod tests {
         assert_eq!(entry.title(), "jira");
         assert_eq!(entry.password(), "pw");
         assert!(crate::vault::totp_now(&entry).is_some(), "the seed did not become a code");
+    }
+
+    /* Every row holds a password in the clear. The file it came from is
+       plaintext on disk either way — which is why `import` says to delete it
+       — but that is a reason to handle the copy in memory properly, not a
+       reason to stop bothering.
+
+       On a live value, for the reason `vault`'s equivalent test gives. */
+    #[test]
+    fn a_parsed_row_wipes_its_secrets() {
+        /* Every field named: `..Row::default()` cannot be used on a type
+           with a Drop impl, since the struct-update syntax moves out of a
+           value that owns a destructor. */
+        let mut row = Row {
+            group: String::new(),
+            title: "mail".into(),
+            username: String::new(),
+            password: "imported-password-in-the-clear".repeat(4),
+            url: String::new(),
+            notes: "recovery pin 4821".repeat(4),
+            otp: "JBSWY3DPEHPK3PXP".repeat(4),
+        };
+        let each = [
+            (row.password.as_ptr(), row.password.capacity(), "password"),
+            (row.otp.as_ptr(), row.otp.capacity(), "otp"),
+            (row.notes.as_ptr(), row.notes.capacity(), "notes"),
+        ];
+        row.wipe();
+        for (ptr, cap, what) in each {
+            // SAFETY: still owned; wipe empties but keeps the capacity.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+            assert!(bytes.iter().all(|b| *b == 0), "{what} survived the wipe");
+        }
+        // The title is not a secret and is left alone, so the row still names
+        // itself in an error after its secrets have gone.
+        assert_eq!(row.title, "mail");
     }
 
     /* A file with no title column cannot be imported into anything useful,

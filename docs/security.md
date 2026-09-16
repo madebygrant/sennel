@@ -17,9 +17,10 @@ vault, `chmod 0600` from the first byte. The temp file is created exclusively, s
 in the vault's directory cannot redirect the write. The config file is `0600` too. It holds no
 secret, but it names where the vault lives.
 
-**No crash dumps, no ptrace.** Core dumps are off at startup and, on Linux, the process is marked
-undumpable. A dump of Sennel holds every secret at once, and anything running as the same user can
-attach to a dumpable process.
+**No crash dumps, no ptrace.** Core dumps are off and, on Linux, the process is marked undumpable —
+before the config is read or a vault is opened, on every path including `get`, `audit` and `import`.
+A dump of Sennel holds every secret at once, and anything running as the same user can attach to a
+dumpable process. `sennel --check` reads the limit back and says so, rather than assuming it took.
 
 **Clipboard auto-clear.** Copies are wiped after a configurable interval, 15 seconds by default. A
 second copy re-arms the timer rather than being wiped early by the first one. Quitting wipes
@@ -39,8 +40,10 @@ new password if you forget it, and the prompt says so.
 locks and the in-memory secrets are zeroized. `^l` does the same on demand.
 
 **Zeroized in memory.** The typed password, key-file and one-time-seed boxes are overwritten, not
-merely emptied, whenever they are cleared, locked or thrown away. The retained database key and the
-undo snapshots wipe on drop. The status bar names what was copied, never the secret itself.
+merely emptied, whenever they are cleared, locked or thrown away. So do the decrypted values the
+`F` and `H` screens hold — a custom field is a recovery code as often as not, and every row of the
+history screen is a password somebody used to have — and the rows an import parses out of a CSV.
+The retained database key and the undo snapshots wipe on drop. The status bar names what was copied, never the secret itself.
 
 **Deletes go to the recycle bin.** `D` moves an entry or a group, subtree and all, into the same
 `Recycle Bin` group KeePassXC uses, recorded in the file's own metadata. Nothing is destroyed, the
