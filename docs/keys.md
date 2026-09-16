@@ -47,6 +47,7 @@ not the browser's `*`.
 | `u`                 | undo the last change, including a delete (one level)          |
 | `^l`                | lock now (same wipe as the idle auto-lock)                    |
 | `^p`                | change the master password (typed twice, `^r` reveals)        |
+| `!`                 | reused, weak and empty passwords · `enter` goes to one        |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |

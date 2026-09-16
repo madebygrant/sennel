@@ -41,6 +41,10 @@ credential on the clipboard to save typing six digits is a bad trade.
 and remembers the one you stop on. Every colour is measured against WCAG 4.5:1 before it ships,
 and `NO_COLOR` still gives you a usable app.
 
+**It tells you which passwords to change.** `!` lists every reused, weak or empty password in the
+vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
+finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
+
 **Deletes are recoverable.** `D` moves an entry or a whole group into the same recycle bin
 KeePassXC uses, so a mistake costs one `u` rather than a restore from backup. Binned rows stay out
 of counts, search and `--list`. Inside the bin, `D` means it.
@@ -61,6 +65,7 @@ overwritten rather than dropped. `^l` does it now.
 | `y p U t`   | copy username, password, url, one-time code     |
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
+| `!`         | passwords worth changing                        |
 | `u`         | undo the last change                            |
 | `h`         | every other key                                 |
 

@@ -156,6 +156,13 @@ pub struct GroupPrompt {
     pub caret: usize,
 }
 
+/* What `!` found, held rather than recomputed: the walk touches every entry
+   and every password in the vault, which is fine once and wrong per frame. */
+pub struct Audit {
+    pub rows: Vec<(EntryId, crate::vault::Issue)>,
+    pub cursor: usize,
+}
+
 /// Which box of the change-password prompt the keys are typing into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RekeyField {
@@ -506,6 +513,9 @@ pub struct App {
     pub group_prompt: Option<GroupPrompt>,
     /// The change-master-password prompt, when it is open.
     pub rekey: Option<Rekey>,
+    /// The password audit, when it is open. Computed once on open: it walks
+    /// every entry, which is not a thing to do per frame.
+    pub audit: Option<Audit>,
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
@@ -590,6 +600,7 @@ impl App {
             form: None,
             group_prompt: None,
             rekey: None,
+            audit: None,
             cut: None,
             undo: None,
             search: None,
@@ -927,6 +938,7 @@ impl App {
         /* Dropping it zeroizes both boxes: a half-typed master password must
            not survive the lock that was supposed to clear the screen. */
         self.rekey = None;
+        self.audit = None;
         self.confirm = None;
         self.cut = None;
         self.undo = None;
@@ -2769,6 +2781,59 @@ impl App {
                 self.error(format!("password unchanged  ·  {e}"));
             }
         }
+    }
+
+    /* `!`: what is wrong with this vault's passwords. A list, not a score:
+       a number out of ten tells nobody which entry to open next. */
+    pub fn open_audit(&mut self) {
+        let Some(vault) = &self.vault else {
+            self.say("no vault open");
+            return;
+        };
+        let rows = crate::vault::audit(vault);
+        if rows.is_empty() {
+            self.say("nothing to fix  ·  no reused, weak or empty passwords");
+            return;
+        }
+        self.audit = Some(Audit { rows, cursor: 0 });
+    }
+
+    pub fn close_audit(&mut self) {
+        self.audit = None;
+    }
+
+    pub fn audit_move(&mut self, down: bool) {
+        let Some(audit) = &mut self.audit else {
+            return;
+        };
+        let last = audit.rows.len().saturating_sub(1);
+        audit.cursor = match down {
+            true => (audit.cursor + 1).min(last),
+            false => audit.cursor.saturating_sub(1),
+        };
+    }
+
+    /* Enter on a row: close the audit and put the cursor on that entry, in
+       its own group. A list of problems nobody can act on from where they are
+       standing is a list nobody acts on. */
+    pub fn audit_open_selected(&mut self) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let Some((id, _)) = audit.rows.get(audit.cursor).copied() else {
+            return;
+        };
+        self.audit = None;
+        /* Into the group that holds it, or the row would be filtered out of
+           a pane pointed somewhere else entirely. */
+        if let Some(parent) = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id)) {
+            self.group_cursor = Some(parent);
+        }
+        self.search = None;
+        self.band = false;
+        self.entry_cursor = Some(id);
+        self.active_pane = Pane::Entries;
+        self.snap();
     }
 
     pub fn group_prompt_insert(&mut self, c: char) {

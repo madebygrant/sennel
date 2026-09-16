@@ -72,5 +72,11 @@ one-time code rather than the seed. `--stdout` is the one way a secret leaves th
 refuses a terminal unless forced, because scrollback is exactly where a password should not be.
 Entries in the recycle bin are not candidates for any needle.
 
+**The audit runs offline.** `!` compares passwords inside the process and sends nothing anywhere.
+It groups them by hash rather than building a table of every password in the vault, names the
+finding without ever printing the password, and skips the recycle bin: telling somebody to go fix
+an entry they deleted is how an audit loses their trust. "Weak" is the same 60-bit line the entry
+form already draws in amber, not a second opinion.
+
 **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, urls and group paths,
 never notes. Printed inventories carry titles only.

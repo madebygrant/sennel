@@ -102,6 +102,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.rekey.is_some() {
         draw_rekey(frame, app);
     }
+    if app.audit.is_some() {
+        draw_audit(frame, app);
+    }
     if app.browse.is_some() {
         draw_browse(frame, app);
     }
@@ -1468,6 +1471,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("save", "^s  ^r", "save now · reload the file on disk"),
             ("lock", "^l", "lock now"),
             ("master", "^p", "change the master password"),
+            ("audit", "!", "reused, weak and empty passwords"),
             ("theme", "^t", "next palette · remembered"),
             ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
@@ -1520,6 +1524,84 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3, &p);
+}
+
+/* What `!` found: one line per entry, worst first, with the reason beside
+   the name. A list rather than a score, because a number out of ten tells
+   nobody which entry to open next — and `enter` puts the cursor on the row,
+   so the fix is two keys away from the finding. */
+fn draw_audit(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(audit) = &app.audit else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(30, 76);
+    let inner = width.saturating_sub(4) as usize;
+    /* Leave room for the header, the hint line and the popup's own border,
+       and scroll the rest: a vault with forty findings must still fit. */
+    let room = (area.height as usize).saturating_sub(6).max(1);
+    let first = audit.cursor.saturating_sub(room.saturating_sub(1));
+
+    let reused = audit
+        .rows
+        .iter()
+        .filter(|(_, issue)| matches!(issue, crate::vault::Issue::Reused(_)))
+        .count();
+    let mut lines = vec![
+        Line::from(vec![
+            p.faint(" "),
+            Span::styled(format!("{} to look at", audit.rows.len()), Style::new().fg(p.text)),
+            p.faint(if reused > 0 {
+                format!("  ·  {reused} share a password with something else")
+            } else {
+                String::new()
+            }),
+        ]),
+        Line::default(),
+    ];
+    for (n, (id, issue)) in audit.rows.iter().enumerate().skip(first).take(room) {
+        let live = n == audit.cursor;
+        let title = app
+            .vault
+            .as_ref()
+            .and_then(|v| v.get_entry(id).map(|e| e.title().to_string()))
+            .unwrap_or_default();
+        let say = issue.say();
+        /* Reuse is the finding a person cannot spot themselves and the one
+           that costs more than one account, so it is the one in `warn`. */
+        let ink = match issue {
+            crate::vault::Issue::Reused(_) | crate::vault::Issue::Empty => p.warn,
+            crate::vault::Issue::Weak(_) => p.muted,
+        };
+        let name = truncate(&title, inner.saturating_sub(cols(&say) + 4));
+        let pad = inner
+            .saturating_sub(cols(&name) + cols(&say) + 2)
+            .max(1);
+        lines.push(Line::from(vec![
+            if live { p.lit("▌") } else { Span::raw(" ") },
+            Span::styled(format!(" {name}"), p.row(live)),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(say, Style::new().fg(ink)),
+        ]));
+    }
+    if audit.rows.len() > room {
+        lines.push(p.faint(format!(
+            " {} of {} shown",
+            room.min(audit.rows.len()),
+            audit.rows.len()
+        )).into());
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" enter", Style::new().fg(p.accent)),
+        p.faint(" go to it   "),
+        Span::styled("j k", Style::new().fg(p.accent)),
+        p.faint(" move   "),
+        Span::styled("esc", Style::new().fg(p.accent)),
+        p.faint(" close"),
+    ]));
+    popup(frame, "passwords worth changing", lines, width, &p);
 }
 
 /* The change-password prompt: two masked boxes, and a line saying what is
@@ -2037,6 +2119,55 @@ mod tests {
             crate::theme::WARM.muted,
             "a live group drew like the bin"
         );
+    }
+
+    /* A list, not a score: the point is that `enter` takes you to the row,
+       so the fix is two keys from the finding. */
+    #[test]
+    fn the_audit_lists_what_is_wrong_and_enter_goes_there() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "checking", "octo", "shared-pw", "", "").unwrap();
+        vault.create_entry(&root, "savings", "octo", "shared-pw", "", "").unwrap();
+        app.open_vault(vault);
+        app.open_audit();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("passwords worth changing"), "{joined}");
+        assert!(joined.contains("checking"), "{joined}");
+        assert!(joined.contains("reused across 2"), "{joined}");
+        // The finding names the problem; it never prints the password itself.
+        assert!(!joined.contains("shared-pw"), "the audit printed a password");
+
+        /* Enter lands the cursor on the row, in the group that holds it —
+           a finding in a group the pane is not pointed at is unreachable. */
+        app.audit_open_selected();
+        assert!(app.audit.is_none(), "the popup stayed open");
+        assert_eq!(app.group_cursor, Some(banks), "the pane did not follow");
+        let rows = app.entry_rows();
+        assert_eq!(app.entry_cursor, rows.first().copied(), "the cursor missed");
+    }
+
+    /* A clean vault gets told so rather than shown an empty box. */
+    #[test]
+    fn a_vault_with_nothing_wrong_says_so_instead_of_opening() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault
+            .create_entry(&root, "fine", "octo", "Xq7!vm2Zt4&pLr9Wd6*Ks1", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.open_audit();
+        assert!(app.audit.is_none(), "an empty audit opened a popup");
+        assert!(app.stage.contains("nothing to fix"), "{}", app.stage);
     }
 
     /* The one action nobody can take back and nothing can remind them of, so

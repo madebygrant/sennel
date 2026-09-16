@@ -366,6 +366,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.form.is_some()
         || app.group_prompt.is_some()
         || app.rekey.is_some()
+        || app.audit.is_some()
         || app.detail
         || app.show_help
     {
@@ -400,6 +401,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* The group prompt is modal on the same terms, one box instead of five. */
     if app.group_prompt.is_some() {
         handle_group_prompt_key(app, code, mods);
+        return;
+    }
+    /* The audit is a list you steer, so it owns the keys while it is up. */
+    if app.audit.is_some() {
+        handle_audit_key(app, code, mods);
         return;
     }
     /* So is the change-password prompt, and more so than most: every
@@ -523,6 +529,9 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('e') => app.open_edit_form(),
         /* Group keys. A and E name groups from either pane; D follows the
            pane — the cursor decides what deleting means. */
+        /* `!`: what is wrong with this vault's passwords. Shift-1, so it is
+           never a slip away from a movement key. */
+        KeyCode::Char('!') => app.open_audit(),
         KeyCode::Char('A') => app.open_group_prompt_new(),
         KeyCode::Char('E') => app.open_group_prompt_rename(),
         KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),
@@ -668,6 +677,21 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
    Esc. Same shape as the entry form minus the field movement. */
+/* The audit list: move, open, leave. Enter is the whole point — a list of
+   problems you cannot act on from where you are standing is a list nobody
+   works through. */
+fn handle_audit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('!') => app.close_audit(),
+        KeyCode::Char('j') | KeyCode::Down => app.audit_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.audit_move(false),
+        KeyCode::Enter => app.audit_open_selected(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
 /* Two masked boxes and nothing else. Every printable key is text, including
    the ones that are verbs everywhere else, so the reveal is `^r` and the way
    out is Esc. */

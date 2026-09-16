@@ -908,6 +908,96 @@ impl Vault {
     }
 }
 
+/// What is wrong with an entry's password, worst first when one entry has
+/// more than one problem.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Issue {
+    /// No password at all.
+    Empty,
+    /// The same password as this many other entries.
+    Reused(usize),
+    /// Fewer bits than a password worth having, by the form's own estimate.
+    Weak(f64),
+}
+
+impl Issue {
+    /// Worst first, so a list sorted by this reads as a to-do list.
+    pub fn rank(self) -> u8 {
+        match self {
+            Issue::Empty => 0,
+            Issue::Reused(_) => 1,
+            Issue::Weak(_) => 2,
+        }
+    }
+
+    pub fn say(self) -> String {
+        match self {
+            Issue::Empty => "no password".to_string(),
+            Issue::Reused(n) => format!("reused across {} entries", n + 1),
+            Issue::Weak(bits) => format!("~{bits:.0} bits · {}", crate::generator::strength(bits)),
+        }
+    }
+}
+
+/// Below this, the entry form already draws the estimate in `warn`. The audit
+/// uses the same line rather than inventing a second opinion.
+const WEAK_BITS: f64 = 60.0;
+
+/* Everything wrong with the vault's passwords, in one pass. Reuse first
+   because it is the finding that matters most and the one a person cannot
+   possibly spot themselves: a weak password costs one account, a reused one
+   costs every account that shares it.
+
+   Passwords are grouped by hash, not by keeping a map of the plaintext:
+   equality is all this needs, and a table of every password in the vault is
+   not a thing to build when a count will do. SipHash is not a security claim
+   here — a collision would mean one wrong "reused" line, not an exposure. */
+pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    let entries = vault.entry_refs();
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    let digest = |password: &str| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        password.hash(&mut hasher);
+        hasher.finish()
+    };
+    for entry in &entries {
+        let password = entry.password();
+        if !password.is_empty() {
+            *counts.entry(digest(password)).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(EntryId, Issue)> = Vec::new();
+    for entry in &entries {
+        let password = entry.password();
+        let issue = if password.is_empty() {
+            Issue::Empty
+        } else if let Some(others) = counts.get(&digest(password)).filter(|n| **n > 1) {
+            Issue::Reused(others - 1)
+        } else {
+            let bits = crate::generator::typed_bits(password);
+            if bits >= WEAK_BITS {
+                continue;
+            }
+            Issue::Weak(bits)
+        };
+        out.push((entry.id(), issue));
+    }
+    /* Worst first, then by title, so the list is stable between openings —
+       a to-do list that reshuffles itself is one nobody works through. */
+    out.sort_by(|a, b| {
+        a.1.rank().cmp(&b.1.rank()).then_with(|| {
+            let name = |id: &EntryId| {
+                vault.get_entry(id).map(|e| e.title().to_lowercase()).unwrap_or_default()
+            };
+            name(&a.0).cmp(&name(&b.0))
+        })
+    });
+    out
+}
+
 /// What a needle found, for a caller with no screen to show a list on.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Found {
@@ -1073,6 +1163,68 @@ mod tests {
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    /* Reuse is the finding a person cannot possibly spot themselves, and the
+       one that costs more than one account when it bites. */
+    #[test]
+    fn the_audit_finds_reused_weak_and_empty_passwords() {
+        let mut v = vault();
+        let root = v.root_id();
+        let shared = "correct-horse";
+        let a = v.create_entry(&root, "aaa", "u", shared, "", "").unwrap();
+        let b = v.create_entry(&root, "bbb", "u", shared, "", "").unwrap();
+        let weak = v.create_entry(&root, "ccc", "u", "hunter2", "", "").unwrap();
+        let empty = v.create_entry(&root, "ddd", "u", "", "", "").unwrap();
+        // Long, mixed and unique: nothing to say about it.
+        let fine = v
+            .create_entry(&root, "eee", "u", "Xq7!vm2Zt4&pLr9Wd6*Ks1", "", "")
+            .unwrap();
+
+        let found = audit(&v);
+        let issue = |id: &EntryId| found.iter().find(|(e, _)| e == id).map(|(_, i)| *i);
+        // Both sides of a shared password are named, each counting the other.
+        assert_eq!(issue(&a), Some(Issue::Reused(1)));
+        assert_eq!(issue(&b), Some(Issue::Reused(1)));
+        assert!(matches!(issue(&weak), Some(Issue::Weak(_))));
+        assert_eq!(issue(&empty), Some(Issue::Empty));
+        assert_eq!(issue(&fine), None, "a good password was flagged");
+
+        /* Worst first, and stable: a to-do list that reshuffles itself
+           between openings is one nobody works through. */
+        let order: Vec<u8> = found.iter().map(|(_, i)| i.rank()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "the list is not worst-first");
+        assert_eq!(audit(&v), found, "two runs disagreed");
+
+        // An empty password is not "reused" with every other empty one.
+        v.create_entry(&root, "fff", "u", "", "", "").unwrap();
+        assert_eq!(
+            audit(&v).iter().filter(|(_, i)| matches!(i, Issue::Reused(_))).count(),
+            2,
+            "empty passwords were counted as reuse"
+        );
+    }
+
+    /* A deleted entry is not a password worth changing, and telling somebody
+       to go fix one is how an audit loses their trust. */
+    #[test]
+    fn the_audit_leaves_the_recycle_bin_out() {
+        let mut v = vault();
+        let root = v.root_id();
+        let live = v.create_entry(&root, "live", "u", "hunter2", "", "").unwrap();
+        let dead = v.create_entry(&root, "dead", "u", "hunter2", "", "").unwrap();
+        // Two entries share it, so both are reuse while both are live.
+        assert_eq!(audit(&v).len(), 2);
+
+        v.recycle_entry(&dead).unwrap();
+        let found = audit(&v);
+        assert_eq!(found.len(), 1, "the bin is still being audited");
+        assert_eq!(found[0].0, live);
+        /* And the survivor stops being "reused": the only other copy was the
+           one that was thrown away. */
+        assert!(matches!(found[0].1, Issue::Weak(_)), "{:?}", found[0].1);
     }
 
     /* `get` has one shot and nobody to ask, so the rules have to be ones a
