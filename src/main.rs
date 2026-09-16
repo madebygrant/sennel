@@ -168,6 +168,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_search_key(app, code, mods);
         return;
     }
+    /* Enter's detail popup is modal too: the browser behind it must not move
+       under a key aimed at the entry on screen. */
+    if app.detail {
+        handle_detail_key(app, code, mods);
+        return;
+    }
     /* The overlay swallows the next key rather than acting on it: anything
        else makes dismissing it a guess about what the key also did. */
     if app.show_help && !matches!(code, KeyCode::Char('q')) {
@@ -255,7 +261,30 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `u` undoes the last one-slot change; ^u stays page-up. */
         KeyCode::Char('u') => app.undo_last(),
         KeyCode::Char('/') => app.open_search(),
+        /* Enter opens what the cursor is on: a group unfolds and hands over
+           its entries, an entry opens the detail popup. */
+        KeyCode::Enter => app.open_selection(),
         _ => {}
+    }
+}
+
+/* The detail popup's own keys: the copies and the reveal it advertises, and
+   nothing that would move the list behind it. `e` edits the entry being read,
+   which is where the hand already is. */
+fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_detail(),
+        KeyCode::Char('*') => app.toggle_password(),
+        KeyCode::Char('y') => app.copy_username(),
+        KeyCode::Char('p') => app.copy_password(),
+        KeyCode::Char('U') => app.copy_url(),
+        KeyCode::Char('e') => {
+            app.close_detail();
+            app.open_edit_form();
+        }
+        _ => app.say("esc closes the entry"),
     }
 }
 

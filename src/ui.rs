@@ -51,6 +51,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_rule(frame, footrule);
     draw_status(frame, app, status);
 
+    if app.detail {
+        draw_detail_popup(frame, app);
+    }
     if app.show_help {
         draw_help(frame, app);
     }
@@ -153,12 +156,14 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_entries(frame, app, entries);
         draw_detail(frame, app, detail);
         app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
+        app.wide = true;
     } else {
         let [groups, entries] =
             Layout::horizontal([Constraint::Percentage(35), Constraint::Min(1)]).areas(area);
         /* What a page key moves by, which only the layout knows. The lower
            of the two, so a page never overshoots whichever pane is live. */
         app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
+        app.wide = false;
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
     }
@@ -393,7 +398,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     /* First line only: the row is one row, and a note that wraps the pane is
-       a detail view of its own, which is Wave 7's editor to give. */
+       what Enter's popup is for. */
     let notes = entry.notes().lines().next().unwrap_or("");
     if !notes.is_empty() {
         lines.push(row(
@@ -402,9 +407,99 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             faint,
         ));
     }
-    lines.truncate(inner.height as usize);
+    for (label, value) in stamps(&entry) {
+        lines.push(row(label, value, faint));
+    }
+    /* The pane has room to spare, and a key nobody knows about is a key that
+       does not exist: the hint sits at the foot of the empty half. */
+    let hint = Line::from(dim(" y copy · p pass · * reveal"));
+    let height = inner.height as usize;
+    if height > lines.len() + 1 {
+        lines.resize(height - 1, Line::default());
+        lines.push(hint);
+    }
+    lines.truncate(height);
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+/* KDBX stamps are UTC and optional, and say so: a stamp quietly converted
+   wrong reads as a wrong stamp. */
+fn stamps(entry: &keepass::db::EntryRef<'_>) -> Vec<(&'static str, String)> {
+    [
+        ("updated", entry.times.last_modification),
+        ("created", entry.times.creation),
+    ]
+    .into_iter()
+    .filter_map(|(label, t)| {
+        t.map(|t| (label, format!("{} UTC", t.format("%Y-%m-%d %H:%M"))))
+    })
+    .collect()
+}
+
+/* Enter's detail popup: the whole entry, wide enough for a url and tall
+   enough for the notes, on the 80-column terminal where no side pane fits.
+   Same masking rule as the pane — `*` is the only way to a plain password. */
+fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let Some(entry) = app.selected_entry() else {
+        return;
+    };
+    let area = frame.area();
+    /* Room for the frame and a margin either side; the popup never grows past
+       what the notes actually need. */
+    let width = area.width.saturating_sub(8).clamp(20, 76);
+    let inner = width.saturating_sub(4) as usize;
+    let cream = Style::new().fg(CREAM);
+    let faint = Style::new().fg(DIM);
+    let row = |label: &str, value: String, style: Style| {
+        Line::from(vec![
+            dim(format!(" {label:<10}")),
+            Span::styled(value, style),
+        ])
+    };
+    let value = inner.saturating_sub(11);
+    let mut lines = vec![
+        row("user", truncate(entry.username(), value), cream),
+        row(
+            "password",
+            if app.show_password {
+                truncate(entry.password(), value)
+            } else {
+                "••••••••".to_string()
+            },
+            cream,
+        ),
+    ];
+    if !entry.url().is_empty() {
+        lines.push(row("url", truncate(entry.url(), value), faint));
+    }
+    /* Notes get a block of their own: the pane's one-line form is most of
+       why this popup exists. */
+    let notes: Vec<&str> = entry.notes().lines().take(NOTE_LINES).collect();
+    if !notes.is_empty() {
+        lines.push(Line::default());
+        for (n, note) in notes.iter().enumerate() {
+            let label = if n == 0 { "notes" } else { "" };
+            lines.push(row(label, truncate(note, value), faint));
+        }
+    }
+    for (label, stamp) in stamps(&entry) {
+        lines.push(row(label, stamp, faint));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" y p U", Style::new().fg(GOLD)),
+        dim(" copy   "),
+        Span::styled("*", Style::new().fg(GOLD)),
+        dim(" reveal   "),
+        Span::styled("esc", Style::new().fg(GOLD)),
+        dim(" close"),
+    ]));
+    let title = truncate(entry.title(), inner);
+    popup(frame, &title, lines, width);
+}
+
+/// Where the popup stops reading notes: past this it is an editor, not a view.
+const NOTE_LINES: usize = 8;
 
 /* One question with two or three boxes: the password always, the key file
    beside it (empty means none), the confirm joining only when creating. Only
@@ -952,6 +1047,9 @@ mod tests {
             .unwrap();
         app.open_vault(vault);
         app.step_group(true);
+        /* One frame first: `*` refuses until a draw has said whether the
+           detail pane fits, which is the only place that width is known. */
+        t.draw(|f| draw(f, &mut app)).unwrap();
         app.toggle_password();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
@@ -1124,6 +1222,46 @@ mod tests {
         assert!(joined.contains("/check"), "{joined}");
         assert!(joined.contains("1 of 2 shown"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
+    }
+
+    /* The 80-column terminal has no side pane, so Enter's popup is where an
+       entry is read: it carries the fields, the notes and its own keys, and
+       masks the password until `*` says otherwise. */
+    #[test]
+    fn the_detail_popup_reads_an_entry_at_eighty_columns() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(
+                &banks,
+                "checking",
+                "octo",
+                "s3cret-pw",
+                "https://bank.example",
+                "main account\nsecond line",
+            )
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.switch_pane();
+        app.open_detail();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("checking"), "{joined}");
+        assert!(joined.contains("octo"), "{joined}");
+        assert!(joined.contains("second line"), "{joined}");
+        assert!(joined.contains("updated"), "{joined}");
+        assert!(joined.contains("esc"), "{joined}");
+        assert!(!joined.contains("s3cret-pw"), "the popup leaked the password");
+        app.toggle_password();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let shown = screen(&t).join("\n");
+        assert!(shown.contains("s3cret-pw"), "{shown}");
     }
 
     /* Enter keeps the filter and hands the keys back, so the band stops being

@@ -251,6 +251,12 @@ pub struct App {
        from a leak. `*` flips it and says which way, so the key never reads
        as dead. */
     pub show_password: bool,
+    /* Enter's detail popup: the side pane wants 100 columns, and a terminal
+       opens with 80. */
+    pub detail: bool,
+    /// Whether the last frame had room for the side pane, set by the draw
+    /// that knows (as `viewport` is): `*` must refuse where nothing shows.
+    pub wide: bool,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
        a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
@@ -329,6 +335,8 @@ impl App {
             entry_scroll: 0,
             viewport: 1,
             show_password: false,
+            detail: false,
+            wide: false,
             order: SortOrder::default(),
             db_path: None,
             unlock_new: false,
@@ -430,10 +438,52 @@ impl App {
        says so out loud: a silent reveal reads as a key that did nothing,
        and the next `*` press must find the pane hidden again. */
     pub fn toggle_password(&mut self) {
+        /* Nowhere to show it is a refusal, not a flip: the flash would
+           otherwise announce a reveal the screen has no room for. */
+        if !self.wide && !self.detail {
+            self.say("no detail pane this narrow  ·  enter opens the entry");
+            return;
+        }
         self.show_password = !self.show_password;
         if self.show_password {
             self.say("password shown  ·  * hides it");
         }
+    }
+
+    /* Enter on the browser. On the groups pane it opens the group — unfold it
+       and hand the keys to its entries; on an entry it opens the detail
+       popup, which is the only detail there is below 100 columns. */
+    pub fn open_selection(&mut self) {
+        match self.active_pane {
+            Pane::Groups => {
+                if self.group_cursor.is_none() {
+                    self.say("no group here to open");
+                    return;
+                }
+                self.expand_group();
+                self.active_pane = Pane::Entries;
+                self.snap();
+                if self.entry_cursor.is_none() {
+                    self.say("no entries in this group  ·  a adds one");
+                }
+            }
+            Pane::Entries => self.open_detail(),
+        }
+    }
+
+    pub fn open_detail(&mut self) {
+        if self.selected_entry().is_none() {
+            self.say("no entry here to open");
+            return;
+        }
+        self.detail = true;
+    }
+
+    /// Closing re-masks: a reveal is for the view you are in, never a state
+    /// left armed behind a popup that is gone.
+    pub fn close_detail(&mut self) {
+        self.detail = false;
+        self.show_password = false;
     }
 
     /* Flip the lock screen between bullets and the typed master password.
@@ -539,6 +589,9 @@ impl App {
         self.unlock_reveal = false;
         self.caret = 0;
         self.dirty = false;
+        // A popup over the lock screen would outlive the vault it is about.
+        self.detail = false;
+        self.show_password = false;
         self.view = View::Unlock;
         // Or the lock screen's header keeps the open vault's "ready".
         self.resting = "locked".into();
@@ -2637,12 +2690,49 @@ mod tests {
             .create_entry(&banks, "checking", "octo", "s3cret-pw", "", "")
             .unwrap();
         app.open_vault(vault);
+        // What a wide-enough draw sets; there is no frame in a unit test.
+        app.wide = true;
         assert!(!app.show_password);
         app.toggle_password();
         assert!(app.show_password);
         assert!(app.stage.contains("shown"), "{}", app.stage);
         app.toggle_password();
         assert!(!app.show_password);
+    }
+
+    /* Below the detail pane's width there is nowhere for a revealed password
+       to appear, so `*` refuses and names the way to one instead of claiming
+       a reveal the screen cannot show. */
+    #[test]
+    fn star_refuses_where_no_detail_fits() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.wide = false;
+        app.toggle_password();
+        assert!(!app.show_password, "* revealed with nowhere to show it");
+        assert!(app.stage.contains("enter opens"), "{}", app.stage);
+        // The popup is that room: with it open, the same key flips.
+        app.switch_pane();
+        app.open_detail();
+        app.toggle_password();
+        assert!(app.show_password, "* refused inside the detail popup");
+    }
+
+    /* Enter opens what the cursor is on: a group hands over its entries, an
+       entry opens the popup that is the only detail below 100 columns. */
+    #[test]
+    fn enter_opens_the_group_then_the_entry() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_selection();
+        assert_eq!(app.active_pane, Pane::Entries, "enter did not open the group");
+        assert!(!app.detail, "enter opened a popup from the groups pane");
+        app.open_selection();
+        assert!(app.detail, "enter did not open the entry");
+        // Closing re-masks: a reveal never outlives the view it was for.
+        app.toggle_password();
+        app.close_detail();
+        assert!(!app.show_password, "the reveal survived the popup");
     }
 
     /* ---- Wave 5.1: entry form ---- */
