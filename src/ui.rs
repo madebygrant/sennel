@@ -287,8 +287,8 @@ enum Head {
 }
 
 /* Draws the pane's header row and hands back what is left for the list. The
-   live pane's header is p.text, the others p.muted: focus then has a word as well
-   as a marker, which is the only channel left when colour is off. */
+   live pane's header is `text`, the others `muted`: focus then has a word as
+   well as a marker, which is the only channel left when colour is off. */
 fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> Rect {
     let p = app.theme;
     if !on || area.height < 2 {
@@ -451,8 +451,8 @@ fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, Strin
 
 /* Pre-order with two cells of indent per depth: a flat list of names hides
    which folder an entry row belongs to, and the tree is the only place depth
-   is visible. The marker is p.cursor in the live pane and p.muted in the other, so
-   each pane still says where its own cursor is. */
+   is visible. The marker is `cursor` in the live pane and `muted` in the
+   other, so each pane still says where its own cursor is. */
 fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let tree = app.group_tree();
@@ -1533,7 +1533,7 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
     popup(frame, title, lines, width, &p);
 }
 
-/* The matched characters of a row, in p.cursor and bold against the rest: a list
+/* The matched characters of a row, in `cursor` and bold against the rest: a list
    sorted by relevance still leaves the reader working out why each row is
    there. Indices are char positions into the untruncated title, so anything
    past the cut simply does not match a span. */
@@ -2612,12 +2612,4 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
-
-
-
-
-
-
-
-
 }

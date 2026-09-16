@@ -59,7 +59,9 @@ pub struct FileConfig {
     /// warm · light · cool · neon
     pub theme: Option<String>,
     /// `#rrggbb` per slot, on top of whichever theme is named.
-    pub colors: Option<std::collections::HashMap<String, String>>,
+    /* Ordered, not hashed: with two unusable colours in the table, a HashMap
+       names whichever one it felt like this run. */
+    pub colors: Option<std::collections::BTreeMap<String, String>>,
     pub generator: Option<FileGenerator>,
     /// Wheel and click. On by default; off gives the terminal its own
     /// selection back.
@@ -165,6 +167,9 @@ pub struct Config {
     /// Overridden colours that are hard to read on their own ground. Said
     /// once at startup rather than enforced: it is the user's screen.
     pub theme_warnings: Vec<String>,
+    /// Whether a `[colors]` table is repainting the named theme. `^t` says so
+    /// when it switches: the overrides stay in the file and outlive the walk.
+    pub theme_overridden: bool,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -196,6 +201,7 @@ impl Config {
             cli.theme.as_deref().or(file.theme.as_deref()),
             file.colors.as_ref(),
         )?;
+        let overridden = file.colors.as_ref().is_some_and(|c| !c.is_empty());
 
         Ok(Config {
             db,
@@ -210,6 +216,7 @@ impl Config {
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             theme: palette,
             theme_warnings: warnings,
+            theme_overridden: overridden,
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,
@@ -251,7 +258,7 @@ fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
    does not work. */
 fn theme(
     name: Option<&str>,
-    colors: Option<&std::collections::HashMap<String, String>>,
+    colors: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<(crate::theme::Palette, Vec<String>)> {
     let mut palette = match name {
         Some(name) => crate::theme::Palette::named(name).ok_or_else(|| {
@@ -283,7 +290,12 @@ fn theme(
 /// `#rrggbb`, the only spelling worth supporting: it is what every palette,
 /// picker and stylesheet in the world hands you.
 fn hex(value: &str) -> Result<ratatui::style::Color> {
-    let digits = value.strip_prefix('#').unwrap_or(value);
+    /* The `#` is required, not merely tolerated: the error says `#rrggbb` and
+       so does the README, and a second accepted spelling nobody documents is
+       one more thing that works on one machine and not the next. */
+    let Some(digits) = value.strip_prefix('#') else {
+        anyhow::bail!("not a #rrggbb colour");
+    };
     if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!("not a #rrggbb colour");
     }
@@ -691,7 +703,7 @@ mod tests {
        warns and renders, because it is the user's screen. */
     #[test]
     fn bad_colours_stop_startup_and_dim_ones_only_warn() {
-        for bad in ["\"#12345\"", "\"blue\"", "\"#gggggg\""] {
+        for bad in ["\"#12345\"", "\"blue\"", "\"#gggggg\"", "\"ff8800\""] {
             let mut file = temp("badcolour");
             writeln!(file.handle, "[colors]\ntext = {bad}").unwrap();
             let cli = Cli::try_parse_from(vec![
@@ -723,6 +735,25 @@ mod tests {
         assert!(err.contains("unknown theme colour"), "{err}");
         assert!(err.contains("muted"), "the message does not list the slots: {err}");
 
+        /* `masked` and `ink` are palette slots that nothing draws in, so a
+           config naming one is refused rather than quietly repainting a
+           colour that never reaches the screen. */
+        for dead in ["masked", "ink"] {
+            let mut file = temp("deadslot");
+            writeln!(file.handle, "[colors]\n{dead} = \"#ffffff\"").unwrap();
+            let cli = Cli::try_parse_from(vec![
+                "sennel".to_string(),
+                "--config".into(),
+                file.path.clone(),
+            ])
+            .unwrap();
+            let err = match Config::build(cli) {
+                Err(e) => format!("{e:#}"),
+                Ok(_) => panic!("{dead} started the session"),
+            };
+            assert!(err.contains("unknown theme colour"), "{err}");
+        }
+
         /* Legible-but-barely is a warning, not a refusal: the session starts,
            and the note names the slot and what it measured. */
         let cfg = build("[colors]\nmuted = \"#3a3a3a\"\n", &[]);
@@ -734,6 +765,12 @@ mod tests {
         );
         // And a palette nobody touched warns about nothing.
         assert!(build("theme = \"cool\"\n", &[]).theme_warnings.is_empty());
+
+        /* Whether anything is repainting the theme, which `^t` says out loud:
+           the walk moves the base and the table stays in the file. */
+        assert!(build("[colors]\ncursor = \"#00ff88\"\n", &[]).theme_overridden);
+        assert!(!build("theme = \"neon\"\n", &[]).theme_overridden);
+        assert!(!build("[colors]\n", &[]).theme_overridden, "an empty table repaints nothing");
     }
 
     #[test]

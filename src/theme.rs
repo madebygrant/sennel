@@ -210,11 +210,13 @@ impl Palette {
 
     /// The next palette in the shipped order, wrapping. What `^t` walks.
     pub fn next(&self) -> Palette {
-        let at = BUILT_INS
-            .iter()
-            .position(|(_, known)| known == self)
-            .unwrap_or(0);
-        BUILT_INS[(at + 1) % BUILT_INS.len()].1
+        match BUILT_INS.iter().position(|(_, known)| known == self) {
+            Some(at) => BUILT_INS[(at + 1) % BUILT_INS.len()].1,
+            /* A palette with [colors] on it is in no walk, so the walk starts
+               at its own beginning. Stepping off it to the *second* built-in
+               would make `warm` the one theme `^t` could never reach. */
+            None => BUILT_INS[0].1,
+        }
     }
 
     /// Every name Sennel knows, for the message that lists them.
@@ -242,17 +244,23 @@ impl Palette {
             "muted" => &mut self.muted,
             "rule" => &mut self.rule,
             "surface" => &mut self.surface,
-            "masked" => &mut self.masked,
-            "ink" => &mut self.ink,
+            /* `masked` and `ink` are deliberately absent: the palette holds
+               them but nothing draws in them yet, and a key that parses and
+               repaints nothing is worse than a key that is refused. They go
+               in here the day something reads them. */
             _ => return None,
         })
     }
 
     /// Every slot name a config may override, for the error that lists them.
+    /* Asked of `slot_mut` rather than listed again, so the message cannot
+       offer a slot that does nothing — or omit one that works. */
     pub fn slot_names() -> String {
+        let mut probe = WARM;
         WARM.slots()
             .iter()
             .map(|(name, _)| *name)
+            .filter(|name| probe.slot_mut(name).is_some())
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -261,13 +269,13 @@ impl Palette {
        A warning, never a refusal: it is the user's screen and their eyes, and
        a warning that blocks is one people learn to route around. */
     pub fn unreadable(&self) -> Vec<String> {
-        let grounds = [("the gradient", self.near), ("the gradient", self.far), (
-            "popups",
-            match self.surface {
-                Color::Rgb(r, g, b) => (r, g, b),
-                _ => return Vec::new(),
-            },
-        )];
+        let mut grounds = vec![("the gradient", self.near), ("the gradient", self.far)];
+        /* A ground nobody can measure drops out of the check on its own: a
+           surface that is not RGB used to return from this function, which
+           silently switched off the gradient checks as well. */
+        if let Color::Rgb(r, g, b) = self.surface {
+            grounds.push(("popups", (r, g, b)));
+        }
         let mut out = Vec::new();
         for (slot, color) in self.slots() {
             // Not text: structure, a background, and a band's ink.
@@ -277,8 +285,8 @@ impl Palette {
             let Color::Rgb(r, g, b) = color else {
                 continue;
             };
-            for (where_, ground) in grounds {
-                let ratio = contrast((r, g, b), ground);
+            for (where_, ground) in &grounds {
+                let ratio = contrast((r, g, b), *ground);
                 if ratio < 4.5 {
                     out.push(format!("{slot} on {where_} is {ratio:.1}:1, wants 4.5:1"));
                     break;
@@ -297,19 +305,20 @@ impl Default for Palette {
 
 impl Palette {
     pub fn background(&self, col: u16, row: u16, width: u16, height: u16) -> Color {
-    // A single-cell span has nowhere to fade, and 0/0 is not a ratio.
-    let frac = |v: u16, span: u16| {
-        if span <= 1 {
-            0.0
-        } else {
-            f32::from(v.min(span - 1)) / f32::from(span - 1)
-        }
-    };
-    /* Normalised in cell space rather than pixels: terminal cells are about
-       twice as tall as they are wide, so a true 45° would barely tilt. */
-    let axis = (frac(col, width) + (1.0 - frac(row, height))) / 2.0;
-    let t = (axis / self.stop).min(1.0);
-    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+        // A single-cell span has nowhere to fade, and 0/0 is not a ratio.
+        let frac = |v: u16, span: u16| {
+            if span <= 1 {
+                0.0
+            } else {
+                f32::from(v.min(span - 1)) / f32::from(span - 1)
+            }
+        };
+        /* Normalised in cell space rather than pixels: terminal cells are
+           about twice as tall as they are wide, so a true 45° would barely
+           tilt. */
+        let axis = (frac(col, width) + (1.0 - frac(row, height))) / 2.0;
+        let t = (axis / self.stop).min(1.0);
+        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
         Color::Rgb(
             mix(self.near.0, self.far.0),
             mix(self.near.1, self.far.1),
@@ -600,6 +609,50 @@ mod tests {
         assert_eq!(WARM.rule, Color::Rgb(92, 84, 66));
         assert_eq!(WARM.surface, Color::Rgb(46, 41, 33));
         assert_eq!((WARM.near, WARM.far, WARM.stop), ((55, 40, 37), (18, 1, 22), 0.76));
+    }
+
+    /* A palette with [colors] on it is in no walk. Stepping off it has to
+       reach the first built-in, or `warm` becomes the one theme `^t` can
+       never get back to. */
+    #[test]
+    fn a_repainted_palette_steps_onto_the_first_built_in() {
+        let mut custom = NEON;
+        custom.cursor = Color::Rgb(0, 255, 136);
+        assert_eq!(custom.name(), "custom");
+        assert_eq!(custom.next(), BUILT_INS[0].1);
+        // And the walk itself still goes round the houses and back.
+        let mut at = WARM;
+        for _ in 0..BUILT_INS.len() {
+            at = at.next();
+        }
+        assert_eq!(at, WARM);
+    }
+
+    /* A key that parses and repaints nothing is worse than a key that is
+       refused: `masked` and `ink` are held by the palette and drawn by
+       nothing, so a config naming one has to be told. */
+    #[test]
+    fn only_the_slots_something_draws_in_can_be_repainted() {
+        let mut palette = WARM;
+        for slot in ["text", "accent", "cursor", "warn", "error", "muted", "rule", "surface"] {
+            assert!(palette.slot_mut(slot).is_some(), "{slot} cannot be set");
+            assert!(Palette::slot_names().contains(slot), "{slot} is not offered");
+        }
+        for dead in ["masked", "ink"] {
+            assert!(palette.slot_mut(dead).is_none(), "{dead} took a colour");
+            assert!(!Palette::slot_names().contains(dead), "{dead} is offered");
+        }
+    }
+
+    /* A ground nobody can measure drops out of the check on its own — it used
+       to take the gradient checks with it. */
+    #[test]
+    fn an_unmeasurable_surface_does_not_switch_off_the_other_grounds() {
+        let mut palette = WARM;
+        palette.surface = Color::Indexed(4);
+        palette.muted = Color::Rgb(58, 58, 58);
+        let notes = palette.unreadable();
+        assert!(notes.iter().any(|n| n.contains("gradient")), "{notes:?}");
     }
 
     /* The gradient reads off the palette now, so its ends have to be the

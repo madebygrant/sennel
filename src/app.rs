@@ -358,6 +358,10 @@ pub struct App {
        theme that can be switched at runtime cannot live in a OnceLock, and a
        mutable global would make the per-theme tests race each other. */
     pub theme: crate::theme::Palette,
+    /* Whether a `[colors]` table is repainting the theme. `^t` has to say so:
+       it walks the built-ins, but the overrides stay in the file, so the
+       palette it writes down is not the one the next launch draws. */
+    pub theme_overridden: bool,
     pub stage: String,
     /// What the header goes back to once a flash expires.
     resting: String,
@@ -499,6 +503,7 @@ impl App {
             view: View::Unlock,
             show_help: false,
             theme: crate::theme::WARM,
+            theme_overridden: false,
             stage: "locked".into(),
             resting: "locked".into(),
             level: Level::default(),
@@ -948,15 +953,24 @@ impl App {
     pub fn cycle_theme(&mut self) {
         self.theme = self.theme.next();
         let name = self.theme.name();
+        /* The walk only moves the base palette; a `[colors]` table in the
+           file is applied on top of whatever is named, and outlives this. So
+           the screen now and the screen next launch are different, and the
+           only honest thing is to say which key is still doing it. */
+        let kept = if self.theme_overridden {
+            "  ·  [colors] still repaints it"
+        } else {
+            ""
+        };
         match self.config_file.clone() {
             Some(file) => match crate::config::remember_theme(Some(&file), name) {
-                Ok(()) => self.say(format!("theme: {name}  ·  remembered")),
+                Ok(()) => self.say(format!("theme: {name}  ·  remembered{kept}")),
                 /* Not fatal: the theme applied, and only the remembering
                    failed — but the next launch will not do what was asked. */
                 Err(e) => self.warn(format!("theme: {name}  ·  cannot save your choice · {e}")),
             },
             // --no-config asked for the file to be left out of the run.
-            None => self.say(format!("theme: {name}")),
+            None => self.say(format!("theme: {name}{kept}")),
         }
     }
 
@@ -3927,6 +3941,24 @@ pub mod tests {
                 assert!(seen.contains(&name), "{name} is not reachable by ^t");
             }
         }
+    }
+
+    /* A `[colors]` table outlives the walk: `^t` writes the base palette down
+       and the overrides go on repainting it, so the screen the user stopped
+       on is not the screen the next launch draws unless they are told. */
+    #[test]
+    fn cycling_a_repainted_theme_says_what_is_still_repainting_it() {
+        let mut app = open_app();
+        app.config_file = None;
+        app.theme_overridden = true;
+        app.cycle_theme();
+        assert!(app.stage.contains("[colors]"), "{}", app.stage);
+
+        // And a theme nobody repainted says nothing about it.
+        let mut plain = open_app();
+        plain.config_file = None;
+        plain.cycle_theme();
+        assert!(!plain.stage.contains("[colors]"), "{}", plain.stage);
     }
 
     /* --no-config asked for the file to be left out of the run, so the theme

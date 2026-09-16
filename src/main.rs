@@ -73,6 +73,7 @@ fn main() -> Result<()> {
     app.set_lock_timeout(cfg.lock_timeout);
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
+    app.theme_overridden = cfg.theme_overridden;
     /* Said once, on the first frame, and then it is the user's screen: an
        override that measures badly is worth naming, not worth refusing. */
     for note in &cfg.theme_warnings {

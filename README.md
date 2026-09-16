@@ -146,8 +146,10 @@ cursor = "#00ff88"             # text · accent · cursor · warn · error · mu
 `text` is titles and anything the eye lands on first; `accent` is chrome — borders, bars, key names;
 `cursor` marks where you are; `warn` and `error` carry the flashes; `muted` is usernames, urls and
 hints; `rule` is the lines between panes; `surface` is the flat tone popups are raised with. A value
-that is not `#rrggbb`, or a slot nobody has, stops startup naming what it should have been. A colour
-that merely measures badly starts anyway and says so once — it is your screen.
+that is not `#rrggbb`, or a slot nobody draws in, stops startup naming what it should have been. A
+colour that merely measures badly starts anyway and says so once — it is your screen. `^t` walks the
+base palette only: the `[colors]` table stays in the file and goes on repainting whatever `^t` lands
+on, which is why the flash says so while a table is there.
 
 Every palette is measured, not eyeballed: each readable colour clears WCAG 4.5:1 against both ends of
 its own gradient and against the tone popups are raised with, still clears 3:1 after a 256-colour
