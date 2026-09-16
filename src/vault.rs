@@ -30,6 +30,9 @@ pub const PASSWORD: &str = "Password";
 pub const URL: &str = "URL";
 pub const NOTES: &str = "Notes";
 
+/// What KeePassXC calls the group it routes deletes to.
+pub const RECYCLE_BIN: &str = "Recycle Bin";
+
 /// Field reads as plain strings, defaulting to "" — KDBX entries may omit
 /// any field, and the UI and search want a printable &str, not Options.
 pub trait EntryExt {
@@ -215,7 +218,8 @@ pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
 pub enum VaultError {
     GroupNotFound,
     EntryNotFound,
-    GroupNotEmpty,
+    /// `D` on something already in the bin, where the next `D` is the real one.
+    AlreadyRecycled,
     CannotDeleteRoot,
     CannotMoveRoot,
     WouldCycle,
@@ -235,7 +239,7 @@ impl std::fmt::Display for VaultError {
         match self {
             VaultError::GroupNotFound => write!(f, "no such group"),
             VaultError::EntryNotFound => write!(f, "no such entry"),
-            VaultError::GroupNotEmpty => write!(f, "group is not empty"),
+            VaultError::AlreadyRecycled => write!(f, "already in the recycle bin"),
             VaultError::CannotDeleteRoot => write!(f, "cannot delete the root group"),
             VaultError::CannotMoveRoot => write!(f, "cannot move the root group"),
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
@@ -513,7 +517,7 @@ impl Vault {
        counts and the flattened global scope skip its subtree. A real
        KeePassXC vault parks deleted entries there, and an honest
        "unlocked N entries" or search hit must not include deleted things. */
-    fn recycled(&self) -> HashSet<EntryId> {
+    pub fn recycled(&self) -> HashSet<EntryId> {
         let mut out = HashSet::new();
         let Some(bin) = self.db.recycle_bin() else {
             return out;
@@ -640,18 +644,12 @@ impl Vault {
         })
     }
 
-    /* Refuses non-empty groups rather than deleting recursively: a recursive
-       delete is one keypress from losing a subtree. The guard runs before
-       GroupMut::remove, which recurses, so the recursion never fires here. */
-    pub fn delete_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
+    /* The recursive delete `delete_group` refuses to be. Only reachable on a
+       group already inside the bin, where the subtree has been deleted once
+       already and the confirm says it cannot be undone. */
+    pub fn delete_group_tree(&mut self, id: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotDeleteRoot);
-        }
-        let Some(group) = self.db.group(*id) else {
-            return Err(VaultError::GroupNotFound);
-        };
-        if group.entry_ids().next().is_some() || group.group_ids().next().is_some() {
-            return Err(VaultError::GroupNotEmpty);
         }
         let Some(group) = self.db.group_mut(*id) else {
             return Err(VaultError::GroupNotFound);
@@ -731,15 +729,82 @@ impl Vault {
             .map_err(|_: DestinationGroupNotFoundError| VaultError::GroupNotFound)
     }
 
-    /* Direct delete, no recycle bin in v1: the vault keeps deleted objects in
-       the file's recycle bin only if KeePass itself routed them there, and
-       the confirm prompt is what guards it here. */
-    pub fn delete_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
-        let Some(entry) = self.db.entry_mut(*id) else {
-            return Err(VaultError::EntryNotFound);
+    /* The bin every other KeePass client routes deletes through, found by
+       the uuid in the file's own metadata or created on the first delete.
+       KeePassXC writes exactly this: a root-level group, its uuid in
+       `recyclebin_uuid`, and the enabled flag set. */
+    pub fn ensure_recycle_bin(&mut self) -> Result<GroupId, VaultError> {
+        if let Some(bin) = self.recycle_bin_id() {
+            return Ok(bin);
+        }
+        let root = self.root_id();
+        let bin = self.create_group(&root, RECYCLE_BIN)?;
+        self.db.meta.recyclebin_uuid = Some(bin.uuid());
+        self.db.meta.recyclebin_enabled = Some(true);
+        self.db.meta.recyclebin_changed = Some(Times::now());
+        Ok(bin)
+    }
+
+    /// The bin, if the file names one that still exists. A uuid pointing at a
+    /// group somebody deleted is stale metadata, not a bin.
+    pub fn recycle_bin_id(&self) -> Option<GroupId> {
+        self.db.recycle_bin().map(|g| g.id())
+    }
+
+    /// Whether this group is the bin or lives inside it. What the pane asks
+    /// before it offers `u`, and what `get` asks before it resolves a needle.
+    pub fn in_recycle_bin(&self, id: &GroupId) -> bool {
+        let Some(bin) = self.recycle_bin_id() else {
+            return false;
         };
-        entry.remove();
-        Ok(())
+        let mut at = *id;
+        loop {
+            if at == bin {
+                return true;
+            }
+            let Some(group) = self.db.group(at) else {
+                return false;
+            };
+            match group.parent() {
+                Some(parent) => at = parent.id(),
+                None => return false,
+            }
+        }
+    }
+
+    /// Whether an entry is in the bin, which is to say already deleted.
+    pub fn is_recycled(&self, id: &EntryId) -> bool {
+        self.parent_group_of_entry(id)
+            .is_some_and(|parent| self.in_recycle_bin(&parent))
+    }
+
+    /* `D` on a live entry. A move, not a removal: the entry keeps its id and
+       its history, KeePassXC shows it under Recycle Bin, and undo is a move
+       home rather than a resurrection from a snapshot. An entry already in
+       the bin is deleted for real by `expunge_entry`. */
+    pub fn recycle_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
+        if self.db.entry(*id).is_none() {
+            return Err(VaultError::EntryNotFound);
+        }
+        let bin = self.ensure_recycle_bin()?;
+        self.move_entry(id, &bin)
+    }
+
+    /* `D` on a group. The whole subtree rides along, which is why this no
+       longer refuses a non-empty group the way a recursive *removal* had to:
+       nothing is destroyed, and one keypress undoes it. */
+    pub fn recycle_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
+        if *id == self.root_id() {
+            return Err(VaultError::CannotDeleteRoot);
+        }
+        if self.in_recycle_bin(id) {
+            return Err(VaultError::AlreadyRecycled);
+        }
+        let bin = self.ensure_recycle_bin()?;
+        if *id == bin {
+            return Err(VaultError::CannotDeleteRoot);
+        }
+        self.move_group(id, &bin)
     }
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
@@ -793,10 +858,15 @@ impl Vault {
         Ok(())
     }
 
-    /// Hard-remove an entry an undo needs to disappear again (an add that
-    /// `u` takes back). No tombstone — this rolls back, it does not delete.
+    /* Gone for good: an add that `u` takes back, and `D` on something
+       already in the bin. The one path in Sennel that destroys an entry, and
+       both callers have either just created it or already deleted it once. */
     pub fn expunge_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
-        self.delete_entry(id)
+        let Some(entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.remove();
+        Ok(())
     }
 
     /// Title write for rename undo.
@@ -846,20 +916,80 @@ mod tests {
         assert_eq!(kids, vec![banks]);
     }
 
+    /* A group goes to the bin whole. It used to be refused while it held
+       anything, on the grounds that a recursive delete is one keypress from
+       losing a subtree — which stops being true once the keypress is a move
+       that `u` takes back. */
     #[test]
-    fn deleting_a_non_empty_group_refuses_then_succeeds_once_emptied() {
+    fn deleting_a_group_moves_it_and_its_contents_to_the_bin() {
         let mut v = vault();
         let root = v.root_id();
         let g = v.create_group(&root, "Mail").unwrap();
-        v.create_entry(&g, "inbox", "u", "p", "", "").unwrap();
+        let e = v.create_entry(&g, "inbox", "u", "p", "", "").unwrap();
 
-        assert_eq!(v.delete_group(&g), Err(VaultError::GroupNotEmpty));
-        assert!(v.get_group(&g).is_some(), "refused delete still removed it");
+        v.recycle_group(&g).unwrap();
+        let bin = v.recycle_bin_id().expect("no bin was made");
+        assert_eq!(v.get_group(&g).unwrap().parent().unwrap().id(), bin);
+        assert!(v.in_recycle_bin(&g), "the group is not in the bin");
+        // The entry rode along, and counts stop seeing it.
+        assert!(v.is_recycled(&e), "the entry did not follow its group");
+        assert_eq!(v.entry_count(), 0);
 
-        let e = v.entries_in(&g)[0].id();
-        v.delete_entry(&e).unwrap();
-        v.delete_group(&g).unwrap();
+        // Inside the bin, the same key destroys the subtree for good.
+        v.delete_group_tree(&g).unwrap();
         assert!(v.get_group(&g).is_none());
+        assert!(v.get_entry(&e).is_none(), "the subtree survived");
+    }
+
+    /* The bin is the one KeePassXC looks for: a root-level group whose uuid
+       is in the file's own metadata, created on the first delete. */
+    #[test]
+    fn the_first_delete_makes_the_bin_the_format_describes() {
+        let mut v = vault();
+        let root = v.root_id();
+        assert_eq!(v.recycle_bin_id(), None, "a fresh vault has a bin already");
+        let e = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+
+        v.recycle_entry(&e).unwrap();
+        let bin = v.recycle_bin_id().expect("no bin was made");
+        assert_eq!(v.get_group(&bin).unwrap().name, RECYCLE_BIN);
+        assert_eq!(v.get_group(&bin).unwrap().parent().unwrap().id(), root);
+        assert!(v.is_recycled(&e));
+        // Live counts and the global search scope skip it.
+        assert_eq!(v.entry_count(), 0);
+        assert!(v.entry_refs().is_empty());
+
+        // A second delete reuses the bin rather than making another.
+        let f = v.create_entry(&root, "chat", "u", "p", "", "").unwrap();
+        v.recycle_entry(&f).unwrap();
+        assert_eq!(v.recycle_bin_id(), Some(bin));
+        assert_eq!(v.groups_in(&root).len(), 1);
+
+        // And undo is a move home, not a resurrection: the id survives.
+        v.move_entry(&e, &root).unwrap();
+        assert!(!v.is_recycled(&e));
+        assert_eq!(v.entry_count(), 1);
+    }
+
+    /* The bin survives a round trip, so KeePassXC opens the file and shows
+       the deleted entry under Recycle Bin rather than losing it. */
+    #[test]
+    fn the_bin_round_trips_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("sennel-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bin.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let e = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        v.recycle_entry(&e).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        let bin = back.recycle_bin_id().expect("the bin did not survive the save");
+        assert_eq!(back.get_group(&bin).unwrap().name, RECYCLE_BIN);
+        assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
+        assert_eq!(back.entry_count(), 0);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -867,7 +997,8 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         let other = v.create_group(&root, "Other").unwrap();
-        assert_eq!(v.delete_group(&root), Err(VaultError::CannotDeleteRoot));
+        assert_eq!(v.delete_group_tree(&root), Err(VaultError::CannotDeleteRoot));
+        assert_eq!(v.recycle_group(&root), Err(VaultError::CannotDeleteRoot));
         assert_eq!(
             v.move_group(&root, &other),
             Err(VaultError::CannotMoveRoot)
@@ -915,9 +1046,9 @@ mod tests {
         assert_eq!(v.parent_group_of_entry(&e), Some(root));
         assert!(v.entries_in(&g).is_empty());
 
-        v.delete_entry(&e).unwrap();
+        v.expunge_entry(&e).unwrap();
         assert!(v.get_entry(&e).is_none());
-        assert_eq!(v.delete_entry(&e), Err(VaultError::EntryNotFound));
+        assert_eq!(v.expunge_entry(&e), Err(VaultError::EntryNotFound));
     }
 
     #[test]

@@ -492,6 +492,10 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "▸ "
             };
+            let binned = app
+                .vault
+                .as_ref()
+                .is_some_and(|v| v.in_recycle_bin(id));
             /* A count turns the tree into a map: every folder otherwise looks
                equally full, and the status bar only counts the whole vault. */
             let held = app.entries_in(id);
@@ -505,9 +509,17 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 width.saturating_sub(cols(&count)),
             );
             let mark = p.mark(selected, live);
+            /* The bin and everything in it draw back: a deleted row that
+               looks exactly like a live one is how somebody copies a password
+               they threw away last week. */
+            let style = if binned {
+                Style::new().fg(p.muted)
+            } else {
+                p.row(selected)
+            };
             ListItem::new(Line::from(vec![
                 mark,
-                Span::styled(format!(" {shown}"), p.row(selected)),
+                Span::styled(format!(" {shown}"), style),
                 p.faint(count),
             ]))
         })
@@ -1198,22 +1210,29 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
             "",
         ),
         /* The title travels in the confirm so the answer is about a row the
-           user can see. A name is user-chosen text, never a secret. */
-        Confirm::DeleteEntry { title, .. } => (
-            "delete?",
-            delete_question("entry", title, room),
+           user can see. A name is user-chosen text, never a secret.
+
+           Two questions, not one with a hedge. Outside the bin the row is
+           moved and `u` brings it back, so the box says so: a warning that
+           overstates the risk is a warning people learn to click through.
+           Inside the bin nothing brings it back, and that box says that. */
+        Confirm::DeleteEntry { title, forever, .. } => (
+            if *forever { "delete for good?" } else { "delete?" },
+            delete_question("entry", title, room, *forever),
             Span::styled(" y  delete", Style::new().fg(p.error)),
-            /* `u` really does bring an entry back (Undo::Delete), so the box
-               says so: a warning that overstates the risk is a warning people
-               learn to click through. */
-            "u restores it",
+            if *forever { "this cannot be undone" } else { "u restores it" },
         ),
-        Confirm::DeleteGroup { title, .. } => (
-            "delete?",
-            delete_question("group", title, room),
+        Confirm::DeleteGroup { title, forever, .. } => (
+            if *forever { "delete for good?" } else { "delete?" },
+            delete_question("group", title, room, *forever),
             Span::styled(" y  delete", Style::new().fg(p.error)),
-            // Groups have no undo slot, and delete refuses unless empty.
-            "this cannot be undone",
+            /* A group takes its whole subtree either way. `u` puts the
+               subtree back; the permanent one has nothing to put back. */
+            if *forever {
+                "this cannot be undone"
+            } else {
+                "contents included · u restores it"
+            },
         ),
     };
     let lines = vec![
@@ -1234,10 +1253,12 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
 }
 
 /// The question with the name cut to fit, so the verb always renders.
-fn delete_question(kind: &str, title: &str, room: usize) -> String {
-    let fixed = cols(&format!(" delete {kind} “”?"));
+fn delete_question(kind: &str, title: &str, room: usize, forever: bool) -> String {
+    // The verb is the difference, so it is the part that never truncates.
+    let verb = if forever { "delete" } else { "bin" };
+    let fixed = cols(&format!(" {verb} {kind} “”?"));
     format!(
-        " delete {kind} “{}”?",
+        " {verb} {kind} “{}”?",
         truncate(title, room.saturating_sub(fixed).max(8))
     )
 }
@@ -1842,12 +1863,35 @@ mod tests {
         app.ask_delete_entry();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("delete entry"), "{joined}");
+        // `bin`, not `delete`: outside the bin the row is moved, not destroyed.
+        assert!(joined.contains("bin entry"), "{joined}");
         assert!(joined.contains("checking"), "{joined}");
-        // Entries come back with `u`, and the box says so rather than
-        // claiming a permanence the undo slot contradicts.
         assert!(joined.contains("u restores it"), "{joined}");
         assert!(!joined.contains("cannot be undone"), "{joined}");
+    }
+
+    /* Inside the bin the same key asks the other question, and promises no
+       undo it does not have. */
+    #[test]
+    fn the_delete_confirm_inside_the_bin_says_it_is_permanent() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault.recycle_entry(&id).unwrap();
+        let bin = vault.recycle_bin_id().unwrap();
+        app.open_vault(vault);
+        app.group_cursor = Some(bin);
+        app.entry_cursor = Some(id);
+        app.ask_delete_entry();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("delete entry"), "{joined}");
+        assert!(joined.contains("cannot be undone"), "{joined}");
+        assert!(!joined.contains("u restores it"), "{joined}");
     }
 
     /* A long title must not push the verb off the popup: the name truncates,
@@ -1875,9 +1919,47 @@ mod tests {
         app.ask_delete_entry();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("delete entry"), "{joined}");
+        assert!(joined.contains("bin entry"), "{joined}");
         assert!(joined.contains("y  delete"), "{joined}");
         assert!(joined.contains("…”?"), "the title did not truncate: {joined}");
+    }
+
+    /* A deleted row that looks exactly like a live one is how somebody
+       copies a password they threw away last week, so the bin draws back. */
+    #[test]
+    fn the_recycle_bin_draws_back_from_the_live_groups() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_group(&root, "Banks").unwrap();
+        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault.recycle_entry(&id).unwrap();
+        app.open_vault(vault);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        let rows = screen(&t);
+        let at = rows
+            .iter()
+            .position(|r| r.contains("Recycle Bin"))
+            .unwrap_or_else(|| panic!("the bin is not in the tree: {rows:?}"));
+        let buf = t.backend().buffer();
+        let x = rows[at].find("Recycle").unwrap() as u16;
+        assert_eq!(
+            buf[(x, at as u16)].fg,
+            crate::theme::WARM.muted,
+            "the bin drew like a live group"
+        );
+        // A live group beside it does not, so this is the bin and not the pane.
+        let live = rows.iter().position(|r| r.contains("Banks")).unwrap();
+        let lx = rows[live].find("Banks").unwrap() as u16;
+        assert_ne!(
+            buf[(lx, live as u16)].fg,
+            crate::theme::WARM.muted,
+            "a live group drew like the bin"
+        );
     }
 
     /* The group prompt: one box, named for what it does, prefilled with the
@@ -1916,8 +1998,10 @@ mod tests {
         app.ask_delete_group();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("delete group"), "{joined}");
+        assert!(joined.contains("bin group"), "{joined}");
         assert!(joined.contains("Empty"), "{joined}");
+        // A group takes its subtree with it, and the box says so.
+        assert!(joined.contains("contents included"), "{joined}");
     }
 
     /* An armed cut is named in the status bar, so X never reads as dead. */

@@ -29,8 +29,11 @@ locks and the in-memory secrets are zeroized. `^l` does the same on demand.
 merely emptied, whenever they are cleared, locked or thrown away. The retained database key and the
 undo snapshots wipe on drop. The status bar names what was copied, never the secret itself.
 
-**No recycle bin.** Deletes are confirmed, and `u` restores the entry you just deleted, one level
-deep. Group deletes are refused while the group holds anything, and cannot be undone.
+**Deletes go to the recycle bin.** `D` moves an entry or a group, subtree and all, into the same
+`Recycle Bin` group KeePassXC uses, recorded in the file's own metadata. Nothing is destroyed, the
+entry keeps its id and history, and `u` moves it home. Binned rows draw back in the tree and are
+left out of counts, search and `--list`, so a deleted password cannot be copied by accident. Inside
+the bin, `D` is the real delete: the confirm says so, and there is no undo for it.
 
 **It will not overwrite somebody else's write.** Sennel remembers the modification time and length
 of the file it opened. If KeePassXC, a sync client or a second Sennel writes the vault meanwhile,

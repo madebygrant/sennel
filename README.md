@@ -36,6 +36,10 @@ credential on the clipboard to save typing six digits is a bad trade.
 and remembers the one you stop on. Every colour is measured against WCAG 4.5:1 before it ships,
 and `NO_COLOR` still gives you a usable app.
 
+**Deletes are recoverable.** `D` moves an entry or a whole group into the same recycle bin
+KeePassXC uses, so a mistake costs one `u` rather than a restore from backup. Binned rows stay out
+of counts, search and `--list`. Inside the bin, `D` means it.
+
 **It locks itself.** Five idle minutes and the vault closes, with every secret in memory
 overwritten rather than dropped. `^l` does it now.
 
@@ -47,7 +51,7 @@ overwritten rather than dropped. `^l` does it now.
 | `enter`     | open the entry                                  |
 | `y p U t`   | copy username, password, url, one-time code     |
 | `/`         | search                                          |
-| `a e D`     | add, edit, delete an entry                      |
+| `a e D`     | add, edit, delete an entry (to the bin)         |
 | `u`         | undo the last change                            |
 | `h`         | every other key                                 |
 

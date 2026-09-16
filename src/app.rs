@@ -51,11 +51,15 @@ pub enum Confirm {
     /* The title travels with the id for the prompt line. It is a display
        copy of a name field, never the password: the confirm popup must stay
        safe to screenshot with the vault unlocked. */
-    DeleteEntry { id: EntryId, title: String },
+    /* `forever` is the difference between moving a row to the bin and
+       destroying it, which are different questions: the popup asks the one
+       that matches, so a user in the bin is never told `u` will save them
+       from something it cannot. */
+    DeleteEntry { id: EntryId, title: String, forever: bool },
     /* Same rule as the entry delete: the title rides along for the prompt
-       line only, and the vault refuses non-empty groups before this ever
-       fires, so a confirmed group delete cannot take a subtree with it. */
-    DeleteGroup { id: GroupId, title: String },
+       line only. A group goes to the bin with its whole subtree, so the
+       non-empty refusal is gone and `forever` carries the same meaning. */
+    DeleteGroup { id: GroupId, title: String, forever: bool },
 }
 
 /// Which box of the entry form the keys are typing into.
@@ -164,18 +168,25 @@ pub enum Cut {
 
 /* One slot, one undo. The snapshot carries the whole entry — secrets
    included, zeroized on drop like every other copy — because a field-by-field
-   restore would miss the timestamps the form never touches. Group delete is
-   not undoable: it only ever runs on an empty group behind a confirm, and
-   its contents were moved or deleted through paths that arm their own undo. */
+   restore would miss the timestamps the form never touches. */
 pub enum Undo {
     /// Before-state of an edited entry; restore swaps it wholesale.
     Edit { id: EntryId, before: Entry },
-    /// A deleted entry, where it lived, and what it was.
+    /// An entry destroyed inside the bin, which only a snapshot brings back.
     Delete {
         id: EntryId,
         parent: GroupId,
         before: Entry,
     },
+    /* An entry moved to the bin. It still exists, so undo is a move home and
+       the snapshot rides along only to name it in the status bar. */
+    Recycle {
+        id: EntryId,
+        parent: GroupId,
+        before: Entry,
+    },
+    /// A group moved to the bin, with everything under it.
+    RecycleGroup { id: GroupId, parent: GroupId, title: String },
     /// An added entry that `u` removes again.
     AddEntry { id: EntryId, title: String },
     /// A group rename that `u` turns back.
@@ -2175,41 +2186,53 @@ impl App {
     }
 
     /* `D` on an entry: ask first. The confirm carries the title for the
-       prompt so the answer is about a row the user can see, not a blind id. */
+       prompt so the answer is about a row the user can see, not a blind id.
+       It also carries whether this is the recoverable delete or the real one,
+       because those are different questions and deserve different words. */
     pub fn ask_delete_entry(&mut self) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to delete");
             return;
         };
-        self.confirm = Some(Confirm::DeleteEntry {
-            id: entry.id(),
-            title: entry.title().to_string(),
-        });
+        let id = entry.id();
+        let title = entry.title().to_string();
+        let forever = self.vault.as_ref().is_some_and(|v| v.is_recycled(&id));
+        self.confirm = Some(Confirm::DeleteEntry { id, title, forever });
     }
 
     /// The yes side of the delete confirm. Kept off the key handler so the
     /// confirm popup and the delete itself cannot drift apart.
     pub fn confirm_delete_entry(&mut self, id: EntryId) {
-        /* Snapshot before the delete — undo puts the whole entry back
-           (restore appends it to its old parent; the list position is not
-           reconstructible and does not matter). */
+        /* Snapshot before either delete. The bin path does not need it (the
+           entry lives on and undo moves it home), but the expunge path does,
+           and taking it once keeps the two branches the same shape. */
         let parent = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id));
         let before: Option<keepass::db::Entry> =
             self.vault.as_ref().and_then(|v| v.get_entry(&id).map(|e| e.clone()));
+        let forever = self.vault.as_ref().is_some_and(|v| v.is_recycled(&id));
         if let (Some(vault), Some(parent), Some(before)) =
             (self.vault.as_mut(), parent, before)
         {
-            match vault.delete_entry(&id) {
+            let done = if forever {
+                vault.expunge_entry(&id)
+            } else {
+                vault.recycle_entry(&id)
+            };
+            match done {
                 Ok(()) => {
-                    self.undo = Some(Undo::Delete {
-                        id,
-                        parent,
-                        before,
+                    self.undo = Some(if forever {
+                        Undo::Delete { id, parent, before }
+                    } else {
+                        Undo::Recycle { id, parent, before }
                     });
                     self.entry_cursor = None;
                     self.snap();
                     self.persist();
-                    self.say("entry deleted  ·  u restores it");
+                    self.say(if forever {
+                        "entry deleted for good  ·  u restores it"
+                    } else {
+                        "entry moved to the recycle bin  ·  u restores it"
+                    });
                 }
                 Err(e) => {
                     self.undo = None;
@@ -2661,9 +2684,10 @@ impl App {
         prompt.caret = prompt.value[..start].chars().count();
     }
 
-    /* `D` on the groups pane. The vault refuses non-empty groups, but the
-       refusal is named here so the confirm never opens for a delete that
-       cannot happen — the message points at X, which is the way out. */
+    /* `D` on the groups pane. A group goes to the bin with everything under
+       it, so the old "not empty, move its contents first" refusal is gone:
+       nothing is destroyed and `u` puts the whole subtree back. Inside the
+       bin the same key is the real delete, and it has no undo. */
     pub fn ask_delete_group(&mut self) {
         let Some(group) = self.selected_group() else {
             self.say("no group here to delete");
@@ -2673,39 +2697,56 @@ impl App {
             self.say("the root group cannot be deleted");
             return;
         }
-        let has_contents = !self
+        let forever = self
             .vault
             .as_ref()
-            .map(|v| {
-                v.entries_in(&group.id()).is_empty() && v.groups_in(&group.id()).is_empty()
-            })
-            .unwrap_or(true);
-        if has_contents {
-            self.say("group not empty  ·  move or delete its contents first");
-            return;
-        }
+            .is_some_and(|v| v.in_recycle_bin(&group.id()));
         self.confirm = Some(Confirm::DeleteGroup {
             id: group.id(),
+            forever,
             title: group.name.clone(),
         });
     }
 
     /// The yes side of the group delete confirm, kept off the key handler.
     pub fn confirm_delete_group(&mut self, id: GroupId) {
+        let parent = self.vault.as_ref().and_then(|v| v.get_group(&id).and_then(|g| g.parent().map(|p| p.id())));
+        let title = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.get_group(&id).map(|g| g.name.clone()))
+            .unwrap_or_default();
         let Some(vault) = &mut self.vault else {
             return;
         };
-        match vault.delete_group(&id) {
+        let forever = vault.in_recycle_bin(&id);
+        /* Inside the bin `D` destroys the group and everything under it, and
+           there is no snapshot big enough to undo a subtree — so that path
+           clears the slot rather than leaving a stale one armed. */
+        let done = if forever {
+            vault.delete_group_tree(&id)
+        } else {
+            vault.recycle_group(&id)
+        };
+        match done {
             Ok(()) => {
                 /* A cut pointing at the deleted group is a ghost: disarm it
                    rather than letting V paste nothing. */
                 if self.cut == Some(Cut::Group(id)) {
                     self.cut = None;
                 }
+                self.undo = match (forever, parent) {
+                    (false, Some(parent)) => Some(Undo::RecycleGroup { id, parent, title }),
+                    _ => None,
+                };
                 self.group_cursor = None;
                 self.snap();
                 self.persist();
-                self.say("group deleted");
+                self.say(if forever {
+                    "group deleted for good"
+                } else {
+                    "group moved to the recycle bin  ·  u restores it"
+                });
             }
             Err(e) => self.say(format!("cannot delete  ·  {e}")),
         }
@@ -2838,6 +2879,24 @@ impl App {
                 self.persist();
                 self.say(format!("restored {title}"));
             }
+            /* Out of the bin rather than back from the dead: the entry never
+               stopped existing, so this keeps its id, history and timestamps
+               instead of overwriting them with the snapshot's. */
+            Undo::Recycle { id, parent, before } => {
+                let title = before.title().to_string();
+                let _ = vault.move_entry(&id, &parent);
+                self.entry_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say(format!("restored {title}"));
+            }
+            Undo::RecycleGroup { id, parent, title } => {
+                let _ = vault.move_group(&id, &parent);
+                self.group_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say(format!("restored {title}"));
+            }
             Undo::AddEntry { id, title } => {
                 /* The add is rolled back by removing what it created, and the
                    undo slot empties instead of growing. */
@@ -2862,6 +2921,8 @@ impl App {
         let note = match self.undo.as_ref()? {
             Undo::Edit { before, .. } => format!("undo: edit of {}", before.title()),
             Undo::Delete { before, .. } => format!("undo: restore {}", before.title()),
+            Undo::Recycle { before, .. } => format!("undo: restore {}", before.title()),
+            Undo::RecycleGroup { title, .. } => format!("undo: restore {title}"),
             Undo::AddEntry { title, .. } => format!("undo: remove {title}"),
             Undo::Rename { before, .. } => format!("undo: name {before}"),
         };
@@ -3160,12 +3221,9 @@ pub mod tests {
         let mut app = open_app();
         let banks = app.group_tree()[1].0;
         app.group_cursor = Some(banks);
-        app.vault.as_mut().unwrap().delete_group(&banks).unwrap_err();
-        // Non-empty: refused. Empty it, then delete for real.
-        let e = app.entry_rows();
-        assert!(!e.is_empty());
-        app.vault.as_mut().unwrap().delete_entry(&e[0]).unwrap();
-        app.vault.as_mut().unwrap().delete_group(&banks).unwrap();
+        // Straight to the bin, contents and all, which is what `D` now does.
+        app.vault.as_mut().unwrap().recycle_group(&banks).unwrap();
+        app.vault.as_mut().unwrap().delete_group_tree(&banks).unwrap();
         app.snap();
         let root = app.vault.as_ref().unwrap().root_id();
         assert_eq!(app.group_cursor, Some(root));
@@ -4085,7 +4143,7 @@ pub mod tests {
         app.step_group(true);
         app.ask_delete_entry();
         assert!(app.confirm.is_some(), "delete went without asking");
-        let Confirm::DeleteEntry { id, title } = app.confirm.clone().unwrap() else {
+        let Confirm::DeleteEntry { id, title, .. } = app.confirm.clone().unwrap() else {
             panic!("wrong question raised");
         };
         assert_eq!(title, "checking");
@@ -4182,22 +4240,66 @@ pub mod tests {
         assert!(app.stage.contains("only must"), "{}", app.stage);
     }
 
-    /* The vault refuses non-empty deletes; the app refuses even earlier and
-       names the way out, so the confirm never opens for a delete that
-       cannot happen. */
+    /* A group with entries in it used to be refused. It now goes to the bin
+       whole and comes back whole, which is why the refusal could go. */
     #[test]
-    fn d_on_a_full_group_refuses_and_names_the_way_out() {
+    fn d_on_a_full_group_bins_the_subtree_and_u_brings_it_back() {
         let mut app = open_app();
         app.step_group(true); // Banks holds an entry
+        let banks = app.group_cursor.unwrap();
+        let entry = app.entry_rows()[0];
         app.ask_delete_group();
-        assert!(app.confirm.is_none(), "a full group opened the confirm");
-        assert!(app.stage.contains("not empty"), "{}", app.stage);
+        let Confirm::DeleteGroup { id, forever, .. } = app.confirm.clone().unwrap() else {
+            panic!("a full group did not open the confirm");
+        };
+        assert!(!forever, "a live group asked the permanent question");
+        app.confirm = None;
+        app.confirm_delete_group(id);
+
+        let vault = app.vault.as_ref().unwrap();
+        assert!(vault.in_recycle_bin(&banks), "the group is not in the bin");
+        assert!(vault.is_recycled(&entry), "the entry did not ride along");
+        assert!(app.stage.contains("recycle bin"), "{}", app.stage);
+
+        app.undo_last();
+        let vault = app.vault.as_ref().unwrap();
+        assert!(!vault.in_recycle_bin(&banks), "u left the group in the bin");
+        assert!(!vault.is_recycled(&entry), "u left the entry in the bin");
+    }
+
+    /* Inside the bin `D` is the real delete, and it says so rather than
+       promising an undo it does not have. */
+    #[test]
+    fn d_inside_the_bin_asks_the_permanent_question() {
+        let mut app = open_app();
+        app.step_group(true);
+        let id = app.entry_cursor.unwrap();
+        app.ask_delete_entry();
+        app.confirm = None;
+        app.confirm_delete_entry(id); // to the bin
+        app.undo = None;
+
+        // Onto the binned row, which lives under the bin group now.
+        app.entry_cursor = Some(id);
+        app.group_cursor = app.vault.as_ref().unwrap().parent_group_of_entry(&id);
+        app.ask_delete_entry();
+        let Confirm::DeleteEntry { id, forever, .. } = app.confirm.clone().unwrap() else {
+            panic!("no confirm in the bin");
+        };
+        assert!(forever, "the bin asked the recoverable question");
+        app.confirm = None;
+        app.confirm_delete_entry(id);
+        assert!(app.vault.as_ref().unwrap().get_entry(&id).is_none(), "it survived");
+        // The first delete's flash is still showing; this is the next one.
+        app.expire_now();
+        assert!(app.stage.contains("for good"), "{}", app.stage);
     }
 
     #[test]
     fn d_on_an_empty_group_asks_then_y_deletes() {
         let mut app = open_app();
         app.step_group(true); // Banks
+        let banks = app.group_cursor.unwrap();
         app.open_group_prompt_new();
         for c in "Empty".chars() {
             app.group_prompt_insert(c);
@@ -4209,12 +4311,18 @@ pub mod tests {
         };
         app.confirm = None; // what the handler leaves behind before acting
         app.confirm_delete_group(id);
-        let titles: Vec<_> = app
-            .group_tree()
+        /* Still in the tree, because the bin is a group like any other — but
+           under the bin, which is what the pane and KeePassXC both show. */
+        assert!(app.vault.as_ref().unwrap().in_recycle_bin(&id));
+        let under_banks: Vec<String> = app
+            .vault
+            .as_ref()
+            .unwrap()
+            .groups_in(&banks)
             .iter()
-            .map(|(id, _)| app.vault.as_ref().unwrap().get_group(id).unwrap().name.clone())
+            .map(|g| g.name.clone())
             .collect();
-        assert!(!titles.contains(&"Empty".to_string()), "{titles:?}");
+        assert!(!under_banks.contains(&"Empty".to_string()), "{under_banks:?}");
     }
 
     /* X on an entry arms the shelf; V moves it into the selected group. The

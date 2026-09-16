@@ -38,13 +38,13 @@ not the browser's `*`.
 | `^g` (in search)    | narrow the needle to this group, or widen it again            |
 | `n` `N`             | next, previous match                                          |
 | `↑ ↓` (in search)   | move through the results while still typing                   |
-| `a` `e` `D`         | add, edit, delete entry (the form has an `otp` box)           |
+| `a` `e` `D`         | add, edit, delete entry to the bin (the form has an `otp` box)|
 | `A` `E`             | add, rename group                                             |
-| `D` (on groups)     | delete group (refused while not empty)                        |
+| `D` (on groups)     | group to the recycle bin, contents and all                    |
 | `X` `V`             | cut, paste entry or group                                     |
 | `←` `→`             | collapse, expand group (in the entries pane, hop)             |
 | `o`                 | entries order: stored, name, recent, updated                  |
-| `u`                 | undo the last change (one level)                              |
+| `u`                 | undo the last change, including a delete (one level)          |
 | `^l`                | lock now (same wipe as the idle auto-lock)                    |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
