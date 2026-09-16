@@ -75,6 +75,13 @@ one-time code rather than the seed. `--stdout` is the one way a secret leaves th
 refuses a terminal unless forced, because scrollback is exactly where a password should not be.
 Entries in the recycle bin are not candidates for any needle.
 
+**Custom fields and attachments.** Fields you add are stored protected, and shown masked until `*`,
+the same rule the password follows. `y` copies a field through the same board and the same
+auto-clear. An attachment written out with `s` is created exclusively and `0600` from the first
+byte, so a symlink planted at the path cannot redirect it — but it has left the vault, and the
+message says so. The name is reduced to its last path component first: an attachment called
+`../../.ssh/authorized_keys` lands as a file, not as a write somewhere else entirely.
+
 **The audit runs offline.** `!` compares passwords inside the process and sends nothing anywhere.
 It groups them by hash rather than building a table of every password in the vault, names the
 finding without ever printing the password, and skips the recycle bin: telling somebody to go fix

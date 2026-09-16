@@ -184,16 +184,87 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
     Some((code.code, code.valid_for.as_secs()))
 }
 
+/// The five Sennel has a row for, plus the seed. Everything else on an entry
+/// is a custom field, which is a thing KeePassXC users really do use.
+pub const STANDARD: [&str; 6] = [TITLE, USERNAME, PASSWORD, URL, NOTES, "otp"];
+
+/// One line of the `F` screen: a custom string field, or a file.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Extra {
+    Field {
+        name: String,
+        value: String,
+        /// Protected fields mask until `*`, the same rule as the password.
+        secret: bool,
+    },
+    File {
+        name: String,
+        bytes: usize,
+    },
+}
+
+impl Extra {
+    pub fn name(&self) -> &str {
+        match self {
+            Extra::Field { name, .. } | Extra::File { name, .. } => name,
+        }
+    }
+}
+
+/* Everything on an entry that the five fixed rows cannot show. Fields first,
+   then files, each alphabetical: this list is read, and a list that reorders
+   itself between openings cannot be. */
+pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
+    let mut fields: Vec<Extra> = entry
+        .fields
+        .iter()
+        .filter(|(name, _)| !STANDARD.contains(&name.as_str()))
+        .map(|(name, value)| Extra::Field {
+            name: name.clone(),
+            value: value.get().clone(),
+            secret: value.is_protected(),
+        })
+        .collect();
+    fields.sort_by_key(|row| row.name().to_lowercase());
+    let mut files: Vec<Extra> = entry
+        .attachments_named()
+        .map(|(name, attachment)| Extra::File {
+            name: name.to_string(),
+            bytes: attachment.data.get().len(),
+        })
+        .collect();
+    files.sort_by_key(|row| row.name().to_lowercase());
+    fields.extend(files);
+    fields
+}
+
 /// Fields Sennel has no row for — KeePassXC custom strings, and attachments.
 /// Named rather than shown: an entry whose extra fields are invisible reads
 /// as an entry that lost them.
+/* An attachment on its way out of the vault, written the way the vault
+   itself is: created exclusively so a symlink planted at the path cannot
+   redirect it, and 0600 from the first byte. The file loses every protection
+   the vault gave it the moment it lands, so the least this can do is not
+   hand it to the rest of the machine. */
+pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| VaultError::Io(format!("{e}")))?;
+    file.write_all(bytes).map_err(|e| VaultError::Io(e.to_string()))?;
+    Ok(())
+}
+
 pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
-    let known = ["Title", "UserName", "Password", "URL", "Notes", "otp"];
     let mut out = Vec::new();
     let fields: Vec<&String> = entry
         .fields
         .keys()
-        .filter(|k| !known.contains(&k.as_str()))
+        .filter(|k| !STANDARD.contains(&k.as_str()))
         .collect();
     if !fields.is_empty() {
         let plural = if fields.len() == 1 { "field" } else { "fields" };
@@ -887,6 +958,110 @@ impl Vault {
         Ok(())
     }
 
+    /* The bytes of one attachment, for writing it out. Cloned rather than
+       borrowed: the caller writes it to a file and drops it, and threading a
+       borrow of the database through that is not worth the lifetime. */
+    pub fn attachment_bytes(&self, id: &EntryId, name: &str) -> Option<Vec<u8>> {
+        self.db
+            .entry(*id)?
+            .attachment_by_name(name)
+            .map(|a| a.data.get().clone())
+    }
+
+    /* A custom field, set or replaced. Protected by default for the same
+       reason notes are: a field somebody added by hand to a password manager
+       is more likely to be a secret than not, and protecting it only ever
+       hides more. */
+    pub fn set_field(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        value: &str,
+        secret: bool,
+    ) -> Result<(), VaultError> {
+        if name.trim().is_empty() {
+            return Err(VaultError::Db("a field needs a name".into()));
+        }
+        /* The five fixed rows have their own editor; letting this one write
+           them would mean two paths to the same field disagreeing. */
+        if STANDARD.contains(&name) {
+            return Err(VaultError::Db(format!("{name} has its own row in the form")));
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match secret {
+            true => entry.set_protected(name, value),
+            false => entry.set_unprotected(name, value),
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    pub fn remove_field(&mut self, id: &EntryId, name: &str) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        if entry.fields.remove(name).is_none() {
+            return Err(VaultError::EntryNotFound);
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    /* A file into the vault, protected. KDBX stores attachments in a shared
+       pool keyed off the entry, which the crate handles; what matters here is
+       that it goes in protected, because an attachment is usually the most
+       sensitive thing on the entry. */
+    pub fn add_attachment(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        data: Vec<u8>,
+    ) -> Result<(), VaultError> {
+        if name.trim().is_empty() {
+            return Err(VaultError::Db("an attachment needs a name".into()));
+        }
+        // Checked through the read side, before taking the mutable borrow.
+        if self
+            .db
+            .entry(*id)
+            .is_some_and(|e| e.attachment_by_name(name).is_some())
+        {
+            return Err(VaultError::Db(format!("{name} is already attached")));
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.add_attachment(name, keepass::db::Value::protected(data));
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    pub fn remove_attachment(&mut self, id: &EntryId, name: &str) -> Result<(), VaultError> {
+        if self
+            .db
+            .entry(*id)
+            .is_none_or(|e| e.attachment_by_name(name).is_none())
+        {
+            return Err(VaultError::EntryNotFound);
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        /* Through the entry, not through the attachment. `AttachmentMut::
+           remove` clears the back-references it knows about, and a file
+           loaded from disk arrives with those back-references empty — so it
+           dropped the bytes and left the entry pointing at them, which is a
+           panic the next time anything reads the list. */
+        entry.remove_attachment_by_name(name);
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
     /* Gone for good: an add that `u` takes back, and `D` on something
        already in the bin. The one path in Sennel that destroys an entry, and
        both callers have either just created it or already deleted it once. */
@@ -1163,6 +1338,89 @@ mod tests {
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    /* Custom fields and attachments used to be a count and nothing else.
+       These are the reads the `F` screen is built on. */
+    #[test]
+    fn the_extras_list_holds_fields_and_files_with_their_values() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "vpn", "u", "p", "", "notes").unwrap();
+        v.set_field(&id, "recovery", "8888-4444", true).unwrap();
+        v.set_field(&id, "account", "AC-9", false).unwrap();
+        v.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+
+        let rows = crate::vault::extra_rows(&v.get_entry(&id).unwrap());
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        /* Fields first, then files, each alphabetical: a list that is read
+           cannot reorder itself between openings. */
+        assert_eq!(rows[0].name(), "account");
+        assert_eq!(rows[1].name(), "recovery");
+        assert_eq!(rows[2].name(), "key.pem");
+        assert_eq!(
+            rows[1],
+            crate::vault::Extra::Field {
+                name: "recovery".into(),
+                value: "8888-4444".into(),
+                secret: true,
+            }
+        );
+        // A field added by hand goes in protected; one asked for plainly does not.
+        assert!(matches!(&rows[0], crate::vault::Extra::Field { secret: false, .. }));
+        assert_eq!(rows[2], crate::vault::Extra::File { name: "key.pem".into(), bytes: 15 });
+
+        // The five fixed rows keep their own editor and never appear here.
+        for standard in crate::vault::STANDARD {
+            assert!(rows.iter().all(|r| r.name() != standard), "{standard} leaked in");
+            assert!(v.set_field(&id, standard, "x", false).is_err(), "{standard} was writable");
+        }
+    }
+
+    /* The bytes have to survive the file, or "attachment" is a label on
+       something nobody can get back. */
+    #[test]
+    fn attachments_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("sennel-att-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("att.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "vpn", "u", "p", "", "").unwrap();
+        let data: Vec<u8> = (0u8..=255).collect();
+        v.add_attachment(&id, "blob.bin", data.clone()).unwrap();
+        v.set_field(&id, "recovery", "8888", true).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(back.attachment_bytes(&id, "blob.bin"), Some(data));
+        let rows = crate::vault::extra_rows(&back.get_entry(&id).unwrap());
+        assert!(rows.iter().any(|r| r.name() == "recovery"));
+        // Twice under one name would be two files nobody can tell apart.
+        let mut back = back;
+        assert!(back.add_attachment(&id, "blob.bin", vec![1]).is_err());
+        back.remove_attachment(&id, "blob.bin").unwrap();
+        assert_eq!(back.attachment_bytes(&id, "blob.bin"), None);
+        back.remove_field(&id, "recovery").unwrap();
+        assert!(crate::vault::extra_rows(&back.get_entry(&id).unwrap()).is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* A file leaving the vault loses every protection the vault gave it, so
+       the least the write can do is not hand it to the rest of the machine. */
+    #[test]
+    fn an_extracted_attachment_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sennel-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("out.bin");
+        std::fs::remove_file(&at).ok();
+        crate::vault::write_owner_only(&at, b"secret").unwrap();
+        let mode = std::fs::metadata(&at).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        // Exclusive: a symlink planted at the path cannot redirect the write.
+        assert!(crate::vault::write_owner_only(&at, b"again").is_err());
+        std::fs::remove_file(&at).ok();
     }
 
     /* Reuse is the finding a person cannot possibly spot themselves, and the

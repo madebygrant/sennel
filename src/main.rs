@@ -367,6 +367,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.group_prompt.is_some()
         || app.rekey.is_some()
         || app.audit.is_some()
+        || app.fields.is_some()
         || app.detail
         || app.show_help
     {
@@ -401,6 +402,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* The group prompt is modal on the same terms, one box instead of five. */
     if app.group_prompt.is_some() {
         handle_group_prompt_key(app, code, mods);
+        return;
+    }
+    /* The fields screen owns the keys, and its own add prompt owns them
+       harder: every printable key is part of a field name or value there. */
+    if app.fields.is_some() {
+        handle_fields_key(app, code, mods);
         return;
     }
     /* The audit is a list you steer, so it owns the keys while it is up. */
@@ -532,6 +539,9 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `!`: what is wrong with this vault's passwords. Shift-1, so it is
            never a slip away from a movement key. */
         KeyCode::Char('!') => app.open_audit(),
+        /* `F`: custom fields and attachments. Upper case, beside the other
+           structural keys, and never a slip from `f`. */
+        KeyCode::Char('F') => app.open_fields(),
         KeyCode::Char('A') => app.open_group_prompt_new(),
         KeyCode::Char('E') => app.open_group_prompt_rename(),
         KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),
@@ -677,6 +687,37 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
    Esc. Same shape as the entry form minus the field movement. */
+/* The fields screen. While the add prompt is up it takes every printable
+   key, because a field name or value can be any of them; otherwise this is a
+   list you steer, with one key per verb. */
+fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    if app.fields.as_ref().is_some_and(|f| f.adding.is_some()) {
+        match code {
+            KeyCode::Esc => app.fields_add_cancel(),
+            KeyCode::Tab | KeyCode::Down | KeyCode::Up => app.fields_add_next(),
+            KeyCode::Enter => app.fields_add_submit(),
+            KeyCode::Backspace => app.fields_add_backspace(),
+            KeyCode::Char(c) if !ctrl => app.fields_add_insert(c),
+            _ => {}
+        }
+        return;
+    }
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('F') => app.close_fields(),
+        KeyCode::Char('j') | KeyCode::Down => app.fields_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.fields_move(false),
+        KeyCode::Char('*') => app.fields_reveal(),
+        KeyCode::Char('y') => app.fields_copy(),
+        KeyCode::Char('s') => app.fields_save(),
+        KeyCode::Char('a') => app.fields_add(false),
+        KeyCode::Char('f') => app.fields_add(true),
+        KeyCode::Char('D') => app.fields_remove(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
 /* The audit list: move, open, leave. Enter is the whole point — a list of
    problems you cannot act on from where you are standing is a list nobody
    works through. */

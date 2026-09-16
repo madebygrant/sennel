@@ -41,6 +41,10 @@ credential on the clipboard to save typing six digits is a bad trade.
 and remembers the one you stop on. Every colour is measured against WCAG 4.5:1 before it ships,
 and `NO_COLOR` still gives you a usable app.
 
+**Custom fields and attachments, not just a count of them.** `F` opens what the five fixed rows
+cannot show: KeePassXC's custom string fields with their values, and the files on an entry. `y`
+copies a field, `s` writes an attachment out, `a` and `f` add them.
+
 **It tells you which passwords to change.** `!` lists every reused, weak or empty password in the
 vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
 finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
@@ -66,6 +70,7 @@ overwritten rather than dropped. `^l` does it now.
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
 | `!`         | passwords worth changing                        |
+| `F`         | custom fields and attachments                   |
 | `u`         | undo, as many steps as you made                 |
 | `h`         | every other key                                 |
 

@@ -48,6 +48,7 @@ not the browser's `*`.
 | `^l`                | lock now (same wipe as the idle auto-lock)                    |
 | `^p`                | change the master password (typed twice, `^r` reveals)        |
 | `!`                 | reused, weak and empty passwords · `enter` goes to one        |
+| `F`                 | custom fields and attachments                                 |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |
@@ -57,6 +58,26 @@ not the browser's `*`.
 | `h` `?` `F1`        | keys overlay (`F1` on the lock screen, where letters are text)|
 | `esc`               | unwind: drop cut, clear filter, then report                   |
 | `q` `^c`            | quit (asks when there are unsaved changes; `qq` answers)      |
+
+## The fields screen (`F`)
+
+Everything on an entry the five fixed rows cannot show: KeePassXC custom string fields, and
+attachments.
+
+| Key   | Action                                                              |
+| ----- | ------------------------------------------------------------------- |
+| `j k` | move                                                                |
+| `y`   | copy a field's value, through the same clipboard wipe as a password |
+| `s`   | write an attachment out beside the vault, owner-only                |
+| `*`   | reveal the protected fields                                         |
+| `a`   | add a custom field (name, then value)                               |
+| `f`   | attach a file (name, then the path to read)                         |
+| `D`   | remove the field or attachment under the cursor                     |
+| `esc` | close                                                               |
+
+Fields you add go in protected, because a field somebody adds by hand to a password manager is more
+likely to be a secret than not. An extracted attachment is written beside the vault file rather than
+into the working directory, and loses the vault's protection the moment it lands.
 
 Some terminals bind `tab`, `backtab` and the arrow chords themselves. Every key here also has a
 visible home in the `h` overlay.

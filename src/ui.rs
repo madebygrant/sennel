@@ -105,6 +105,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.audit.is_some() {
         draw_audit(frame, app);
     }
+    if app.fields.is_some() {
+        draw_fields(frame, app);
+    }
     if app.browse.is_some() {
         draw_browse(frame, app);
     }
@@ -1472,6 +1475,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("lock", "^l", "lock now"),
             ("master", "^p", "change the master password"),
             ("audit", "!", "reused, weak and empty passwords"),
+            ("fields", "F", "custom fields and attachments"),
             ("theme", "^t", "next palette · remembered"),
             ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
@@ -1524,6 +1528,114 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3, &p);
+}
+
+/* The `F` screen: custom fields and attachments, with their values. These
+   used to show as a count and nothing else ("2 more fields"), which told the
+   user something was there and gave them no way to reach it. */
+fn draw_fields(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(fields) = &app.fields else {
+        return;
+    };
+    let title = app
+        .vault
+        .as_ref()
+        .and_then(|v| v.get_entry(&fields.entry).map(|e| e.title().to_string()))
+        .unwrap_or_default();
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(34, 76);
+    let inner = width.saturating_sub(4) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    if fields.rows.is_empty() {
+        lines.push(Line::from(p.faint(" nothing here yet")));
+    }
+    let room = (area.height as usize).saturating_sub(8).max(1);
+    let first = fields.cursor.saturating_sub(room.saturating_sub(1));
+    for (n, row) in fields.rows.iter().enumerate().skip(first).take(room) {
+        let live = n == fields.cursor;
+        let (name, said, ink) = match row {
+            crate::vault::Extra::Field { name, value, secret } => {
+                /* Masked to its own length, and only while it is a secret:
+                   the same rule the password row follows, so `*` means one
+                   thing everywhere. */
+                let shown = if *secret && !fields.reveal {
+                    "•".repeat(value.chars().count().min(24))
+                } else {
+                    value.clone()
+                };
+                (name.clone(), shown, if *secret { p.muted } else { p.text })
+            }
+            crate::vault::Extra::File { name, bytes } => {
+                (name.clone(), format!("{bytes} bytes"), p.cursor)
+            }
+        };
+        let label = truncate(&name, inner / 2);
+        let room_for_value = inner.saturating_sub(cols(&label) + 3);
+        lines.push(Line::from(vec![
+            if live { p.lit("▌") } else { Span::raw(" ") },
+            Span::styled(format!(" {label}  "), p.row(live)),
+            Span::styled(truncate(&said, room_for_value), Style::new().fg(ink)),
+        ]));
+    }
+    if fields.rows.len() > room {
+        lines.push(p.faint(format!(" {room} of {} shown", fields.rows.len())).into());
+    }
+
+    /* The add prompt replaces the key line while it is up: two popups over
+       each other read as one broken one. */
+    if let Some(add) = &fields.adding {
+        let value_label = if add.from_file { "file" } else { "value" };
+        let box_ = |label: &str, text: &str, focused: bool, mask: bool| {
+            let shown = if mask && !fields.reveal {
+                "•".repeat(text.chars().count())
+            } else {
+                text.to_string()
+            };
+            let (head, tail) = split_at_char(&shown, if focused { add.caret } else { 0 });
+            let style = if focused {
+                Style::new().fg(p.text)
+            } else {
+                Style::new().fg(p.muted)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {label:<LABEL$}"), style),
+                Span::styled(head, style),
+                Span::styled(if focused { "█" } else { "" }, Style::new().fg(p.accent)),
+                Span::styled(tail, style),
+            ])
+        };
+        lines.push(Line::default());
+        lines.push(box_("name", &add.name, !add.on_value, false));
+        // A path is not a secret; a typed field value usually is.
+        lines.push(box_(value_label, &add.value, add.on_value, !add.from_file));
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(" enter", Style::new().fg(p.accent)),
+            p.faint(if add.from_file { " attach   " } else { " add   " }),
+            Span::styled("tab", Style::new().fg(p.accent)),
+            p.faint(" field   "),
+            Span::styled("esc", Style::new().fg(p.accent)),
+            p.faint(" cancel"),
+        ]));
+    } else {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(" y", Style::new().fg(p.accent)),
+            p.faint(" copy   "),
+            Span::styled("s", Style::new().fg(p.accent)),
+            p.faint(" write out   "),
+            Span::styled("*", Style::new().fg(p.accent)),
+            p.faint(" reveal   "),
+            Span::styled("a f", Style::new().fg(p.accent)),
+            p.faint(" add field, file   "),
+            Span::styled("D", Style::new().fg(p.accent)),
+            p.faint(" remove"),
+        ]));
+    }
+    let head = truncate(&format!("{title} · fields"), inner);
+    popup(frame, &head, lines, width, &p);
 }
 
 /* What `!` found: one line per entry, worst first, with the reason beside
@@ -2119,6 +2231,106 @@ mod tests {
             crate::theme::WARM.muted,
             "a live group drew like the bin"
         );
+    }
+
+    /* Custom fields and attachments were a count and nothing else, which
+       told the user something was there and gave them no way to reach it. */
+    #[test]
+    fn the_fields_screen_shows_values_and_masks_the_secret_ones() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        vault.set_field(&id, "recovery", "8888-4444", true).unwrap();
+        vault.set_field(&id, "account", "AC-9", false).unwrap();
+        vault.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+        app.open_vault(vault);
+        app.entry_cursor = Some(id);
+        app.open_fields();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("vpn · fields"), "{joined}");
+        // A protected field masks; an unprotected one is not a secret.
+        assert!(!joined.contains("8888-4444"), "a protected field drew in the clear");
+        assert!(joined.contains("AC-9"), "{joined}");
+        // A file says how big it is, which is the only thing to say about bytes.
+        assert!(joined.contains("key.pem"), "{joined}");
+        assert!(joined.contains("15 bytes"), "{joined}");
+
+        // `*` is the reveal, the same key and the same rule as the password.
+        app.fields_reveal();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("8888-4444"), "* revealed nothing");
+    }
+
+    /* `D` removes the row under the cursor, and the list has to stop showing
+       what is no longer there. */
+    #[test]
+    fn removing_a_field_updates_the_list_under_the_cursor() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        vault.set_field(&id, "account", "AC-9", false).unwrap();
+        vault.set_field(&id, "recovery", "8888", true).unwrap();
+        app.open_vault(vault);
+        app.entry_cursor = Some(id);
+        app.open_fields();
+        assert_eq!(app.fields.as_ref().unwrap().rows.len(), 2);
+
+        app.fields_remove();
+        let fields = app.fields.as_ref().unwrap();
+        assert_eq!(fields.rows.len(), 1, "the list still shows it");
+        assert_eq!(fields.rows[0].name(), "recovery");
+
+        // And the cursor cannot be left pointing past the end.
+        app.fields_remove();
+        let fields = app.fields.as_ref().unwrap();
+        assert!(fields.rows.is_empty());
+        assert_eq!(fields.cursor, 0);
+    }
+
+    /* The add prompt takes a name and a value, and what it writes is
+       protected: a field somebody adds by hand to a password manager is more
+       likely to be a secret than not. */
+    #[test]
+    fn adding_a_field_writes_it_protected() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.entry_cursor = Some(id);
+        app.open_fields();
+        app.fields_add(false);
+        for c in "recovery".chars() {
+            app.fields_add_insert(c);
+        }
+        app.fields_add_next();
+        for c in "8888-4444".chars() {
+            app.fields_add_insert(c);
+        }
+        app.fields_add_submit();
+
+        let rows = &app.fields.as_ref().unwrap().rows;
+        assert_eq!(
+            rows[0],
+            crate::vault::Extra::Field {
+                name: "recovery".into(),
+                value: "8888-4444".into(),
+                secret: true,
+            }
+        );
+        // A name and nothing else keeps the prompt rather than writing junk.
+        app.fields_add(false);
+        app.fields_add_submit();
+        assert!(app.fields.as_ref().unwrap().adding.is_some(), "an empty name went in");
     }
 
     /* A list, not a score: the point is that `enter` takes you to the row,

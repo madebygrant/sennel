@@ -156,6 +156,40 @@ pub struct GroupPrompt {
     pub caret: usize,
 }
 
+/* The `F` screen: everything on an entry the five fixed rows cannot show.
+   Rows are recomputed from the vault on every open and after every change —
+   the list is short, and a cached copy of a custom field is a cached copy of
+   a secret. */
+pub struct Fields {
+    pub entry: EntryId,
+    pub rows: Vec<crate::vault::Extra>,
+    pub cursor: usize,
+    /// `*`, the same rule as the password: masked until asked for.
+    pub reveal: bool,
+    /// The add prompt, when it is open: name then value.
+    pub adding: Option<AddField>,
+}
+
+/// Adding a custom field, or attaching a file.
+#[derive(Default)]
+pub struct AddField {
+    pub name: String,
+    pub value: String,
+    /// True once the name is in and the keys have moved to the value.
+    pub on_value: bool,
+    pub caret: usize,
+    /* A file rather than a string: the value box is then a path to read, and
+       what lands in the vault is its bytes. */
+    pub from_file: bool,
+}
+
+impl Drop for AddField {
+    fn drop(&mut self) {
+        // A custom field is usually a secret; the box that held it is wiped.
+        self.value.zeroize();
+    }
+}
+
 /* What `!` found, held rather than recomputed: the walk touches every entry
    and every password in the vault, which is fine once and wrong per frame. */
 pub struct Audit {
@@ -516,6 +550,8 @@ pub struct App {
     /// The password audit, when it is open. Computed once on open: it walks
     /// every entry, which is not a thing to do per frame.
     pub audit: Option<Audit>,
+    /// The custom-fields and attachments screen, when it is open.
+    pub fields: Option<Fields>,
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
@@ -605,6 +641,7 @@ impl App {
             group_prompt: None,
             rekey: None,
             audit: None,
+            fields: None,
             cut: None,
             undo: Vec::new(),
             search: None,
@@ -843,6 +880,28 @@ impl App {
 
     /* EntryRef derefs to Entry, so the take closure reads both the ref the
        selection hands over and the record type the crate stores. */
+    /* A value that is already in hand rather than read off the cursor's
+       entry: the fields screen has its own selection, and a custom field is
+       as much a secret as a password, so it goes through the same board and
+       the same auto-clear. */
+    pub fn copy_named(&mut self, label: &str, text: &str) {
+        if text.is_empty() {
+            self.say(format!("{label} is empty"));
+            return;
+        }
+        let Some(board) = &self.board else {
+            self.say("clipboard is not ready  ·  report this as a bug");
+            return;
+        };
+        match board.copy(text) {
+            Ok(()) => match board.timeout_secs() {
+                Some(secs) => self.say(format!("copied {label}  ·  clears in {secs}s")),
+                None => self.say(format!("copied {label}")),
+            },
+            Err(e) => self.error(e),
+        }
+    }
+
     fn copy_field(&mut self, label: &str, take: impl FnOnce(&keepass::db::Entry) -> String) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to copy from");
@@ -943,6 +1002,9 @@ impl App {
            not survive the lock that was supposed to clear the screen. */
         self.rekey = None;
         self.audit = None;
+        /* Holds field values, which are secrets as often as not, and the
+           add prompt's own box. Dropping it wipes them. */
+        self.fields = None;
         self.confirm = None;
         self.cut = None;
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
@@ -2787,6 +2849,274 @@ impl App {
                    a password change is the most frightening word in the app. */
                 self.error(format!("password unchanged  ·  {e}"));
             }
+        }
+    }
+
+    /* `F`: everything on the entry the five fixed rows cannot show. Custom
+       fields and attachments were visible as a count ("2 more fields") and
+       nothing else, which is a dead end: people keep recovery codes and ssh
+       keys in attachments, and an entry you can see holds one but cannot open
+       is an entry you have to open another app for. */
+    pub fn open_fields(&mut self) {
+        let Some(id) = self.entry_cursor else {
+            self.say("no entry here");
+            return;
+        };
+        self.fields = Some(Fields {
+            entry: id,
+            rows: self.extra_rows(&id),
+            cursor: 0,
+            reveal: false,
+            adding: None,
+        });
+        if self.fields.as_ref().is_some_and(|f| f.rows.is_empty()) {
+            self.say("no extra fields  ·  a adds one, f attaches a file");
+        }
+    }
+
+    fn extra_rows(&self, id: &EntryId) -> Vec<crate::vault::Extra> {
+        self.vault
+            .as_ref()
+            .and_then(|v| v.get_entry(id))
+            .map(|e| crate::vault::extra_rows(&e))
+            .unwrap_or_default()
+    }
+
+    /// Re-read after a change, so the list never shows what is no longer there.
+    fn refresh_fields(&mut self) {
+        let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
+            return;
+        };
+        let rows = self.extra_rows(&id);
+        if let Some(fields) = &mut self.fields {
+            fields.cursor = fields.cursor.min(rows.len().saturating_sub(1));
+            fields.rows = rows;
+        }
+    }
+
+    pub fn close_fields(&mut self) {
+        self.fields = None;
+    }
+
+    pub fn fields_move(&mut self, down: bool) {
+        let Some(fields) = &mut self.fields else {
+            return;
+        };
+        let last = fields.rows.len().saturating_sub(1);
+        fields.cursor = match down {
+            true => (fields.cursor + 1).min(last),
+            false => fields.cursor.saturating_sub(1),
+        };
+    }
+
+    pub fn fields_reveal(&mut self) {
+        if let Some(fields) = &mut self.fields {
+            fields.reveal = !fields.reveal;
+        }
+    }
+
+    fn fields_selected(&self) -> Option<&crate::vault::Extra> {
+        let fields = self.fields.as_ref()?;
+        fields.rows.get(fields.cursor)
+    }
+
+    /* `y` on a field copies its value, through the same board and the same
+       auto-clear as a password: a recovery code is a secret too. */
+    pub fn fields_copy(&mut self) {
+        let what = match self.fields_selected() {
+            Some(crate::vault::Extra::Field { name, value, .. }) => {
+                Some((name.clone(), value.clone()))
+            }
+            Some(crate::vault::Extra::File { .. }) => None,
+            None => return,
+        };
+        match what {
+            Some((name, value)) => self.copy_named(&name, &value),
+            // A file is bytes; `s` writes it out, the clipboard is for text.
+            None => self.say("that is a file  ·  s writes it out"),
+        }
+    }
+
+    /* `s` on an attachment writes it beside the vault, owner-only. The file
+       leaves the vault's protection the moment it lands, so the mode is set
+       from the first byte and the message says where it went. */
+    pub fn fields_save(&mut self) {
+        let Some(crate::vault::Extra::File { name, .. }) = self.fields_selected() else {
+            self.say("that is a field  ·  y copies it");
+            return;
+        };
+        let name = name.clone();
+        let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
+            return;
+        };
+        let Some(bytes) = self.vault.as_ref().and_then(|v| v.attachment_bytes(&id, &name)) else {
+            self.error("the attachment is not there any more");
+            return;
+        };
+        /* Beside the vault, not in the working directory: the vault's folder
+           is somewhere the user already keeps secrets, and cwd is wherever
+           they happened to launch from. */
+        let Some(dir) = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.path())
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        else {
+            self.error("no vault file to write beside");
+            return;
+        };
+        /* The name comes out of the vault and may hold anything, including a
+           path separator: take the last component only, so an attachment
+           called "../../.ssh/authorized_keys" lands as a file, not a write
+           somewhere else entirely. */
+        let leaf = std::path::Path::new(&name)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty() && n != "." && n != "..")
+            .unwrap_or_else(|| "attachment".to_string());
+        let at = dir.join(&leaf);
+        match crate::vault::write_owner_only(&at, &bytes) {
+            Ok(()) => self.warn(format!(
+                "wrote {} ·  {} bytes, owner-only, outside the vault",
+                at.display(),
+                bytes.len()
+            )),
+            Err(e) => self.error(format!("cannot write {} · {e}", at.display())),
+        }
+    }
+
+    /* `a` adds a custom field, `f` attaches a file. Two boxes either way:
+       the name, then the value or the path it is read from. */
+    pub fn fields_add(&mut self, from_file: bool) {
+        if let Some(fields) = &mut self.fields {
+            let mut add = AddField::default();
+            add.from_file = from_file;
+            fields.adding = Some(add);
+        }
+    }
+
+    pub fn fields_add_insert(&mut self, c: char) {
+        let Some(add) = self.fields.as_mut().and_then(|f| f.adding.as_mut()) else {
+            return;
+        };
+        let caret = add.caret;
+        let box_ = if add.on_value { &mut add.value } else { &mut add.name };
+        let at = box_.char_indices().nth(caret).map_or(box_.len(), |(at, _)| at);
+        box_.insert(at, c);
+        add.caret += 1;
+    }
+
+    pub fn fields_add_backspace(&mut self) {
+        let Some(add) = self.fields.as_mut().and_then(|f| f.adding.as_mut()) else {
+            return;
+        };
+        if add.caret == 0 {
+            return;
+        }
+        let caret = add.caret;
+        let box_ = if add.on_value { &mut add.value } else { &mut add.name };
+        let at = box_.char_indices().nth(caret - 1).map_or(box_.len(), |(at, _)| at);
+        box_.remove(at);
+        add.caret -= 1;
+    }
+
+    pub fn fields_add_next(&mut self) {
+        let Some(add) = self.fields.as_mut().and_then(|f| f.adding.as_mut()) else {
+            return;
+        };
+        add.on_value = !add.on_value;
+        add.caret = match add.on_value {
+            true => add.value.chars().count(),
+            false => add.name.chars().count(),
+        };
+    }
+
+    pub fn fields_add_cancel(&mut self) {
+        if let Some(fields) = &mut self.fields {
+            // The drop wipes the value box.
+            fields.adding = None;
+        }
+    }
+
+    /* Enter on the add prompt. A field goes in protected, because a field
+       somebody added by hand to a password manager is more likely to be a
+       secret than not; a file is read from the path and goes in the same way. */
+    pub fn fields_add_submit(&mut self) {
+        let Some(fields) = &mut self.fields else {
+            return;
+        };
+        let Some(add) = fields.adding.take() else {
+            return;
+        };
+        let id = fields.entry;
+        if add.name.trim().is_empty() {
+            self.warn("a name is the only must  ·  the prompt stays open");
+            if let Some(fields) = &mut self.fields {
+                fields.adding = Some(add);
+            }
+            return;
+        }
+        let done = if add.from_file {
+            let path = crate::config::expand(add.value.trim());
+            match std::fs::read(&path) {
+                Ok(bytes) => self
+                    .vault
+                    .as_mut()
+                    .expect("the screen only opens on a vault")
+                    .add_attachment(&id, add.name.trim(), bytes),
+                Err(e) => {
+                    self.error(format!("cannot read {} · {e}", path.display()));
+                    return;
+                }
+            }
+        } else {
+            self.vault
+                .as_mut()
+                .expect("the screen only opens on a vault")
+                .set_field(&id, add.name.trim(), &add.value, true)
+        };
+        match done {
+            Ok(()) => {
+                let name = add.name.trim().to_string();
+                self.snap();
+                self.persist();
+                self.refresh_fields();
+                self.say(match add.from_file {
+                    true => format!("attached {name}"),
+                    false => format!("added field {name}"),
+                });
+            }
+            Err(e) => self.error(format!("cannot add · {e}")),
+        }
+    }
+
+    /* `D` removes the row under the cursor. No confirm and no undo slot: a
+       custom field is one `a` from being retyped, and an attachment is still
+       in whatever file it came from. The message says which it was. */
+    pub fn fields_remove(&mut self) {
+        let Some(row) = self.fields_selected().cloned() else {
+            return;
+        };
+        let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
+            return;
+        };
+        let vault = self.vault.as_mut().expect("the screen only opens on a vault");
+        let (done, said) = match &row {
+            crate::vault::Extra::Field { name, .. } => {
+                (vault.remove_field(&id, name), format!("removed field {name}"))
+            }
+            crate::vault::Extra::File { name, .. } => {
+                (vault.remove_attachment(&id, name), format!("removed {name}"))
+            }
+        };
+        match done {
+            Ok(()) => {
+                self.snap();
+                self.persist();
+                self.refresh_fields();
+                self.warn(said);
+            }
+            Err(e) => self.error(format!("cannot remove · {e}")),
         }
     }
 
