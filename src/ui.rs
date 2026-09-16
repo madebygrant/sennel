@@ -172,23 +172,34 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
 /* Columns, not characters, and never straddling the edge: a width of one
    against a two-column glyph would otherwise take nothing and spill into the
    next field. Callers pad to the column count, which absorbs coming back
-   short. */
+   short. A cut ends in `…` — without it `Root/Bankin` reads as a group
+   somebody named Bankin. */
 fn truncate(text: &str, width: usize) -> String {
     if cols(text) <= width {
         return text.to_string();
     }
+    // One column is the ellipsis itself; none is nothing to say it in.
+    let room = width.saturating_sub(1);
     let mut out = String::new();
     let mut used = 0;
     for c in text.chars() {
         let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + w > width {
+        if used + w > room {
             break;
         }
         used += w;
         out.push(c);
     }
+    if width > 0 {
+        out.push('…');
+    }
     out
 }
+
+/// One label column across the unlock boxes, the entry form, the group prompt
+/// and the detail: three screens that should share a rhythm, and eight ran
+/// "password" straight into its value.
+const LABEL: usize = 10;
 
 /* Only worth the column when the list actually runs off the pane. */
 fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize) {
@@ -363,7 +374,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     };
     let row = |label: &str, value: String, style: Style| {
         Line::from(vec![
-            dim(format!(" {label:<8}")),
+            dim(format!(" {label:<LABEL$}")),
             Span::styled(value, style),
         ])
     };
@@ -377,13 +388,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         Line::default(),
         row(
             "user",
-            truncate(entry.username(), width.saturating_sub(10)),
+            truncate(entry.username(), width.saturating_sub(LABEL + 1)),
             cream,
         ),
         row(
             "pass",
             if app.show_password {
-                truncate(entry.password(), width.saturating_sub(10))
+                truncate(entry.password(), width.saturating_sub(LABEL + 1))
             } else {
                 "••••••••".to_string()
             },
@@ -393,7 +404,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     if !entry.url().is_empty() {
         lines.push(row(
             "url",
-            truncate(entry.url(), width.saturating_sub(10)),
+            truncate(entry.url(), width.saturating_sub(LABEL + 1)),
             faint,
         ));
     }
@@ -403,7 +414,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     if !notes.is_empty() {
         lines.push(row(
             "notes",
-            truncate(notes, width.saturating_sub(10)),
+            truncate(notes, width.saturating_sub(LABEL + 1)),
             faint,
         ));
     }
@@ -452,11 +463,11 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     let faint = Style::new().fg(DIM);
     let row = |label: &str, value: String, style: Style| {
         Line::from(vec![
-            dim(format!(" {label:<10}")),
+            dim(format!(" {label:<LABEL$}")),
             Span::styled(value, style),
         ])
     };
-    let value = inner.saturating_sub(11);
+    let value = inner.saturating_sub(LABEL + 1);
     let mut lines = vec![
         row("user", truncate(entry.username(), value), cream),
         row(
@@ -557,7 +568,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             Style::new().fg(DIM)
         };
         Line::from(vec![
-            dim(format!(" {label:<8}")),
+            dim(format!(" {label:<LABEL$}")),
             Span::styled(text, style),
         ])
     };
@@ -624,7 +635,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         /* An armed cut is one keypress from moving something: the bar names
            it so X never reads as a silent no-op. */
         if let Some(note) = app.cut_note() {
-            spans.push(Span::styled(format!("{note} · v pastes  "), Style::new().fg(AMBER)));
+            spans.push(Span::styled(format!("{note} · V pastes  "), Style::new().fg(AMBER)));
         }
         /* The undo slot is the same deal: `u` has a name, so the key can be
            pressed on purpose rather than as a gamble. */
@@ -749,7 +760,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
             Style::new().fg(DIM)
         };
         Line::from(vec![
-            Span::styled(format!(" {label:<9}"), style),
+            Span::styled(format!(" {label:<LABEL$}"), style),
             Span::styled(head, style),
             /* The block caret sits between the split halves; an unfocused
                box draws none, so the eye finds the live box first. */
@@ -847,7 +858,7 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
     let tail: String = first.collect();
     let lines = vec![
         Line::from(vec![
-            Span::styled(" name     ", style),
+            Span::styled(format!(" {:<LABEL$}", "name"), style),
             Span::styled(head, style),
             Span::styled("█", style),
             Span::styled(tail, style),
@@ -1191,7 +1202,7 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("cut: checking"), "{joined}");
-        assert!(joined.contains("v pastes"), "{joined}");
+        assert!(joined.contains("V pastes"), "{joined}");
     }
 
     /* The band draws `/needle` with a block caret and the status bar counts
@@ -1222,6 +1233,34 @@ mod tests {
         assert!(joined.contains("/check"), "{joined}");
         assert!(joined.contains("1 of 2 shown"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
+    }
+
+    /* A cut name has to look cut: "Root/Bankin" is otherwise a group
+       somebody named Bankin. Columns, so a wide glyph never straddles. */
+    #[test]
+    fn truncation_says_that_it_truncated() {
+        assert_eq!(truncate("Banking", 20), "Banking");
+        assert_eq!(truncate("Banking", 7), "Banking");
+        assert_eq!(truncate("Banking", 4), "Ban\u{2026}");
+        assert_eq!(cols(&truncate("Banking", 4)), 4);
+        // A double-width glyph keeps the ellipsis inside the budget.
+        assert_eq!(cols(&truncate("\u{9280}\u{884c}\u{53e3}\u{5ea7}", 5)), 5);
+        assert_eq!(truncate("Banking", 0), "");
+    }
+
+    /* One label column across the lock, the form and the group prompt: at
+       eight, "password" ran straight into its own value. */
+    #[test]
+    fn labels_keep_a_gap_before_their_value() {
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.unlock_password = "s3cret".to_string();
+        app.caret = 6;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(!joined.contains("password\u{2022}"), "the label ran into the box");
+        assert!(joined.contains("password  "), "{joined}");
     }
 
     /* The 80-column terminal has no side pane, so Enter's popup is where an

@@ -1930,8 +1930,8 @@ impl App {
         };
         self.cut = Some(cut);
         self.say(match cut {
-            Cut::Group(_) => "group cut  ·  v pastes it under another group",
-            Cut::Entry(_) => "entry cut  ·  v moves it to another group",
+            Cut::Group(_) => "group cut  ·  V pastes it under another group",
+            Cut::Entry(_) => "entry cut  ·  V moves it to another group",
         });
     }
 
@@ -1940,7 +1940,7 @@ impl App {
        stays armed so a typo in the target costs nothing. */
     pub fn paste_cut(&mut self) {
         let Some(cut) = self.cut else {
-            self.say("nothing cut  ·  x arms the shelf");
+            self.say("nothing cut  ·  X arms the shelf");
             return;
         };
         let Some(target) = self.group_cursor else {
