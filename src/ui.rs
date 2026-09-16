@@ -1089,10 +1089,26 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(head.to_string(), Style::new().fg(p.text)),
         Span::styled("█", Style::new().fg(p.accent)),
         Span::styled(tail.to_string(), Style::new().fg(p.text)),
-        p.faint(if app.search_global {
-            "  enter keep · esc clear · ^g this group"
-        } else {
-            "  enter keep · esc clear · ^g whole vault"
+        /* A `#` needle is a tag filter, so the hint becomes the tags there
+           are: nobody can filter by a label they cannot remember. */
+        p.faint(match crate::vault::tag_needle(needle) {
+            Some(prefix) => {
+                let known: Vec<String> = app
+                    .vault
+                    .as_ref()
+                    .map(crate::vault::all_tags)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| t.to_lowercase().starts_with(&prefix.to_lowercase()))
+                    .take(6)
+                    .collect();
+                match known.is_empty() {
+                    true => "  no tags match".to_string(),
+                    false => format!("  {}", known.join(" · ")),
+                }
+            }
+            None if app.search_global => "  enter keep · esc clear · ^g this group".to_string(),
+            None => "  enter keep · esc clear · ^g whole vault".to_string(),
         }),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -1388,6 +1404,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
     }
     lines.push(row("url", FormField::Url, &form.url));
     lines.push(row("otp", FormField::Otp, &form.otp));
+    lines.push(row("tags", FormField::Tags, &form.tags));
     /* The code the typed seed produces, right now. A seed is a run of
        characters nobody can check by eye, and the site asks for a code to
        confirm the setup — so the box answers with one before it is saved. */

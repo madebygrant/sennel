@@ -36,12 +36,14 @@ not the browser's `*`.
 | `*`                 | show or hide the password (needs the detail pane or popup)    |
 | `/`                 | fuzzy search (`enter` keeps, `esc` clears)                    |
 | `^g` (in search)    | narrow the needle to this group, or widen it again            |
+| `#tag` (in search)  | filter by tag instead of fuzzy-matching · `#` alone lists them|
 | `n` `N`             | next, previous match                                          |
 | `↑ ↓` (in search)   | move through the results while still typing                   |
-| `a` `e` `D`         | add, edit, delete entry to the bin (the form has an `otp` box)|
+| `a` `e` `D`         | add, edit, delete entry to the bin (`otp` and `tags` boxes)   |
 | `A` `E`             | add, rename group                                             |
 | `D` (on groups)     | group to the recycle bin, contents and all                    |
 | `X` `V`             | cut, paste entry or group                                     |
+| `>` `<`             | move a group in or out of the tree (groups pane)              |
 | `←` `→`             | collapse, expand group (in the entries pane, hop)             |
 | `o`                 | entries order: stored, name, recent, updated                  |
 | `u`                 | undo, step by step back through the session                   |

@@ -550,6 +550,11 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('F') => app.open_fields(),
         /* `H`: old versions, which only ever come from another client. */
         KeyCode::Char('H') => app.open_history(),
+        /* `>` and `<` reorganise the tree without a cut-and-paste trip.
+           Groups pane only: on entries the cursor is on a row, not a folder,
+           and `X`/`V` is the move that means something there. */
+        KeyCode::Char('>') if app.active_pane == app::Pane::Groups => app.reparent_group(true),
+        KeyCode::Char('<') if app.active_pane == app::Pane::Groups => app.reparent_group(false),
         KeyCode::Char('A') => app.open_group_prompt_new(),
         KeyCode::Char('E') => app.open_group_prompt_rename(),
         KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),

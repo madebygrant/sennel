@@ -31,7 +31,8 @@ have it open, the next autosave refuses rather than quietly winning. `^s` keeps 
 theirs.
 
 **Fuzzy search that shows its work.** `/` searches titles, usernames, urls and group paths. Never
-notes. The characters that matched light up in each row, so you can see why a row is there.
+notes. The characters that matched light up in each row, so you can see why a row is there. A needle
+starting with `#` filters by tag instead, and lists the tags you have while you type it.
 
 **One-time codes without handing over the seed.** Entries with a code are marked `⊙` and show the
 digits with a countdown. `t` copies them. The seed stays in the vault, because putting a permanent

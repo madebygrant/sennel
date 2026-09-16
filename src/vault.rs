@@ -238,6 +238,37 @@ pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
     fields
 }
 
+/* A needle that starts with `#` is a tag filter, not a fuzzy search. Tags are
+   a KeePassXC feature Sennel could see (`extras` prints them) and not act on,
+   and fuzzing them alongside titles would make `#work` match "homework".
+
+   Prefix, case-insensitive: typing `#wo` narrows as you go, which is the
+   whole point of a filter in a live band. */
+pub fn tag_needle(needle: &str) -> Option<&str> {
+    needle.strip_prefix('#')
+}
+
+pub fn has_tag(entry: &EntryRef<'_>, prefix: &str) -> bool {
+    /* An empty prefix (`#` alone) means "anything tagged", which is the
+       useful answer while the user is still typing. */
+    entry
+        .tags
+        .iter()
+        .any(|tag| tag.to_lowercase().starts_with(&prefix.to_lowercase()))
+}
+
+/// Every tag in the vault, sorted, for the hint under an empty `#`.
+pub fn all_tags(vault: &Vault) -> Vec<String> {
+    let mut out: Vec<String> = vault
+        .entry_refs()
+        .iter()
+        .flat_map(|e| e.tags.clone())
+        .collect();
+    out.sort_by_key(|tag| tag.to_lowercase());
+    out.dedup();
+    out
+}
+
 /// One old version of an entry, as the history screen reads it.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Version {
@@ -1037,6 +1068,22 @@ impl Vault {
             true => entry.set_protected(name, value),
             false => entry.set_unprotected(name, value),
         }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    /* Tags, which KeePassXC writes and `#` filters on. Whole list at a time:
+       a tag set is small and edited as a set, and per-tag add/remove would be
+       two more verbs for the same result. */
+    pub fn set_tags(&mut self, id: &EntryId, tags: &[String]) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.tags = tags
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
         entry.times.last_modification = Some(Times::now());
         Ok(())
     }

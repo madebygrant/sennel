@@ -73,6 +73,8 @@ pub enum FormField {
     /// The one-time seed: an `otpauth://` url, or the base32 a site prints
     /// beside its QR code.
     Otp,
+    /// KeePassXC tags, comma-separated. `#` in search filters on them.
+    Tags,
     Notes,
 }
 
@@ -122,6 +124,8 @@ pub struct Form {
     /// Typed one-time seed. Empty and untouched keeps whatever the entry
     /// already has, the same latch the password box uses.
     pub otp: String,
+    /// Comma-separated, which is how a person writes a short list.
+    pub tags: String,
     pub notes: String,
     /// Char index into the focused box, same rule as the unlock caret.
     pub caret: usize,
@@ -138,6 +142,16 @@ pub struct Form {
        form: `^s` generates into a masked box, and a secret you cannot read is
        one you cannot check before saving. */
     pub reveal: bool,
+}
+
+/* Commas, because that is how a person writes a short list. Whitespace round
+   each one is trimmed and empties are dropped, so "work, , urgent," is two
+   tags rather than four. */
+fn split_tags(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
@@ -1670,6 +1684,17 @@ impl App {
                 entries.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification))
             }
         }
+        /* `#tag` filters rather than ranks: a tag is an exact label somebody
+           chose, so it answers yes or no and the fuzzy ranking below would
+           only shuffle the answer. Applies in either scope, because "show me
+           everything tagged work" is rarely a question about one folder. */
+        if let Some(prefix) = self.search.as_deref().and_then(crate::vault::tag_needle) {
+            return entries
+                .iter()
+                .filter(|e| crate::vault::has_tag(e, prefix))
+                .map(|e| e.id())
+                .collect();
+        }
         let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
         if global {
             /* rank_entry, not raw rank: multi-word needles ("git octo")
@@ -2279,6 +2304,7 @@ impl App {
             username: String::new(),
             password: String::new(),
             url: String::new(),
+            tags: String::new(),
             notes: String::new(),
             caret: 0,
             password_touched: false,
@@ -2305,6 +2331,10 @@ impl App {
             username: entry.username().to_string(),
             password: String::new(),
             url: entry.url().to_string(),
+            /* Prefilled, unlike the two secret boxes: a tag is a label, and
+               an edit that silently dropped them would be worse than one
+               that shows them. */
+            tags: entry.tags.join(", "),
             notes: entry.notes().to_string(),
             caret: entry.title().chars().count(),
             password_touched: false,
@@ -2383,6 +2413,7 @@ impl App {
             FormField::Password,
             FormField::Url,
             FormField::Otp,
+            FormField::Tags,
             FormField::Notes,
         ];
         let at = order.iter().position(|f| *f == form.field).unwrap_or(0);
@@ -2562,12 +2593,14 @@ impl App {
                     self.form = Some(form);
                     return;
                 };
+                let tags = split_tags(&form.tags);
                 vault
                     .create_entry(&group, &form.title, &form.username, &form.password, &form.url, &form.notes)
                     .map(|id| {
                         if let Some(Some(url)) = otp.as_ref() {
                             let _ = vault.set_otp(&id, Some(url));
                         }
+                        let _ = vault.set_tags(&id, &tags);
                         Some(id)
                     })
             }
@@ -2590,9 +2623,11 @@ impl App {
                 if let Some(before) = before {
                     self.push_undo(Undo::Edit { id, before });
                 }
+                let tags = split_tags(&form.tags);
                 let vault = self.vault.as_mut().expect("edit form needs a vault");
                 vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
+                    .and_then(|()| vault.set_tags(&id, &tags))
                     .and_then(|()| match otp.as_ref() {
                         // Untouched keeps whatever the entry already carried.
                         None => Ok(()),
@@ -3135,6 +3170,71 @@ impl App {
         }
     }
 
+    /* `>` and `<`: move a group one step in or out of the tree, the outliner
+       move. `X`/`V` can already do this in two keys plus a cursor trip, but
+       reorganising a vault is a dozen of those in a row, and the cursor trip
+       is the part that makes it a chore.
+
+       `>` makes the group a child of the sibling above it, which is the only
+       unambiguous reading of "indent" — there is exactly one group it could
+       mean. `<` makes it a sibling of its parent. */
+    pub fn reparent_group(&mut self, deeper: bool) {
+        let Some(id) = self.group_cursor else {
+            self.say("no group selected");
+            return;
+        };
+        if id == self.root_id() {
+            self.say("the root group cannot move");
+            return;
+        }
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        if vault.in_recycle_bin(&id) {
+            self.say("that group is in the recycle bin  ·  u restores it");
+            return;
+        }
+        let Some(parent) = vault.get_group(&id).and_then(|g| g.parent().map(|p| p.id())) else {
+            return;
+        };
+        let target = if deeper {
+            /* The sibling directly above, in the tree's own order — the one
+               the eye reads as "the folder this would go into". */
+            let siblings: Vec<GroupId> = vault.groups_in(&parent).iter().map(|g| g.id()).collect();
+            let at = siblings.iter().position(|s| *s == id).unwrap_or(0);
+            match at.checked_sub(1).and_then(|prev| siblings.get(prev).copied()) {
+                Some(prev) => prev,
+                None => {
+                    self.say("nothing above it to go into");
+                    return;
+                }
+            }
+        } else {
+            if parent == self.root_id() {
+                self.say("already at the top");
+                return;
+            }
+            match vault.get_group(&parent).and_then(|g| g.parent().map(|p| p.id())) {
+                Some(grandparent) => grandparent,
+                None => return,
+            }
+        };
+        let vault = self.vault.as_mut().expect("checked above");
+        match vault.move_group(&id, &target) {
+            Ok(()) => {
+                /* Expanded, or the group the cursor is on vanishes inside a
+                   folded parent and reads as a delete. */
+                vault.set_expanded(&target, true);
+                self.group_cursor = Some(id);
+                self.snap();
+                self.persist();
+                let path = self.here();
+                self.say(format!("moved to {path}"));
+            }
+            Err(e) => self.say(format!("cannot move  ·  {e}")),
+        }
+    }
+
     /* `H`: the old versions an entry carries. Sennel writes none — its edits
        leave no history record on purpose — but KeePassXC does, so an entry
        imported from there arrives holding every password it ever had. The
@@ -3664,6 +3764,7 @@ fn form_field_value(form: &mut Form, field: FormField) -> &mut String {
         FormField::Password => &mut form.password,
         FormField::Url => &mut form.url,
         FormField::Otp => &mut form.otp,
+        FormField::Tags => &mut form.tags,
         FormField::Notes => &mut form.notes,
     }
 }
@@ -3675,6 +3776,7 @@ fn form_field_value_ref(form: &Form, field: FormField) -> &str {
         FormField::Password => &form.password,
         FormField::Url => &form.url,
         FormField::Otp => &form.otp,
+        FormField::Tags => &form.tags,
         FormField::Notes => &form.notes,
     }
 }
@@ -4717,6 +4819,118 @@ pub mod tests {
         assert!(!app.stage.contains("remembered"), "{}", app.stage);
     }
 
+    /* ---- Reorganising the tree, and tags ---- */
+
+    /* `X`/`V` can already move a group, in two keys plus a cursor trip.
+       Reorganising a vault is a dozen of those in a row, and the trip is the
+       part that makes it a chore. */
+    #[test]
+    fn angle_brackets_move_a_group_in_and_out_of_the_tree() {
+        let mut app = open_app();
+        let root = app.root_id();
+        let vault = app.vault.as_mut().unwrap();
+        /* Under a parent of their own: the fixture already has groups at the
+           root, and "the sibling above" has to mean one this test controls. */
+        let home = vault.create_group(&root, "Home").unwrap();
+        let first = vault.create_group(&home, "Aaa").unwrap();
+        let second = vault.create_group(&home, "Bbb").unwrap();
+        app.snap();
+
+        // `>` takes the sibling above as the new parent.
+        app.group_cursor = Some(second);
+        app.reparent_group(true);
+        let vault = app.vault.as_ref().unwrap();
+        assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Aaa", "Bbb"]);
+        // The cursor stays on the group it moved, wherever that landed.
+        assert_eq!(app.group_cursor, Some(second));
+
+        // `<` puts it back beside its old parent.
+        app.reparent_group(false);
+        let vault = app.vault.as_ref().unwrap();
+        assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Bbb"]);
+
+        /* The edges say so rather than doing nothing: the first sibling has
+           nothing above it, and a top-level group has nowhere further out. */
+        // Drain the two move flashes, or these read somebody else's sentence.
+        for _ in 0..6 {
+            app.expire_now();
+        }
+        app.group_cursor = Some(first);
+        app.reparent_group(true);
+        assert!(app.stage.contains("nothing above"), "{}", app.stage);
+        /* `<` from one level down lands at the root, which is as far out as
+           the tree goes; a second `<` there says so. */
+        app.expire_now();
+        app.reparent_group(false);
+        app.expire_now();
+        app.reparent_group(false);
+        assert!(app.stage.contains("already at the top"), "{}", app.stage);
+
+        // And the root itself never moves.
+        app.group_cursor = Some(root);
+        app.reparent_group(true);
+        assert_eq!(app.vault.as_ref().unwrap().group_path(&root), vec!["Root"]);
+    }
+
+    /* A tag is an exact label somebody chose, so `#work` answers yes or no.
+       Fuzzing it alongside titles would make `#work` match "homework". */
+    #[test]
+    fn a_hash_needle_filters_by_tag_instead_of_ranking() {
+        let mut app = open_app();
+        let root = app.root_id();
+        let vault = app.vault.as_mut().unwrap();
+        let work = vault.create_entry(&root, "jira", "u", "p", "", "").unwrap();
+        let home = vault.create_entry(&root, "homework-club", "u", "p", "", "").unwrap();
+        vault.set_tags(&work, &["work".into(), "urgent".into()]).unwrap();
+        vault.set_tags(&home, &["personal".into()]).unwrap();
+        app.snap();
+
+        app.open_search();
+        for c in "#work".chars() {
+            app.search_insert(c);
+        }
+        let rows = app.entry_rows();
+        assert_eq!(rows, vec![work], "the tag filter matched by title");
+
+        // A prefix narrows as you type, which is the point of a live band.
+        app.search_backspace();
+        app.search_backspace();
+        assert_eq!(app.entry_rows(), vec![work]);
+
+        // `#` alone is "anything tagged", the useful answer mid-type.
+        for _ in 0..3 {
+            app.search_backspace();
+        }
+        let mut tagged = app.entry_rows();
+        tagged.sort_by_key(|id| *id == home);
+        assert_eq!(tagged.len(), 2, "# alone did not show every tagged entry");
+
+        /* Tags come out of the form as a comma list, which is how a person
+           writes a short one. */
+        app.clear_search();
+        app.entry_cursor = Some(home);
+        app.open_edit_form();
+        app.form.as_mut().unwrap().field = FormField::Tags;
+        app.form.as_mut().unwrap().tags = "  work , , urgent,".into();
+        app.submit_form();
+        assert_eq!(
+            app.vault.as_ref().unwrap().get_entry(&home).unwrap().tags,
+            vec!["work", "urgent"],
+            "the comma list did not survive the form"
+        );
+        // And an edit prefills them, so a save never drops them silently.
+        app.open_edit_form();
+        assert_eq!(app.form.as_ref().unwrap().tags, "work, urgent");
+
+        /* And the vault's tags are readable and deduplicated, which is what
+           the band shows under a `#` so nobody has to remember a label. The
+           edit above moved `home` off "personal", so it is gone. */
+        assert_eq!(
+            crate::vault::all_tags(app.vault.as_ref().unwrap()),
+            vec!["urgent", "work"]
+        );
+    }
+
     /* ---- Undo depth ---- */
 
     /* The case one slot could not cover: a mistake noticed a few keystrokes
@@ -4979,6 +5193,7 @@ pub mod tests {
         app.next_form_field(true); // password box, empty
         app.next_form_field(true); // url
         app.next_form_field(true); // otp, also empty and untouched
+        app.next_form_field(true); // tags
         app.next_form_field(true); // notes
         for c in "note".chars() {
             app.form_insert(c);
