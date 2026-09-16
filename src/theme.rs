@@ -107,8 +107,6 @@ impl Palette {
    other palette here is unreadable. The inversion is the whole palette, not
    the text: the gradient's ends go light too, and `surface` is lighter than
    the page rather than darker, so a popup still reads as raised. */
-/* Reachable by name from wave 4, when the config resolves one. */
-#[allow(dead_code)]
 pub const LIGHT: Palette = Palette {
     text: Color::Rgb(38, 34, 30),
     accent: Color::Rgb(124, 84, 14),
@@ -128,8 +126,6 @@ pub const LIGHT: Palette = Palette {
 
 /* Slate and steel: the same structure as warm with the warmth taken out, for
    anyone who finds a gold-and-cream terminal too much furniture. */
-/* Reachable by name from wave 4, when the config resolves one. */
-#[allow(dead_code)]
 pub const COOL: Palette = Palette {
     text: Color::Rgb(226, 232, 240),
     accent: Color::Rgb(126, 176, 222),
@@ -150,8 +146,6 @@ pub const COOL: Palette = Palette {
    palette is always `muted` — usernames, urls and every hint draw in it, and
    the temptation is a dim purple that measures 2:1. This one is light enough
    to read and cool enough to stay behind the text. */
-/* Reachable by name from wave 4, when the config resolves one. */
-#[allow(dead_code)]
 pub const NEON: Palette = Palette {
     text: Color::Rgb(226, 232, 255),
     accent: Color::Rgb(255, 92, 213),
@@ -171,8 +165,6 @@ pub const NEON: Palette = Palette {
 /* Every palette Sennel ships. The list is what the contrast, quantise and
    NO_COLOR checks iterate, so a new theme is covered the moment it is added
    here and cannot be shipped unmeasured. */
-/* Test-only until the config lookup of wave 4 resolves a name through it. */
-#[cfg(test)]
 pub const BUILT_INS: [(&str, Palette); 4] = [
     ("warm", WARM),
     ("light", LIGHT),
@@ -200,6 +192,36 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     };
     let (x, y) = (luminance(a), luminance(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+impl Palette {
+    /// The palette a config or a flag names, or `None` for a name nobody
+    /// ships — which the caller turns into a startup error rather than a
+    /// silent fallback to the default.
+    pub fn named(name: &str) -> Option<Palette> {
+        BUILT_INS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, palette)| *palette)
+    }
+
+    /// What this palette is called, for `--check` and the flash that names a
+    /// switch. Falls back to "custom" once wave 6 allows overrides.
+    pub fn name(&self) -> &'static str {
+        BUILT_INS
+            .iter()
+            .find(|(_, known)| known == self)
+            .map_or("custom", |(name, _)| *name)
+    }
+
+    /// Every name Sennel knows, for the message that lists them.
+    pub fn names() -> String {
+        BUILT_INS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl Default for Palette {

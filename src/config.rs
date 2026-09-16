@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<String>,
 
+    /// Colours to draw in: warm, light, cool or neon
+    #[arg(long, value_name = "THEME")]
+    pub theme: Option<String>,
+
     /// Check the clipboard backend, the database path and the config, then exit
     #[arg(long)]
     pub check: bool,
@@ -52,6 +56,8 @@ pub struct FileConfig {
     /// stored · name · recent · updated. `o` cycles from here rather than
     /// from the built-in default, so the order survives a restart.
     pub sort: Option<String>,
+    /// warm · light · cool · neon
+    pub theme: Option<String>,
     pub generator: Option<FileGenerator>,
     /// Wheel and click. On by default; off gives the terminal its own
     /// selection back.
@@ -152,6 +158,8 @@ pub struct Config {
     pub sort: crate::app::SortOrder,
     pub generator: Generator,
     pub mouse: bool,
+    /// The colours this session draws in.
+    pub theme: crate::theme::Palette,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -191,6 +199,7 @@ impl Config {
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
+            theme: theme(cli.theme.as_deref().or(file.theme.as_deref()))?,
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,
@@ -224,6 +233,21 @@ fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
     };
     crate::app::SortOrder::from_name(name).ok_or_else(|| {
         anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated")
+    })
+}
+
+/* A name nobody ships is a startup error naming the ones that exist, not a
+   silent fallback: a theme that quietly does not apply reads as a theme that
+   does not work. */
+fn theme(name: Option<&str>) -> Result<crate::theme::Palette> {
+    let Some(name) = name else {
+        return Ok(crate::theme::Palette::default());
+    };
+    crate::theme::Palette::named(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown theme {name:?} · {}",
+            crate::theme::Palette::names()
+        )
     })
 }
 
@@ -558,6 +582,39 @@ mod tests {
     #[test]
     fn no_config_has_nowhere_to_remember() {
         assert!(remember_db(None, std::path::Path::new("/vaults/x.kdbx")).is_err());
+    }
+
+    /* A theme comes from the file or the flag, and a name nobody ships stops
+       startup naming the ones that do — the same contract as `sort`. */
+    #[test]
+    fn the_theme_reads_from_the_file_and_the_flag() {
+        let cfg = build("theme = \"neon\"\n", &[]);
+        assert_eq!(cfg.theme, crate::theme::NEON);
+        assert_eq!(cfg.theme.name(), "neon");
+
+        let cfg = build("theme = \"neon\"\n", &["--theme", "light"]);
+        assert_eq!(cfg.theme, crate::theme::LIGHT, "the flag lost to the file");
+
+        let cfg = build("", &[]);
+        assert_eq!(cfg.theme, crate::theme::WARM, "the default moved");
+
+        let mut file = temp("theme");
+        writeln!(file.handle, "theme = \"dracula\"").unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ])
+        .unwrap();
+        let err = match Config::build(cli) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an unknown theme started the session"),
+        };
+        assert!(err.contains("unknown theme"), "{err}");
+        // The message names what does exist, so the next try can work.
+        for name in ["warm", "light", "cool", "neon"] {
+            assert!(err.contains(name), "{err} does not name {name}");
+        }
     }
 
     #[test]

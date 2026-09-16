@@ -72,6 +72,7 @@ fn main() -> Result<()> {
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
     app.set_order(cfg.sort);
+    app.theme = cfg.theme;
     app.set_generator(cfg.generator);
     /* The clipboard with its auto-clear timer, armed once like the lock:
        copies before this point cannot happen, since nothing is unlocked. */
@@ -141,6 +142,7 @@ fn check(cfg: &Config) -> Result<()> {
         Some(_) => println!("vault     not there yet · unlocking creates it"),
         None => println!("vault     (none)"),
     }
+    println!("theme     {}", cfg.theme.name());
     println!("sort      {}", cfg.sort.short());
     println!(
         "generate  {} chars · {}",

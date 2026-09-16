@@ -13,6 +13,7 @@ sennel                     # opens ~/.config/sennel/config.toml's db, or asks fo
 sennel --db vault.kdbx     # open a specific vault (created on first unlock; note that
                            # a path on the command line is visible to `ps`)
 sennel --check             # print what the app sees: config, paths, clipboard backend
+sennel --theme light       # draw in another palette (warm, light, cool, neon)
 sennel --list --db v.kdbx  # group and entry inventory (titles only, no secrets)
 ```
 
@@ -118,6 +119,23 @@ has a visible home in the `h` overlay.
 - **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
   paths — never notes — and printed inventories carry titles only.
 
+## Themes
+
+Four palettes ship, chosen with `theme` in the config or `--theme` on the command line:
+
+| Theme   | For                                                                    |
+| ------- | ---------------------------------------------------------------------- |
+| `warm`  | the default: cream and gold on a warm near-black gradient              |
+| `light` | terminals with a light background, where the other three are unreadable |
+| `cool`  | slate and steel — warm's structure with the warmth taken out           |
+| `neon`  | magenta and cyan over violet-to-black                                   |
+
+Every palette is measured, not eyeballed: each readable colour clears WCAG 4.5:1 against both ends of
+its own gradient and against the tone popups are raised with, still clears 3:1 after a 256-colour
+terminal has quantised it, and collapses to nothing under `NO_COLOR` — where the pane marker (`▌` vs
+`│`) and the `!`/`×` flash glyphs carry what colour was saying. A theme changes colour and never
+layout; the tests assert the frame is identical cell for cell across all four.
+
 ## Configuration
 
 `~/.config/sennel/config.toml`, all keys optional:
@@ -127,6 +145,7 @@ db = "~/vaults/main.kdbx"      # default database · rewritten when you open ano
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
+theme = "warm"                 # warm (default), light, cool, neon
 
 [generator]                    # what ^s makes in the entry form
 length = 20                    # 4–256
