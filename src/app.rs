@@ -93,11 +93,22 @@ pub enum FormKind {
    end in a drop: a generated password and a one-time seed would otherwise be
    freed intact. Notes come too — they are stored protected in the vault, and
    a recovery code is exactly the kind of thing people keep there. */
-impl Drop for Form {
-    fn drop(&mut self) {
+impl Form {
+    /* What `Drop` does, split out so a test can watch it work on a value it
+       still owns. Checking a dropped one means reading a freed allocation,
+       which proves nothing either way: the allocator writes its own
+       bookkeeping into the block, so the secret is usually gone from it
+       whether or not anybody wiped it. */
+    pub fn wipe(&mut self) {
         self.password.zeroize();
         self.otp.zeroize();
         self.notes.zeroize();
+    }
+}
+
+impl Drop for Form {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
@@ -197,10 +208,17 @@ pub struct AddField {
     pub from_file: bool,
 }
 
-impl Drop for AddField {
-    fn drop(&mut self) {
+impl AddField {
+    /// What `Drop` does, observable on a live value. See `Form::wipe`.
+    pub fn wipe(&mut self) {
         // A custom field is usually a secret; the box that held it is wiped.
         self.value.zeroize();
+    }
+}
+
+impl Drop for AddField {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
@@ -244,10 +262,17 @@ pub struct Rekey {
     pub reveal: bool,
 }
 
-impl Drop for Rekey {
-    fn drop(&mut self) {
+impl Rekey {
+    /// What `Drop` does, observable on a live value. See `Form::wipe`.
+    pub fn wipe(&mut self) {
         self.password.zeroize();
         self.confirm.zeroize();
+    }
+}
+
+impl Drop for Rekey {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
@@ -4741,46 +4766,94 @@ pub mod tests {
     }
 
     /* The claim in the README, pinned: a lock leaves no typed secret behind,
-       and `String::clear` — which only moves the length — is not enough. The
-       test reads the buffer the string still owns. */
+       and `String::clear` — which only moves the length — is not enough.
+
+       `App` still owns these three after the lock, so this reads a live
+       buffer rather than a freed one. That is why this test has always
+       worked where the form's did not: zeroize empties the String but keeps
+       the capacity, and nothing else is writing to it. */
     #[test]
     fn locking_zeroizes_the_typed_secrets() {
         let mut app = open_app();
-        app.unlock_password = "master-secret".into();
-        app.unlock_confirm = "master-secret".into();
-        app.unlock_keyfile = "/keys/secret.key".into();
-        /* Capacity survives a zeroize, so the bytes behind the empty string
-           are readable from the test — which is the point. */
-        let (ptr, cap) = (app.unlock_password.as_ptr(), app.unlock_password.capacity());
+        app.unlock_password = "master-secret".repeat(4);
+        app.unlock_confirm = "master-secret".repeat(4);
+        app.unlock_keyfile = "/keys/secret.key".repeat(4);
+        let boxes = [
+            (app.unlock_password.as_ptr(), app.unlock_password.capacity(), "password"),
+            (app.unlock_confirm.as_ptr(), app.unlock_confirm.capacity(), "confirm"),
+            (app.unlock_keyfile.as_ptr(), app.unlock_keyfile.capacity(), "key file"),
+        ];
         app.lock_now();
+        for (ptr, cap, which) in boxes {
+            // SAFETY: still owned by `app`, and the capacity outlives zeroize.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+            assert!(bytes.iter().all(|b| *b == 0), "the {which} box survived the lock");
+        }
         assert!(app.unlock_password.is_empty());
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
-        assert!(
-            !bytes.windows(6).any(|w| w == b"secret"),
-            "the master password survived the lock in freed memory"
-        );
         assert!(app.unlock_confirm.is_empty());
         assert!(app.unlock_keyfile.is_empty());
     }
 
-    /* Same promise for the form: cancelling or saving drops it, and a
-       generated password must not be left intact in the allocation. */
+    /* Same promise for the three modal boxes that hold typed secrets: the
+       entry form, the change-password prompt and the add-a-field prompt.
+
+       Checked on a live value through `wipe`, which is what each `Drop`
+       calls. This test used to drop the form and read the freed allocation,
+       and passed with `zeroize` swapped for `clear` — the allocator writes
+       its own bookkeeping into a freed block, so the secret is usually gone
+       from it whether or not anybody wiped it. The lock test above reads a
+       buffer `App` still owns, which is why that one has always worked. */
     #[test]
-    fn dropping_the_form_zeroizes_what_was_typed_in_it() {
+    fn the_modal_boxes_zeroize_what_was_typed_in_them() {
+        /* Every byte of the capacity, not a substring search: on a live
+           buffer there is nothing else writing to it, so the strict check is
+           available and says more. */
+        fn wiped(ptr: *const u8, cap: usize) -> bool {
+            // SAFETY: the value is still owned and still allocated; `wipe`
+            // empties the String but keeps its capacity.
+            unsafe { std::slice::from_raw_parts(ptr, cap) }.iter().all(|b| *b == 0)
+        }
+
         let mut app = open_app();
         app.step_group(true);
         app.open_add_form();
         let form = app.form.as_mut().unwrap();
-        form.password = "generated-secret".into();
-        form.otp = "JBSWY3DPEHPK3PXP".into();
-        form.notes = "recovery-secret".into();
-        let (ptr, cap) = (form.password.as_ptr(), form.password.capacity());
-        app.cancel_form();
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
-        assert!(
-            !bytes.windows(6).any(|w| w == b"secret"),
-            "a cancelled form left its password in memory"
-        );
+        form.password = "generated-secret".repeat(4);
+        form.otp = "JBSWY3DPEHPK3PXP".repeat(4);
+        form.notes = "recovery-secret".repeat(4);
+        let boxes = [
+            (form.password.as_ptr(), form.password.capacity(), "password"),
+            (form.otp.as_ptr(), form.otp.capacity(), "otp"),
+            (form.notes.as_ptr(), form.notes.capacity(), "notes"),
+        ];
+        form.wipe();
+        for (ptr, cap, which) in boxes {
+            assert!(wiped(ptr, cap), "the form's {which} box survived");
+        }
+        // The title is not a secret and is left alone.
+        assert!(app.form.as_ref().unwrap().title.is_empty());
+
+        /* The change-password prompt holds the only plaintext copy of what is
+           about to become the key to everything. */
+        let mut rekey = Rekey::default();
+        rekey.password = "new-master-secret".repeat(4);
+        rekey.confirm = "new-master-secret".repeat(4);
+        let boxes = [
+            (rekey.password.as_ptr(), rekey.password.capacity(), "new"),
+            (rekey.confirm.as_ptr(), rekey.confirm.capacity(), "again"),
+        ];
+        rekey.wipe();
+        for (ptr, cap, which) in boxes {
+            assert!(wiped(ptr, cap), "the rekey prompt's {which} box survived");
+        }
+
+        // And the add-a-field box, where the value is a recovery code as
+        // often as not.
+        let mut add = AddField::default();
+        add.value = "8888-4444-2222".repeat(4);
+        let (ptr, cap) = (add.value.as_ptr(), add.value.capacity());
+        add.wipe();
+        assert!(wiped(ptr, cap), "the add-field value survived");
     }
 
     /* `^t` walks the shipped palettes and writes the landing spot back, so a
