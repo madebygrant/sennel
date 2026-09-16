@@ -87,6 +87,9 @@ pub enum VaultError {
     WrongPassword,
     /// `save` before any `open` or `save_as` gave the vault a path and a key.
     Unsaved,
+    /// The file changed under us since it was opened or last written, so a
+    /// save would overwrite whatever wrote it. Refused until forced.
+    ChangedOnDisk,
     Io(String),
     Db(String),
 }
@@ -102,6 +105,7 @@ impl std::fmt::Display for VaultError {
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
             VaultError::WrongPassword => write!(f, "wrong password or key file"),
             VaultError::Unsaved => write!(f, "nothing to save to yet"),
+            VaultError::ChangedOnDisk => write!(f, "the file changed on disk"),
             VaultError::Io(e) => write!(f, "file error: {e}"),
             VaultError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -118,6 +122,32 @@ pub struct Vault {
        It is held by value: `save` consumes a clone of it. */
     key: Option<DatabaseKey>,
     path: Option<PathBuf>,
+    /* What the file looked like when this vault last agreed with it. Sennel
+       autosaves after every change, so without this a KeePassXC edit (or a
+       sync client, or a second Sennel) is overwritten by the next keypress
+       here, atomically and without a word. */
+    stamp: Option<Stamp>,
+}
+
+/// Enough of a file's identity to notice somebody else wrote it. Modified
+/// time and length rather than a hash: a vault is megabytes and this runs on
+/// every save.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// `None` when the file is not there to stamp — which is itself a change
+    /// worth refusing on, since something removed it.
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Stamp {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
 }
 
 impl Vault {
@@ -130,6 +160,7 @@ impl Vault {
             db,
             key: None,
             path: None,
+            stamp: None,
         }
     }
 
@@ -185,15 +216,54 @@ impl Vault {
             db,
             key: Some(key),
             path: Some(path.to_path_buf()),
+            stamp: Stamp::of(path),
         })
     }
 
     /// Write to the path this vault was opened from or last saved to.
-    pub fn save(&self) -> Result<(), VaultError> {
-        let (Some(path), Some(key)) = (self.path.as_ref(), self.key.as_ref()) else {
+    /// Refuses with `ChangedOnDisk` when somebody else wrote the file since;
+    /// `save_over` is the deliberate way past that.
+    pub fn save(&mut self) -> Result<(), VaultError> {
+        if self.changed_on_disk() {
+            return Err(VaultError::ChangedOnDisk);
+        }
+        self.write_and_stamp()
+    }
+
+    /// Save regardless of what is on disk now. The caller has told the user
+    /// what they are about to lose and been told to go ahead.
+    pub fn save_over(&mut self) -> Result<(), VaultError> {
+        self.write_and_stamp()
+    }
+
+    /// Whether the file has moved on without us. False for a vault with no
+    /// path (nothing to disagree with) and for one never yet written.
+    pub fn changed_on_disk(&self) -> bool {
+        let (Some(path), Some(stamp)) = (self.path.as_ref(), self.stamp) else {
+            return false;
+        };
+        Stamp::of(path) != Some(stamp)
+    }
+
+    /// Re-read the file this vault came from, using the key already held —
+    /// the way out of a conflict that keeps the other program's work.
+    pub fn reload(&mut self) -> Result<(), VaultError> {
+        let (Some(path), Some(key)) = (self.path.clone(), self.key.clone()) else {
             return Err(VaultError::Unsaved);
         };
-        Self::write_file(&self.db, key, path)
+        let mut file = std::fs::File::open(&path).map_err(|e| VaultError::Io(e.to_string()))?;
+        self.db = Database::open(&mut file, key).map_err(Self::map_db_error)?;
+        self.stamp = Stamp::of(&path);
+        Ok(())
+    }
+
+    fn write_and_stamp(&mut self) -> Result<(), VaultError> {
+        let (Some(path), Some(key)) = (self.path.clone(), self.key.as_ref()) else {
+            return Err(VaultError::Unsaved);
+        };
+        Self::write_file(&self.db, key, &path)?;
+        self.stamp = Stamp::of(&path);
+        Ok(())
     }
 
     /// First save of a new vault: records the path and key, so later `save`
@@ -208,6 +278,7 @@ impl Vault {
         Self::write_file(&self.db, &key, path)?;
         self.key = Some(key);
         self.path = Some(path.to_path_buf());
+        self.stamp = Stamp::of(path);
         Ok(())
     }
 
@@ -776,8 +847,56 @@ mod tests {
 
     #[test]
     fn save_before_any_path_is_an_error_not_a_panic() {
-        let v = vault();
+        let mut v = vault();
         assert_eq!(v.save(), Err(VaultError::Unsaved));
+    }
+
+    /* Sennel autosaves after every change, so a vault that has moved on under
+       us must refuse the write: the alternative is this session silently
+       winning every race with KeePassXC or a sync client. */
+    #[test]
+    fn a_file_written_by_somebody_else_refuses_the_next_save() {
+        let file = Temp::new("conflict");
+        let mut ours = vault();
+        ours.save_as(&file.path, "pw", None).unwrap();
+
+        // Another program writes the same vault, from its own copy.
+        let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        /* Stamps are seconds-granular on some filesystems, so make the length
+           differ too — which a real edit does anyway. */
+        theirs.save().unwrap();
+
+        assert!(ours.changed_on_disk(), "the change went unnoticed");
+        assert_eq!(ours.save(), Err(VaultError::ChangedOnDisk));
+        // Their entry is still there: the refusal actually protected it.
+        let reread = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(reread.entry_count(), 1);
+
+        // Deliberately overriding writes ours and re-agrees with the file.
+        ours.save_over().unwrap();
+        assert!(!ours.changed_on_disk());
+        assert_eq!(Vault::open(&file.path, "pw", None).unwrap().entry_count(), 0);
+    }
+
+    /* The other way out of a conflict: take theirs, using the key already
+       held so nobody retypes a master password to resolve a race. */
+    #[test]
+    fn reload_takes_the_copy_on_disk() {
+        let file = Temp::new("reload");
+        let mut ours = vault();
+        ours.save_as(&file.path, "pw", None).unwrap();
+        let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs.save().unwrap();
+
+        assert_eq!(ours.entry_count(), 0);
+        ours.reload().unwrap();
+        assert_eq!(ours.entry_count(), 1, "reload did not take theirs");
+        assert!(!ours.changed_on_disk(), "reload left the stamp stale");
+        ours.save().unwrap();
     }
 
     #[test]

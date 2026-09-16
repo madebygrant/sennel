@@ -313,6 +313,10 @@ pub struct App {
     pub unlock_reveal: bool,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
     dirty: bool,
+    /// A save was refused because the file changed underneath. The next `^s`
+    /// means "overwrite theirs", which is a thing to do on purpose or not at
+    /// all.
+    overwrite_armed: bool,
     /* The modal entry editor. None when closed; the browser hands its keys
        over while Some, the way the unlock screen does. */
     pub form: Option<Form>,
@@ -383,6 +387,7 @@ impl App {
             caret: 0,
             unlock_reveal: false,
             dirty: false,
+            overwrite_armed: false,
             form: None,
             group_prompt: None,
             cut: None,
@@ -421,6 +426,17 @@ impl App {
            arrived and left inside one blink and only the last was ever
            readable. */
         if self.flash_until.is_some() {
+            /* Except a failure, which takes the header now: a save that was
+               refused must not wait behind "copied username" for six
+               seconds, and by then the user has pressed three more keys. */
+            if level == Level::Error {
+                self.show_flash(text, level);
+                return;
+            }
+            // Pressing the same key twice should not queue the same sentence.
+            if self.waiting.iter().any(|(queued, _)| queued == &text) {
+                return;
+            }
             if self.waiting.len() < QUEUE {
                 self.waiting.push_back((text, level));
             }
@@ -662,6 +678,7 @@ impl App {
         self.unlock_reveal = false;
         self.caret = 0;
         self.dirty = false;
+        self.overwrite_armed = false;
         /* Nothing that was about the open vault may outlive it: a form, a
            kept filter or an armed cut would come back over the next one. */
         self.detail = false;
@@ -1457,7 +1474,7 @@ impl App {
        An in-memory vault (tests) has no path: it cannot save, so it stays
        dirty rather than silently discarding. */
     pub fn persist(&mut self) {
-        let Some(vault) = &self.vault else {
+        let Some(vault) = &mut self.vault else {
             return;
         };
         if vault.path().is_none() {
@@ -1465,11 +1482,78 @@ impl App {
             return;
         }
         match vault.save() {
-            Ok(()) => self.dirty = false,
+            Ok(()) => {
+                self.dirty = false;
+                self.overwrite_armed = false;
+            }
+            /* Somebody else wrote the file. Refusing is the whole point: the
+               alternative is this session quietly winning every race. */
+            Err(VaultError::ChangedOnDisk) => {
+                self.dirty = true;
+                self.overwrite_armed = true;
+                self.error("vault changed on disk  ·  ^s overwrites  ·  ^r reloads theirs");
+            }
             Err(e) => {
                 self.dirty = true;
                 self.error(format!("save failed  ·  {e} · kept in memory"));
             }
+        }
+    }
+
+    /* `^s`: save now. Sennel autosaves, so this is mostly the key everyone
+       presses out of habit — but it is also the retry after a failed save and
+       the second press that overrides a file somebody else changed. */
+    pub fn save_now(&mut self) {
+        let Some(vault) = &mut self.vault else {
+            self.say("no vault open to save");
+            return;
+        };
+        if vault.path().is_none() {
+            self.warn("this vault has no file yet  ·  nothing to save to");
+            return;
+        }
+        if self.overwrite_armed {
+            match vault.save_over() {
+                Ok(()) => {
+                    self.dirty = false;
+                    self.overwrite_armed = false;
+                    self.warn("saved over the copy on disk");
+                }
+                Err(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
+            }
+            return;
+        }
+        if !self.dirty {
+            self.say("nothing to save  ·  every change saves itself");
+            return;
+        }
+        self.persist();
+        if !self.dirty {
+            self.say("saved");
+        }
+    }
+
+    /* `^r` on a conflict: take the copy on disk and lose the changes this
+       session could not write. Only offered while a save has actually been
+       refused, so it can never be a surprise reload of somebody's work. */
+    pub fn reload_vault(&mut self) {
+        if !self.overwrite_armed {
+            self.say("nothing to reload  ·  the file has not changed");
+            return;
+        }
+        let Some(vault) = &mut self.vault else {
+            return;
+        };
+        match vault.reload() {
+            Ok(()) => {
+                self.dirty = false;
+                self.overwrite_armed = false;
+                self.undo = None;
+                self.cut = None;
+                self.snap();
+                self.warn("reloaded from disk  ·  your unsaved changes are gone");
+            }
+            Err(e) => self.error(format!("cannot reload  ·  {e}")),
         }
     }
 
@@ -1551,7 +1635,7 @@ impl App {
                     self.entry_cursor = None;
                     self.snap();
                     self.persist();
-                    self.say("entry deleted");
+                    self.say("entry deleted  ·  u restores it");
                 }
                 Err(e) => {
                     self.undo = None;
@@ -2893,6 +2977,55 @@ mod tests {
         // A second press has nothing to lock and says so rather than nothing.
         app.lock_now();
         assert!(app.stage.contains("already locked"), "{}", app.stage);
+    }
+
+    /* The app side of the same race: an autosave that is refused leaves the
+       work in memory, says so in RED, and arms `^s` as the deliberate
+       override. Nothing is lost without somebody choosing to lose it. */
+    #[test]
+    fn a_changed_file_arms_the_override_instead_of_overwriting() {
+        let (mut app, tmp) = locked_app_with_db("pw");
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        assert!(app.vault.is_some(), "{}", app.stage);
+
+        // Somebody else writes the file while this session holds it.
+        let mut theirs = Vault::open(&tmp.0, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs.save().unwrap();
+
+        app.open_add_form();
+        app.form.as_mut().unwrap().title = "mine".into();
+        app.submit_form();
+        assert!(app.working(), "the refused save left no unsaved work");
+        assert!(app.overwrite_armed, "the override was not armed");
+        assert_eq!(app.level, Level::Error);
+        assert!(app.stage.contains("changed on disk"), "{}", app.stage);
+        // Theirs survived.
+        assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
+
+        // `^s` is the deliberate override, and it says what it did.
+        app.save_now();
+        assert!(!app.working(), "the override did not save");
+        assert!(!app.overwrite_armed);
+        assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
+    }
+
+    /* `^s` with nothing to do says so rather than going quiet — it is the key
+       every hand presses, so it must always answer. */
+    #[test]
+    fn save_now_answers_even_when_there_is_nothing_to_save() {
+        let (mut app, _tmp) = locked_app_with_db("pw");
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        app.expire_now();
+        app.save_now();
+        assert!(app.stage.contains("nothing to save"), "{}", app.stage);
+
+        let mut app = App::new();
+        app.save_now();
+        assert!(app.stage.contains("no vault open"), "{}", app.stage);
     }
 
     /* ---- Wave 5.1: entry form ---- */

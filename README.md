@@ -51,6 +51,8 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `o`             | entries order: stored, name, recent, updated  |
 | `u`             | undo the last change (one level)              |
 | `^l`            | lock now (same wipe as the idle auto-lock)    |
+| `^s`            | save now (every change already autosaves)     |
+| `^r`            | reload from disk (offered when the file changed under you) |
 | `^s`            | generate a password into the edit form        |
 | `h` `?`         | keys overlay                                  |
 | `esc`           | unwind: drop cut, clear filter, then report   |
@@ -71,7 +73,11 @@ has a visible home in the `h` overlay.
   the in-memory secrets are zeroized. `^l` does the same thing on demand.
 - **Zeroized in memory.** Password fields, retained database keys, and undo snapshots all wipe on
   drop. The status bar names what was copied, never the secret.
-- **No recycle bin.** Deletes are confirmed, then permanent. `u` undoes the most recent change.
+- **No recycle bin.** Deletes are confirmed; `u` restores the entry you just deleted (one level).
+  Group deletes are refused while the group holds anything, and are not undoable.
+- **Never overwrites somebody else's write.** Sennel remembers what the file looked like when it
+  opened it. If KeePassXC, a sync client or a second Sennel writes the vault in the meantime, the
+  next autosave is refused rather than silently winning: `^s` overwrites theirs, `^r` takes theirs.
 - **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
   paths — never notes — and printed inventories carry titles only.
 

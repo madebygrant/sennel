@@ -758,32 +758,60 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
    unrecognised key must not be an accidental yes. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
     let _ = app;
-    let (title, question, yes) = match what {
+    /* The title is the part that truncates, never the sentence: a question
+       that renders as "…this cannot be" has lost the only word doing any
+       work. Sized against the terminal first, then the title fills the rest. */
+    let room = (frame.area().width as usize).saturating_sub(4);
+    let (title, question, yes, after) = match what {
         Confirm::Quit => (
             "quit?",
             " unsaved changes would be lost".to_string(),
             Span::styled(" q  quit", Style::new().fg(GOLD)),
+            "",
         ),
         /* The title travels in the confirm so the answer is about a row the
            user can see. A name is user-chosen text, never a secret. */
         Confirm::DeleteEntry { title, .. } => (
             "delete?",
-            format!(" delete entry “{title}”?  this cannot be undone"),
+            delete_question("entry", title, room),
             Span::styled(" y  delete", Style::new().fg(RED)),
+            /* `u` really does bring an entry back (Undo::Delete), so the box
+               says so: a warning that overstates the risk is a warning people
+               learn to click through. */
+            "u restores it",
         ),
         Confirm::DeleteGroup { title, .. } => (
             "delete?",
-            format!(" delete group “{title}”?  this cannot be undone"),
+            delete_question("group", title, room),
             Span::styled(" y  delete", Style::new().fg(RED)),
+            // Groups have no undo slot, and delete refuses unless empty.
+            "this cannot be undone",
         ),
     };
     let lines = vec![
         Line::from(Span::styled(question, Style::new().fg(CREAM))),
         Line::default(),
-        Line::from(vec![yes, dim("     esc  keep going")]),
+        Line::from(vec![
+            yes,
+            dim("     esc  keep going"),
+            dim(if after.is_empty() {
+                String::new()
+            } else {
+                format!("     {after}")
+            }),
+        ]),
     ];
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, title, lines, width);
+}
+
+/// The question with the name cut to fit, so the verb always renders.
+fn delete_question(kind: &str, title: &str, room: usize) -> String {
+    let fixed = cols(&format!(" delete {kind} “”?"));
+    format!(
+        " delete {kind} “{}”?",
+        truncate(title, room.saturating_sub(fixed).max(8))
+    )
 }
 
 /* The modal entry editor: five labelled boxes, the caret block only in the
@@ -1240,7 +1268,40 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("delete entry"), "{joined}");
         assert!(joined.contains("checking"), "{joined}");
-        assert!(joined.contains("cannot be undone"), "{joined}");
+        // Entries come back with `u`, and the box says so rather than
+        // claiming a permanence the undo slot contradicts.
+        assert!(joined.contains("u restores it"), "{joined}");
+        assert!(!joined.contains("cannot be undone"), "{joined}");
+    }
+
+    /* A long title must not push the verb off the popup: the name truncates,
+       the question never does. */
+    #[test]
+    fn the_delete_confirm_keeps_its_verb_at_eighty_columns() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault
+            .create_entry(
+                &root,
+                "Commonwealth Bank — personal everyday account and card, plus the offset mortgage redraw",
+                "octo",
+                "p",
+                "",
+                "",
+            )
+            .unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.ask_delete_entry();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("delete entry"), "{joined}");
+        assert!(joined.contains("y  delete"), "{joined}");
+        assert!(joined.contains("…”?"), "the title did not truncate: {joined}");
     }
 
     /* The group prompt: one box, named for what it does, prefilled with the

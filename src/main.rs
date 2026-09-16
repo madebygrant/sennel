@@ -246,6 +246,10 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* Locking on demand used to mean quitting: `^l` drops the vault and
            leaves the session on the password prompt. */
         KeyCode::Char('l') if ctrl => app.lock_now(),
+        /* Sennel autosaves, so `^s` is mostly the key a hand presses anyway —
+           and it is the retry when a save failed or was refused. */
+        KeyCode::Char('s') if ctrl => app.save_now(),
+        KeyCode::Char('r') if ctrl => app.reload_vault(),
         KeyCode::Char('g') => app.jump_pane(false),
         KeyCode::Char('G') => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
