@@ -7,6 +7,8 @@ save path underneath.
 **Method:** Source read end to end, frames rendered off-screen at 24×8, 46×18, 80×14, 80×24, 100×24
 and 120×30, and the key handler probed directly for the paths a frame cannot show.
 **Focus:** Everything, from a one-line fix to a feature worth arguing about.
+**Status:** All of A, B and C landed in seven waves (commits `a302e39`…`850ed81`). The paragraphs
+below are kept as written — they are the record of what was wrong and why it mattered.
 
 ## Overall
 

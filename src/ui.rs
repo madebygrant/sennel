@@ -737,9 +737,6 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
             lines.push(row(label, truncate(note, value), faint));
         }
     }
-    for (label, stamp) in stamps(&entry) {
-        lines.push(row(label, stamp, faint));
-    }
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
         lines.push(Line::from(vec![
             dim(format!(" {:<LABEL$}", "totp")),
@@ -751,6 +748,9 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
         lines.push(Line::from(dim(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), value), faint));
+    for (label, stamp) in stamps(&entry) {
+        lines.push(row(label, stamp, faint));
+    }
     lines.push(Line::default());
     lines.push(Line::from(vec![
         Span::styled(" y p U", Style::new().fg(GOLD)),
@@ -2325,6 +2325,7 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 
 }
