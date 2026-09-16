@@ -2,12 +2,12 @@
 
 [Back to the README](../README.md)
 
-Two ways in, both drawing from the OS (`getrandom`) and both refusing to produce something the
+Three ways in, all drawing from the OS (`getrandom`) and all refusing to produce something the
 settings could not honour.
 
 - `P` in the browser opens the generator on its own, with no entry to store the result in.
 - `^s` inside the add or edit form writes one straight into the password box.
-- `sennel gen` does it without the TUI at all, and is the only subcommand that opens no vault.
+- `sennel gen` does it without the TUI at all, and opens no vault to do it.
 
 ## `P`, the standalone generator
 

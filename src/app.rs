@@ -544,7 +544,7 @@ impl Library {
     }
 }
 
-/* The standalone generator behind `^g`: a password with no entry to hang it
+/* The standalone generator behind `P`: a password with no entry to hang it
    on — a router, a disk, a site Sennel is not storing. Touches no vault. */
 pub struct Mint {
     pub password: String,
@@ -690,7 +690,7 @@ pub struct App {
     pub browse: Option<Browse>,
     /// The vault library, while it is open. `^v` on the unlock screen.
     pub library: Option<Library>,
-    /// The standalone generator, while it is open. `^g` in the browser.
+    /// The standalone generator, while it is open. `P` in the browser.
     pub mint: Option<Mint>,
     /// Every vault opened before, newest first, from the config.
     pub recent: Vec<PathBuf>,

@@ -100,9 +100,9 @@ pub enum Command {
         to: Option<String>,
     },
 
-    /* No vault, no needle, no unlock: the only subcommand that never opens a
-       database. The flags override the `[generator]` table for this one run,
-       so a site that forbids symbols is `--no-symbols` and not an edit. */
+    /* No vault, no needle, no unlock: it generates rather than reads. The
+       flags override the `[generator]` table for this one run, so a site that
+       forbids symbols is `--no-symbols` and not an edit. */
     /// Generate a password without storing it anywhere
     Gen {
         /// How many characters. Defaults to the configured length.
@@ -255,7 +255,7 @@ pub struct FileGenerator {
     pub ambiguous: Option<bool>,
 }
 
-/* One bound for the config file, `sennel gen --length` and the `^g` popup,
+/* One bound for the config file, `sennel gen --length` and the `P` popup,
    so it cannot drift between them. Four is the floor because all four
    classes have to fit. */
 pub const LENGTH_RANGE: (usize, usize) = (4, 256);
