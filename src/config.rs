@@ -18,6 +18,13 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub db: Option<String>,
 
+    /* Every subcommand opens a vault, and a vault with a key file could not
+       be opened by any of them — they all passed `None`. Global, so `get`,
+       `audit`, `import`, `convert` and `--list` all take it. */
+    /// Key file the database also needs, if it has one
+    #[arg(long, value_name = "PATH", global = true)]
+    pub key_file: Option<String>,
+
     /// Seconds a copied secret stays on the clipboard before it is cleared
     #[arg(long, value_name = "SECS")]
     pub clipboard_timeout: Option<u64>,
@@ -84,6 +91,13 @@ pub enum Command {
         /// Print to a terminal anyway, scrollback and all
         #[arg(long, requires = "stdout")]
         force: bool,
+    },
+
+        /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
+    Convert {
+        /// Where to write it. Defaults to `<name>-kdbx4.kdbx` beside the original
+        #[arg(long, value_name = "PATH")]
+        to: Option<String>,
     },
 
     /// Print a shell completion script: bash, zsh, fish or elvish
@@ -285,6 +299,8 @@ pub struct Config {
     pub theme_overridden: bool,
     /// The subcommand, when one was given. `None` opens the TUI.
     pub command: Option<Command>,
+    /// The key file every path opens with, when the vault has one.
+    pub key_file: Option<PathBuf>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -333,6 +349,7 @@ impl Config {
             theme_warnings: warnings,
             theme_overridden: overridden,
             command: cli.command,
+            key_file: cli.key_file.map(|k| expand(&k)),
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,

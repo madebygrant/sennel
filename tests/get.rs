@@ -254,3 +254,67 @@ fn every_entry_point_disables_core_dumps() {
         "this machine will not raise the core limit, so the test above proves nothing · got {limit:?}"
     );
 }
+
+/* `sennel convert` end to end. A conversion is the one operation where a bug
+   costs the whole vault, so what is pinned is mostly what it refuses to do:
+   touch the original, overwrite anything, or claim success without reading
+   back what it wrote. */
+#[test]
+fn convert_writes_a_kdbx4_copy_and_leaves_the_original_alone() {
+    let dir = std::env::temp_dir().join(format!("sennel-conv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.kdbx");
+    let new = dir.join("old-kdbx4.kdbx");
+    std::fs::remove_file(&new).ok();
+    std::fs::copy(FIXTURE, &old).unwrap();
+    let before = std::fs::read(&old).unwrap();
+
+    let (out, err, code) = run(&["convert", "--db", old.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("KDBX 3.1 → KDBX 4"), "{out}");
+    assert!(out.contains("verified"), "{out}");
+    // The original is byte-for-byte what it was.
+    assert_eq!(std::fs::read(&old).unwrap(), before, "the original was written to");
+
+    /* The copy opens with the same password — no second prompt means the
+       key came from the original, and this is the proof. */
+    let (out, err, code) = run(&["get", "xc entry", "-p", "--stdout", "--db", new.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "sennel-entry-pw\n");
+
+    // And it is writable, which was the entire point.
+    let (out, _, _) = run(&["--check", "--db", new.to_str().unwrap()]);
+    assert!(out.contains("writable"), "{out}");
+
+    // Owner-only, like every other file Sennel writes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&new).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    /* Run again and it refuses rather than overwriting the copy it made. */
+    let (_, err, code) = run(&["convert", "--db", old.to_str().unwrap()]);
+    assert_eq!(code, 1, "a second convert overwrote the first");
+    assert!(err.contains("already there"), "{err}");
+
+    // A vault that is already KDBX 4 has nothing to convert, and says so.
+    let (_, err, code) = run(&["convert", "--db", new.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("nothing to convert"), "{err}");
+
+    // And it will not be aimed at the original.
+    let (_, err, code) = run(&[
+        "convert",
+        "--db",
+        old.to_str().unwrap(),
+        "--to",
+        old.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("over the original"), "{err}");
+
+    std::fs::remove_file(&old).ok();
+    std::fs::remove_file(&new).ok();
+}

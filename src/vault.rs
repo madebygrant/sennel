@@ -659,6 +659,40 @@ impl Vault {
         Ok(())
     }
 
+    /* The same database written somewhere else under the key it was opened
+       with. No password argument, and none asked for: the key is already held
+       from the unlock, so a copy keeps the original's password and key file
+       without anybody typing either again — and without a second plaintext
+       copy of a master password existing to be typed wrongly.
+
+       `self` is left pointing at the original: this writes a file, it does
+       not move the session onto it. */
+    pub fn save_copy(&self, path: &Path) -> Result<(), VaultError> {
+        let Some(key) = self.key.as_ref() else {
+            return Err(VaultError::Unsaved);
+        };
+        Self::write_file(&self.db, key, path)
+    }
+
+    /* A file written by `save_copy`, opened again with the same key. The
+       password was wiped the moment the original opened, so this is the only
+       way to prove the copy decrypts with the credentials its owner will
+       actually use — which is the whole question a conversion has to answer
+       before it says it worked. */
+    pub fn open_copy(&self, path: &Path) -> Result<Vault, VaultError> {
+        let Some(key) = self.key.clone() else {
+            return Err(VaultError::Unsaved);
+        };
+        let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
+        let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
+        Ok(Vault {
+            db,
+            key: Some(key),
+            path: Some(path.to_path_buf()),
+            stamp: Stamp::of(path),
+        })
+    }
+
     /// First save of a new vault: records the path and key, so later `save`
     /// calls need neither.
     pub fn save_as(
@@ -672,6 +706,30 @@ impl Vault {
         self.key = Some(key);
         self.path = Some(path.to_path_buf());
         self.stamp = Stamp::of(path);
+        Ok(())
+    }
+
+    /* KDBX 3.1 and older open here and can never be written: the format's
+       writer does not exist in the keepass crate (its kdbx3 module is
+       parse-only, and `save` refuses anything below KDBX 4), and writing one
+       would mean a hashed-block-stream framer, a Salsa20 inner stream and a
+       second XML shape for attachments — crypto-adjacent work that belongs
+       upstream, with round-trip fixtures, not in this file.
+
+       So the way out is forward rather than back. KeePassXC has read and
+       written KDBX 4 since 2.0 in 2016, so converting costs no compatibility
+       with the client the file most likely came from.
+
+       Swaps the whole config, not just the version: a KDBX 4 file carrying
+       3.1's Salsa20 inner stream and AES-KDF header would claim a format it
+       is not written in. What comes out is what `Vault::new` would have
+       produced — the same cipher, KDF and compression as every vault Sennel
+       creates. */
+    pub fn convert_to_kdbx4(&mut self) -> Result<(), VaultError> {
+        if self.writable() {
+            return Err(VaultError::Db(format!("{} is already writable", self.format())));
+        }
+        self.db.config = keepass::config::DatabaseConfig::default();
         Ok(())
     }
 
@@ -1402,6 +1460,38 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     out
 }
 
+/* Every entry as one comparable line. What `convert` checks a rewritten file
+   against, so a format change that silently dropped an entry is caught while
+   the original is still there rather than months later.
+
+   Secrets included, because the point is that they survived unchanged; this
+   never leaves the process. Sorted, because entry order is not something a
+   format change promises to keep. The separator is a control character no
+   field can contain, so two entries cannot collide by concatenation. */
+pub fn inventory(vault: &Vault) -> Vec<String> {
+    let mut out: Vec<String> = vault
+        .entry_refs()
+        .iter()
+        .map(|e| {
+            let group = vault
+                .parent_group_of_entry(&e.id())
+                .map(|g| vault.group_path(&g).join("/"))
+                .unwrap_or_default();
+            [
+                group.as_str(),
+                e.title(),
+                e.username(),
+                e.password(),
+                e.url(),
+                e.notes(),
+            ]
+            .join("\u{1}")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// What a needle found, for a caller with no screen to show a list on.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Found {
@@ -1620,6 +1710,86 @@ mod tests {
         v.set_expiry(&soon, Some((chrono::Utc::now() + chrono::Duration::days(30)).naive_utc()))
             .unwrap();
         v.save_as(std::path::Path::new("/tmp/sennel-smoke.kdbx"), "smoke-pw", None).unwrap();
+    }
+
+    /* The two pieces `convert` leans on. A conversion is the one operation
+       where a bug costs the whole vault, so "it worked" has to mean the file
+       was read back and matched — and both halves of that are tested here,
+       where a mismatch can actually be constructed. */
+    #[test]
+    fn a_copy_opens_with_the_original_key_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("sennel-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (home, copy) = (dir.join("home.kdbx"), dir.join("copy.kdbx"));
+        for at in [&home, &copy] {
+            std::fs::remove_file(at).ok();
+        }
+        let mut v = vault();
+        let root = v.root_id();
+        v.create_entry(&root, "mail", "octo", "pw", "", "").unwrap();
+        v.save_as(&home, "master", None).unwrap();
+
+        /* No password argument: the copy carries the key the original was
+           opened with, which is what lets `convert` avoid asking twice. */
+        v.save_copy(&copy).unwrap();
+        let back = v.open_copy(&copy).expect("the copy did not open");
+        assert_eq!(inventory(&back), inventory(&v));
+        // And it really is that password, not merely "some file that parses".
+        assert!(Vault::open(&copy, "master", None).is_ok());
+        assert!(Vault::open(&copy, "wrong", None).is_err());
+
+        /* `open_copy` is a real decrypt, so a file written under a different
+           key is refused rather than waved through. */
+        let other = dir.join("other.kdbx");
+        std::fs::remove_file(&other).ok();
+        let mut stranger = vault();
+        stranger.save_as(&other, "different", None).unwrap();
+        assert!(v.open_copy(&other).is_err(), "a foreign file verified");
+
+        // The original is still where it was, pointing at its own path.
+        assert_eq!(v.path(), Some(home.as_path()));
+        for at in [&home, &copy, &other] {
+            std::fs::remove_file(at).ok();
+        }
+    }
+
+    /* The comparison has to notice a difference, or "verified" means nothing.
+       Every field that goes into a line, one at a time, there and back. */
+    #[test]
+    fn the_inventory_notices_anything_that_changed() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "pw", "http://x", "note").unwrap();
+        let base = inventory(&v);
+        assert_eq!(base.len(), 1);
+        // The same vault twice is the same answer, or a good convert would fail.
+        assert_eq!(inventory(&v), base);
+
+        // (title, user, password, url, notes) — one field off in each.
+        let variants = [
+            ("MAIL", "octo", "pw", "http://x", "note"),
+            ("mail", "other", "pw", "http://x", "note"),
+            ("mail", "octo", "new", "http://x", "note"),
+            ("mail", "octo", "pw", "http://y", "note"),
+            ("mail", "octo", "pw", "http://x", "other"),
+        ];
+        for (title, user, password, url, notes) in variants {
+            v.update_entry(&id, title, user, Some(password), url, notes).unwrap();
+            assert_ne!(inventory(&v), base, "a changed {title}/{user}/{url} went unnoticed");
+            v.update_entry(&id, "mail", "octo", Some("pw"), "http://x", "note").unwrap();
+            assert_eq!(inventory(&v), base, "the revert did not land");
+        }
+
+        // A moved entry counts: the group path is part of the line.
+        let elsewhere = v.create_group(&root, "Elsewhere").unwrap();
+        v.move_entry(&id, &elsewhere).unwrap();
+        assert_ne!(inventory(&v), base, "a moved entry read as unchanged");
+        v.move_entry(&id, &root).unwrap();
+        assert_eq!(inventory(&v), base);
+
+        // And a dropped entry, which is the failure this exists to catch.
+        v.expunge_entry(&id).unwrap();
+        assert!(inventory(&v).is_empty());
     }
 
     /* Sennel writes no history, so the only way to get one in a test is the

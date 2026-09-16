@@ -63,6 +63,10 @@ fn main() -> Result<()> {
         clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
         return Ok(());
     }
+    if let Some(Command::Convert { to }) = &cfg.command {
+        let to = to.clone();
+        return convert(&cfg, to.as_deref());
+    }
     if let Some(Command::Audit { pwned }) = &cfg.command {
         return audit(&cfg, *pwned);
     }
@@ -234,14 +238,7 @@ fn check(cfg: &Config) -> Result<()> {
 /* --list: the vault inventory without the secrets. Counts and entry titles
    only — the point is scripting and inventory, not display. */
 fn list(cfg: &Config) -> Result<()> {
-    let Some(path) = &cfg.db else {
-        anyhow::bail!("no database given · pass --db <file>");
-    };
-    let mut password = ask_password("password: ")?;
-    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
-    // Used once; the key inside the vault is the only copy that lives on.
-    password.zeroize();
-    let vault = opened?;
+    let vault = unlock(cfg)?;
     println!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
@@ -258,18 +255,85 @@ fn list(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/* `sennel convert`: an older KDBX read in, a KDBX 4 written out.
+
+   Never in place, and never over an existing file. A conversion is the one
+   operation where a bug costs the whole vault, so the original is opened and
+   never touched, the new file is created exclusively, and what was written is
+   read back and compared before this says it worked. If the comparison fails
+   the new file is removed, because a half-converted vault sitting next to a
+   good one is the worst of both. */
+fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
+    let Some(from) = cfg.db.clone() else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    /* `<name>-kdbx4.kdbx` beside the original: the same directory, because
+       that is where the user keeps vaults, and a name that says what it is. */
+    let out = match to {
+        Some(path) => config::expand(path),
+        None => {
+            let stem = from
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "vault".to_string());
+            from.with_file_name(format!("{stem}-kdbx4.kdbx"))
+        }
+    };
+    if out == from {
+        anyhow::bail!("that would write over the original · pick another --to");
+    }
+    if out.exists() {
+        anyhow::bail!("{} is already there · move it or pick another --to", out.display());
+    }
+
+    let mut vault = unlock(cfg)?;
+    let was = vault.format();
+    if vault.writable() {
+        anyhow::bail!("{} is already {was} · nothing to convert", from.display());
+    }
+    /* Read before the write, so the comparison below is against what came out
+       of the original rather than against the copy in memory. */
+    let before = vault::inventory(&vault);
+    vault.convert_to_kdbx4().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    /* No second password prompt: the key from the unlock is still held, so
+       the copy carries the original's password and key file exactly. Asking
+       again would be asking for the same secret twice, which is how people
+       end up typing a different one by accident. */
+    vault.save_copy(&out).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    /* Opened again from disk with the same key, and compared field by field.
+       A conversion that silently dropped an entry would otherwise be found
+       months later, by which time the original may be gone. */
+    let fresh = match vault.open_copy(&out) {
+        Ok(fresh) => fresh,
+        Err(e) => {
+            let _ = std::fs::remove_file(&out);
+            return Err(e).context("the converted file could not be reopened · it was removed");
+        }
+    };
+    let after = vault::inventory(&fresh);
+    if before != after {
+        let _ = std::fs::remove_file(&out);
+        anyhow::bail!(
+            "the converted file does not match the original ({} entries in, {} out) · it was removed",
+            before.len(),
+            after.len()
+        );
+    }
+
+    println!("{} → {}", from.display(), out.display());
+    println!("{was} → {} · {} entries, verified", fresh.format(), after.len());
+    println!("the original is untouched · open the new file in KeePassXC before you replace it");
+    Ok(())
+}
+
 /* `sennel audit`: the same findings the TUI's `!` shows, printed. The network
    check lives out here rather than behind that key because a blocking http
    request inside a frame loop is how a TUI stops redrawing, and because an
    audit that reaches the internet should be something you typed. */
 fn audit(cfg: &Config, pwned: bool) -> Result<()> {
-    let Some(path) = &cfg.db else {
-        anyhow::bail!("no database given · pass --db <file>");
-    };
-    let mut password = ask_password("password: ")?;
-    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
-    password.zeroize();
-    let vault = opened?;
+    let vault = unlock(cfg)?;
 
     let found = vault::audit(&vault);
     for (id, issue) in &found {
@@ -369,10 +433,7 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
         return Ok(());
     }
 
-    let mut password = ask_password("password: ")?;
-    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
-    password.zeroize();
-    let mut vault = opened?;
+    let mut vault = unlock(cfg)?;
 
     if !vault.writable() {
         anyhow::bail!(
@@ -392,6 +453,31 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
        people forget once the import worked. */
     eprintln!("{file} is still plaintext on disk · delete it");
     Ok(())
+}
+
+/* Every non-interactive path opens the vault the same way: prompt (or read a
+   piped line), read the key file if there is one, open, and wipe both. It was
+   copied into four commands, and all four passed `None` for the key file — so
+   a vault with one could not be reached from the command line at all. */
+fn unlock(cfg: &Config) -> Result<Vault> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let mut key_bytes = match &cfg.key_file {
+        Some(at) => Some(
+            std::fs::read(at).with_context(|| format!("reading key file {}", at.display()))?,
+        ),
+        None => None,
+    };
+    let mut password = ask_password("password: ")?;
+    let opened = Vault::open(path, &password, key_bytes.as_deref())
+        .map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    if let Some(bytes) = key_bytes.as_mut() {
+        // Key material too, and wiped whether or not the open worked.
+        bytes.zeroize();
+    }
+    opened
 }
 
 /* The master password, from a terminal or from a pipe. rpassword needs a tty
@@ -419,9 +505,6 @@ fn ask_password(prompt: &str) -> Result<String> {
    found, 1 for everything else. Ambiguous and not-found are separated because
    a script retrying with a longer needle wants to know which happened. */
 fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -> Result<()> {
-    let Some(path) = &cfg.db else {
-        anyhow::bail!("no database given · pass --db <file>");
-    };
     /* Refused before the password prompt, not after: making somebody type a
        master password and *then* telling them the output has nowhere safe to
        go is the rude order to do this in. */
@@ -430,10 +513,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
             "--stdout into a terminal would leave the secret in your scrollback · pipe it, or --force"
         );
     }
-    let mut password = ask_password("password: ")?;
-    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
-    password.zeroize();
-    let vault = opened?;
+    let vault = unlock(cfg)?;
 
     let mut searcher = search::Searcher::new();
     let id = match vault::resolve(&vault, &mut searcher, needle) {

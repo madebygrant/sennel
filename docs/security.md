@@ -6,8 +6,10 @@ What Sennel protects, and what it does not.
 
 **KDBX4 end to end.** The vault is a real KeePass database. The file is never modified without your
 password being re-keyed. Older KDBX files (3.1 and below) open read-only: Sennel writes KDBX 4 only,
-and says so at unlock rather than at the first failed save. Open one in KeePassXC and save a copy as
-KDBX 4 to edit it here.
+and says so at unlock rather than at the first failed save. `sennel convert` writes a KDBX 4 copy
+beside the original — never in place, never over an existing file, carrying the same password and
+key file, and read back from disk and compared entry by entry before it reports success. See
+[docs/kdbx3.md](kdbx3.md).
 
 **An import leaves a plaintext file behind.** Every export from every password manager is every
 password you own, in the clear, on disk. `sennel import` says so when it finishes. Delete it.

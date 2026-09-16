@@ -24,7 +24,9 @@ same timer, and exits with a code a script can branch on. `--stdout` pipes it in
 to print into a terminal where it would sit in your scrollback. [More](docs/get.md).
 
 **Real KeePass files.** KDBX4 in, KDBX4 out. KeePassXC opens what Sennel writes and Sennel opens
-what KeePassXC writes. No plugins, no homebrew format, no lock-in.
+what KeePassXC writes. No plugins, no homebrew format, no lock-in. Older KDBX 3.1 vaults open
+read-only; `sennel convert` writes a verified KDBX 4 copy beside the original.
+[More](docs/kdbx3.md).
 
 **One key per secret, or one click.** `y` copies the username, `p` the password, `U` the url, `t`
 the one-time code — and clicking that row in the detail view does the same, lighting up `✓ copied`
@@ -98,6 +100,7 @@ keys.
 - [`sennel get`](docs/get.md), the non-interactive path
 - [Importing](docs/import.md) from KeePassXC, Bitwarden or 1Password
 - [Auditing](docs/audit.md), including the breach check
+- [Older KDBX files](docs/kdbx3.md) and `sennel convert`
 - [Keys and the unlock screen](docs/keys.md)
 - [Security](docs/security.md), which is the interesting one: what is wiped, when, and why
 - [Themes](docs/themes.md) and how the colours are measured
