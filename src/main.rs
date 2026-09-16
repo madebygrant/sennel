@@ -49,6 +49,7 @@ fn main() -> Result<()> {
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
+    app.set_order(cfg.sort);
     /* The clipboard with its auto-clear timer, armed once like the lock:
        copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));
@@ -242,6 +243,9 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::PageUp => app.page_pane(false),
         KeyCode::Char('d') if ctrl => app.page_pane(true),
         KeyCode::Char('u') if ctrl => app.page_pane(false),
+        /* Locking on demand used to mean quitting: `^l` drops the vault and
+           leaves the session on the password prompt. */
+        KeyCode::Char('l') if ctrl => app.lock_now(),
         KeyCode::Char('g') => app.jump_pane(false),
         KeyCode::Char('G') => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
@@ -288,6 +292,8 @@ fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('c') if ctrl => app.ask_quit(),
+        // The one key that must work with a secret on screen.
+        KeyCode::Char('l') if ctrl => app.lock_now(),
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_detail(),
         KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') => app.copy_username(),

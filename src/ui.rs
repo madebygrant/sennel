@@ -876,6 +876,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("find", "/", "fuzzy search"),
             ("match", "n N", "next, previous match"),
             ("undo", "u", "one level"),
+            ("lock", "^l", "lock now"),
             ("quit", "q  ^c", ""),
         ]
     };

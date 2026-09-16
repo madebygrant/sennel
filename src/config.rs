@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub lock_timeout: Option<u64>,
 
+    /// Entries order the browser opens in: stored, name, recent or updated
+    #[arg(long, value_name = "ORDER")]
+    pub sort: Option<String>,
+
     /// Check the clipboard backend, the database path and the config, then exit
     #[arg(long)]
     pub check: bool,
@@ -45,6 +49,9 @@ pub struct FileConfig {
     pub db: Option<String>,
     pub clipboard_timeout: Option<u64>,
     pub lock_timeout: Option<u64>,
+    /// stored · name · recent · updated. `o` cycles from here rather than
+    /// from the built-in default, so the order survives a restart.
+    pub sort: Option<String>,
 }
 
 impl FileConfig {
@@ -86,6 +93,9 @@ pub struct Config {
     pub db: Option<PathBuf>,
     pub clipboard_timeout: u64,
     pub lock_timeout: u64,
+    /// Where the entries pane starts. Session-only before this: pressing `o`
+    /// four times after every restart is a setting nobody asked to retype.
+    pub sort: crate::app::SortOrder,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -124,6 +134,7 @@ impl Config {
                 .lock_timeout
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
+            sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             config_file,
             check: cli.check,
             list: cli.list,
@@ -145,6 +156,17 @@ impl Config {
             self.clipboard_timeout, self.lock_timeout
         )
     }
+}
+
+/* A name Sennel does not know is a startup error, not a silent fallback to
+   stored order: an ignored setting looks like a setting that does nothing. */
+fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
+    let Some(name) = name else {
+        return Ok(crate::app::SortOrder::default());
+    };
+    crate::app::SortOrder::from_name(name).ok_or_else(|| {
+        anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated")
+    })
 }
 
 pub fn expand(path: &str) -> PathBuf {
@@ -246,6 +268,32 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("parsing"), "{err}");
+    }
+
+    /* The entries order survives a restart, and a name Sennel does not know
+       stops startup rather than quietly meaning "stored". */
+    #[test]
+    fn sort_comes_from_the_file_and_refuses_nonsense() {
+        let cfg = build("sort = \"updated\"\n", &[]);
+        assert_eq!(cfg.sort, crate::app::SortOrder::Updated);
+        let cfg = build("sort = \"updated\"\n", &["--sort", "name"]);
+        assert_eq!(cfg.sort, crate::app::SortOrder::Name, "the flag lost to the file");
+        let cfg = build("", &[]);
+        assert_eq!(cfg.sort, crate::app::SortOrder::Stored);
+
+        let mut file = temp("sort");
+        writeln!(file.handle, "sort = \"alphabetical\"").unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ])
+        .unwrap();
+        let err = match Config::build(cli) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an unknown sort name started the session"),
+        };
+        assert!(err.contains("unknown sort"), "{err}");
     }
 
     #[test]

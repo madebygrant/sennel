@@ -166,6 +166,18 @@ impl SortOrder {
         }
     }
 
+    /// The config file's name for it, and back. One spelling in `config.toml`
+    /// and in the flash would be nicer, but "by name" is prose, not a key.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "stored" => Some(SortOrder::Stored),
+            "name" => Some(SortOrder::Name),
+            "recent" => Some(SortOrder::Recent),
+            "updated" => Some(SortOrder::Updated),
+            _ => None,
+        }
+    }
+
     /// What the status flash calls it.
     pub fn label(self) -> &'static str {
         match self {
@@ -622,6 +634,25 @@ impl App {
             return;
         }
         let secs = self.lock_after.map_or(0, |d| d.as_secs());
+        self.lock();
+        self.warn(format!("locked after {secs} seconds idle"));
+    }
+
+    /* `^l`: the same wipe on purpose rather than on a timer. Locking used to
+       mean quitting, which is a strange thing to have to do to step away. */
+    pub fn lock_now(&mut self) {
+        if self.vault.is_none() {
+            self.say("already locked");
+            return;
+        }
+        self.lock();
+        self.say("locked  ·  password to return");
+    }
+
+    /* Drop the vault and go back behind the password prompt. Dropping is the
+       wipe: secrets live in `ProtectedString` and the retained key, both of
+       which zeroize on drop, so nothing may be copied out first. */
+    fn lock(&mut self) {
         self.vault = None;
         self.group_cursor = None;
         self.entry_cursor = None;
@@ -631,14 +662,20 @@ impl App {
         self.unlock_reveal = false;
         self.caret = 0;
         self.dirty = false;
-        // A popup over the lock screen would outlive the vault it is about.
+        /* Nothing that was about the open vault may outlive it: a form, a
+           kept filter or an armed cut would come back over the next one. */
         self.detail = false;
         self.show_password = false;
+        self.form = None;
+        self.group_prompt = None;
+        self.confirm = None;
+        self.cut = None;
+        self.undo = None;
+        self.search = None;
+        self.band = false;
         self.view = View::Unlock;
-        // Or the lock screen's header keeps the open vault's "ready".
         self.resting = "locked".into();
         self.refresh_db_state();
-        self.warn(format!("locked after {secs} seconds idle"));
     }
 
     /// What the terminal window is called. The vault while one is open, so a
@@ -648,6 +685,12 @@ impl App {
             (Some(_), Some(path)) => format!("Sennel — {}", vault_name(path)),
             _ => "Sennel".to_string(),
         }
+    }
+
+    /// The order the entries pane opens in, from the config. `o` still cycles
+    /// from here: the file says where the session starts, not where it stays.
+    pub fn set_order(&mut self, order: SortOrder) {
+        self.order = order;
     }
 
     /// Where the vault file lives. Set once at startup from the config; the
@@ -2823,6 +2866,33 @@ mod tests {
         assert_eq!(app.level, Level::Error, "{}", app.stage);
         app.expire_now();
         assert_eq!(app.level, Level::Info, "the level outlived the flash");
+    }
+
+    /* `^l` is the idle lock on purpose: the same wipe, and nothing about the
+       open vault — a form, a kept filter, an armed cut — survives it. */
+    #[test]
+    fn lock_now_wipes_what_the_idle_lock_wipes() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_search();
+        app.search_insert('a');
+        app.cut_selected();
+        app.open_add_form();
+        app.lock_now();
+        assert_eq!(app.view, View::Unlock);
+        assert!(app.vault.is_none(), "the secrets survived ^l");
+        assert!(app.form.is_none(), "the form outlived the vault");
+        assert!(app.cut.is_none(), "the cut outlived the vault");
+        assert!(app.search.is_none(), "the filter outlived the vault");
+        /* Earlier flashes are still queued, so drain them: the header lands
+           on the resting stage, which the lock has taken back to "locked". */
+        for _ in 0..QUEUE + 2 {
+            app.expire_now();
+        }
+        assert_eq!(app.stage, "locked");
+        // A second press has nothing to lock and says so rather than nothing.
+        app.lock_now();
+        assert!(app.stage.contains("already locked"), "{}", app.stage);
     }
 
     /* ---- Wave 5.1: entry form ---- */

@@ -50,6 +50,7 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `←` `→`         | collapse / expand group (entries pane: hop)   |
 | `o`             | entries order: stored, name, recent, updated  |
 | `u`             | undo the last change (one level)              |
+| `^l`            | lock now (same wipe as the idle auto-lock)    |
 | `^s`            | generate a password into the edit form        |
 | `h` `?`         | keys overlay                                  |
 | `esc`           | unwind: drop cut, clear filter, then report   |
@@ -67,7 +68,7 @@ has a visible home in the `h` overlay.
 - **Clipboard auto-clear.** Copies are wiped after a configurable interval (default 15s). A second
   copy re-arms the timer instead of being wiped early; overwriting happens even if Sennel exits.
 - **Idle auto-lock.** After the idle timeout (default 300s, `0` disables) the vault is locked and
-  the in-memory secrets are zeroized.
+  the in-memory secrets are zeroized. `^l` does the same thing on demand.
 - **Zeroized in memory.** Password fields, retained database keys, and undo snapshots all wipe on
   drop. The status bar names what was copied, never the secret.
 - **No recycle bin.** Deletes are confirmed, then permanent. `u` undoes the most recent change.
@@ -82,6 +83,7 @@ has a visible home in the `h` overlay.
 db = "~/vaults/main.kdbx"      # default database
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
+sort = "name"                  # entries order at startup: stored, name, recent, updated
 ```
 
 ## Building
