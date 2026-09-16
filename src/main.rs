@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::SetTitle;
 use zeroize::Zeroize;
@@ -40,6 +43,12 @@ fn main() -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    /* Wheel and click, unless the config turned them off: capture takes the
+       terminal's own selection with it, which some people would rather keep
+       (shift usually still selects). */
+    if cfg.mouse {
+        let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    }
     let mut app = App::new();
     /* Which file the lock screen is for, resolved once at startup. The draw
        loop must not stat: `refresh_db_state` runs here and after every save,
@@ -55,6 +64,9 @@ fn main() -> Result<()> {
        copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));
     let result = run(&mut terminal, &mut app);
+    if cfg.mouse {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     // The vault's name must not outlive the session in the window title.
     let _ = execute!(std::io::stdout(), SetTitle(""));
@@ -79,6 +91,28 @@ fn check(cfg: &Config) -> Result<()> {
             .as_deref()
             .map_or("(none · pass a file)".to_string(), |p| p.display().to_string())
     );
+    /* What a bug report needs and what a first run wants to know: not only
+       which file was configured, but whether it is there and writable. A
+       vault Sennel cannot write is a vault that autosaves into an error. */
+    match cfg.db.as_deref() {
+        Some(path) if path.is_file() => {
+            let writable = std::fs::OpenOptions::new().write(true).open(path).is_ok();
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "vault     found · {size} bytes · {}",
+                if writable { "writable" } else { "READ-ONLY" }
+            );
+        }
+        Some(_) => println!("vault     not there yet · unlocking creates it"),
+        None => println!("vault     (none)"),
+    }
+    println!("sort      {}", cfg.sort.short());
+    println!(
+        "generate  {} chars · {}",
+        cfg.generator.length,
+        cfg.generator.describe()
+    );
+    println!("mouse     {}", if cfg.mouse { "on" } else { "off" });
     println!("clear in  {}s", cfg.clipboard_timeout);
     println!("lock in   {}s (0 = off)", cfg.lock_timeout);
     match arboard::Clipboard::new() {
@@ -136,6 +170,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
            and nothing else on screen moves between messages to re-check it. */
         app.check_idle();
         terminal.draw(|frame| ui::draw(frame, app))?;
+        /* After the frame, not in the key handler: Argon2 blocks this thread,
+           and the screen has to carry "unlocking…" before it does. */
+        if app.unlocking {
+            unlock_now(app);
+            terminal.draw(|frame| ui::draw(frame, app))?;
+        }
         let title = app.window_title();
         if title != titled {
             let _ = execute!(std::io::stdout(), SetTitle(&title));
@@ -143,14 +183,40 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
         }
         app.tick = app.tick.wrapping_add(1);
 
-        if event::poll(Duration::from_millis(120))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            handle_key(app, key.code, key.modifiers);
+        if event::poll(Duration::from_millis(120))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    handle_key(app, key.code, key.modifiers);
+                }
+                Event::Mouse(mouse) => handle_mouse(app, mouse),
+                _ => {}
+            }
         }
     }
     Ok(())
+}
+
+/* Wheel scrolls the pane under the pointer, click selects a row and hands
+   that pane the keys. Nothing here is the only way to do anything — the mouse
+   is a convenience over a keyboard app, so it stays out of the popups, where
+   a stray click would answer a question. */
+fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    if app.view != app::View::Browser
+        || app.confirm.is_some()
+        || app.form.is_some()
+        || app.group_prompt.is_some()
+        || app.detail
+        || app.show_help
+    {
+        return;
+    }
+    app.touch();
+    match mouse.kind {
+        MouseEventKind::ScrollDown => app.wheel(mouse.column, mouse.row, true),
+        MouseEventKind::ScrollUp => app.wheel(mouse.column, mouse.row, false),
+        MouseEventKind::Down(MouseButton::Left) => app.click(mouse.column, mouse.row),
+        _ => {}
+    }
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -269,6 +335,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('y') => app.copy_username(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
+        KeyCode::Char('t') => app.copy_totp(),
         /* Case carries meaning: `a` adds, `A` names a group (wave 5), so
            the edit keys stay lowercase-shifted apart on purpose. */
         KeyCode::Char('a') => app.open_add_form(),
@@ -329,6 +396,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('y') => app.copy_username(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
+        KeyCode::Char('t') => app.copy_totp(),
         KeyCode::Char('e') => {
             app.close_detail();
             app.open_edit_form();
@@ -365,6 +433,7 @@ fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('p') if ctrl => app.step_entry(false),
         KeyCode::Char('u') if ctrl => app.search_clear(),
         KeyCode::Char('w') if ctrl => app.search_kill_word(),
+        KeyCode::Char('g') if ctrl => app.toggle_search_scope(),
         KeyCode::Left if !ctrl => app.search_move(false),
         KeyCode::Right if !ctrl => app.search_move(true),
         KeyCode::Home if !ctrl => app.search_end(false),
@@ -474,7 +543,8 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter if app.unlock_field == crate::app::UnlockField::File => {
             app.accept_file_box()
         }
-        KeyCode::Enter => unlock_now(app),
+        // Drawn once as "unlocking…" before the derivation takes the thread.
+        KeyCode::Enter => app.begin_unlock(),
         KeyCode::Char(c) if !ctrl => app.unlock_insert(c),
         _ => {}
     }
@@ -720,8 +790,14 @@ mod tests {
     fn enter_without_a_database_names_the_flag() {
         let mut app = App::new();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        /* Enter arms the unlock and the loop performs it after one frame, so
+           the screen can say "unlocking…" before Argon2 takes the thread. */
+        assert!(app.unlocking, "enter did not arm the unlock");
+        assert_eq!(app.stage, "unlocking…");
+        unlock_now(&mut app);
         assert_eq!(app.view, crate::app::View::Unlock, "unlocked without a file");
         assert!(app.stage.contains("--db"), "{}", app.stage);
+        assert!(!app.unlocking, "the busy state outlived the attempt");
     }
 
     fn open_browser() -> App {

@@ -71,6 +71,23 @@ impl Searcher {
         self.matcher.fuzzy_match(hay, needle)
     }
 
+    /// Which characters of `text` the needle matched, as char indices. The
+    /// entries pane bolds them: a list that is merely sorted by relevance
+    /// makes the reader find the reason themselves.
+    pub fn indices(&mut self, needle: &str, text: &str) -> Vec<u32> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let pattern = Pattern::parse(needle, CaseMatching::Smart, Normalization::Smart);
+        let mut chars = Vec::new();
+        let hay = Utf32Str::new(text, &mut chars);
+        let mut out = Vec::new();
+        pattern.indices(hay, &mut self.matcher, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Whole-vault convenience: rank one entry's haystack. Pattern (not raw
     /// fuzzy_match) so multi-word needles like "git octo" require both atoms,
     /// and Smart casing/normalisation come along for free. Pattern scores

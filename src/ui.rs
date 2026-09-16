@@ -196,6 +196,8 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
             head(frame, app, entries, Head::Entries, heads),
             head(frame, app, detail, Head::Detail, heads),
         );
+        app.group_area = groups;
+        app.entry_area = entries;
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
         draw_detail(frame, app, detail);
@@ -210,6 +212,8 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
            of the two, so a page never overshoots whichever pane is live. */
         app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
         app.wide = false;
+        app.group_area = groups;
+        app.entry_area = entries;
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
     }
@@ -268,7 +272,12 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
             let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
             if searching {
                 let (shown, total) = (app.entry_matches(), app.entry_total());
-                format!(" whole vault · {shown} of {total}")
+                let scope = if app.search_global {
+                    "whole vault".to_string()
+                } else {
+                    app.here()
+                };
+                format!(" {scope} · {shown} of {total}")
             } else {
                 let n = app.entry_rows().len();
                 let plural = if n == 1 { "entry" } else { "entries" };
@@ -496,9 +505,29 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0);
     let live = app.active_pane == Pane::Entries;
     let width = list_width(area, rows.len());
+    /* Which characters the needle matched, per row. Computed before the item
+       loop because the searcher and the vault are both behind `app`, and the
+       loop already borrows it. */
+    let hits: Vec<Vec<u32>> = if searching {
+        let needle = app.search.clone().unwrap_or_default();
+        rows.iter()
+            .map(|id| {
+                let title = app
+                    .vault
+                    .as_ref()
+                    .and_then(|v| v.get_entry(id))
+                    .map(|e| EntryExt::title(&e).to_string())
+                    .unwrap_or_default();
+                app.searcher.indices(&needle, &title)
+            })
+            .collect()
+    } else {
+        vec![Vec::new(); rows.len()]
+    };
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|id| {
+        .enumerate()
+        .map(|(n, id)| {
             let selected = Some(*id) == app.entry_cursor;
             let (title, user, group) = app
                 .vault
@@ -526,10 +555,8 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 if searching { &group } else { "" },
             );
             let mark = mark(selected, live);
-            let mut spans = vec![
-                mark,
-                Span::styled(format!(" {name}"), row_style(selected)),
-            ];
+            let mut spans = vec![mark, Span::raw(" ")];
+            spans.extend(highlight(&name, &hits[n], row_style(selected)));
             if !user.is_empty() {
                 spans.push(dim(format!("  {user}")));
             }
@@ -612,6 +639,19 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             faint,
         ));
     }
+    /* A one-time code is the field people reach for most and the one Sennel
+       could not show at all: an entry with `otp` looked exactly like an entry
+       without one, and the answer was to pick up a phone. */
+    if let Some((code, left)) = crate::vault::totp_now(&entry) {
+        lines.push(Line::from(vec![
+            dim(format!(" {:<LABEL$}", "totp")),
+            Span::styled(code, Style::new().fg(TEAL)),
+            dim(format!("  {left}s")),
+        ]));
+    }
+    for extra in crate::vault::extras(&entry) {
+        lines.push(Line::from(dim(format!(" {:<LABEL$}{extra}", ""))));
+    }
     lines.push(row("group", truncate(&app.here(), width.saturating_sub(LABEL + 1)), faint));
     for (label, value) in stamps(&entry) {
         lines.push(row(label, value, faint));
@@ -624,7 +664,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         Style::new().fg(RULE),
     )));
     lines.push(Line::from(dim(truncate(
-        " y p U copy · * reveal · e edit · enter opens",
+        " y p U copy · t totp · * reveal · e edit",
         width,
     ))));
     lines.truncate(inner.height as usize);
@@ -699,6 +739,16 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     }
     for (label, stamp) in stamps(&entry) {
         lines.push(row(label, stamp, faint));
+    }
+    if let Some((code, left)) = crate::vault::totp_now(&entry) {
+        lines.push(Line::from(vec![
+            dim(format!(" {:<LABEL$}", "totp")),
+            Span::styled(code, Style::new().fg(TEAL)),
+            dim(format!("  {left}s · t copies")),
+        ]));
+    }
+    for extra in crate::vault::extras(&entry) {
+        lines.push(Line::from(dim(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), value), faint));
     lines.push(Line::default());
@@ -955,7 +1005,11 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(head.to_string(), Style::new().fg(CREAM)),
         Span::styled("█", Style::new().fg(GOLD)),
         Span::styled(tail.to_string(), Style::new().fg(CREAM)),
-        dim("  enter keep · esc clear"),
+        dim(if app.search_global {
+            "  enter keep · esc clear · ^g this group"
+        } else {
+            "  enter keep · esc clear · ^g whole vault"
+        }),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1194,14 +1248,14 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("ends", "g G", "top, bottom of the pane"),
             ("panes", "Tab", "groups ↔ entries"),
             ("open", "enter", "open group, open entry"),
-            ("copy", "y p U", "username, password, url"),
+            ("copy", "y p U t", "username, password, url, one-time code"),
             ("reveal", "*", "show the password"),
             ("edit", "a e D", "add, edit, delete entry"),
             ("groups", "A E D", "add, rename, delete group"),
             ("cut", "X V", "cut, paste"),
             ("fold", "← →", "collapse, expand · ← hops from entries"),
             ("order", "o", "entries: name, recent, updated"),
-            ("find", "/", "fuzzy search"),
+            ("find", "/", "fuzzy search · ^g narrows it to this group"),
             ("match", "n N", "next, previous match"),
             ("undo", "u", "one level"),
             ("save", "^s  ^r", "save now · reload the file on disk"),
@@ -1292,6 +1346,32 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
         GroupPromptKind::Rename(_) => "rename group",
     };
     popup(frame, title, lines, width);
+}
+
+/* The matched characters of a row, in TEAL and bold against the rest: a list
+   sorted by relevance still leaves the reader working out why each row is
+   there. Indices are char positions into the untruncated title, so anything
+   past the cut simply does not match a span. */
+fn highlight(text: &str, hits: &[u32], base: Style) -> Vec<Span<'static>> {
+    if hits.is_empty() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let lit = Style::new().fg(TEAL).add_modifier(Modifier::BOLD);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_lit = false;
+    for (at, c) in text.chars().enumerate() {
+        let on = hits.contains(&(at as u32));
+        if on != run_lit && !run.is_empty() {
+            out.push(Span::styled(std::mem::take(&mut run), if run_lit { lit } else { base }));
+        }
+        run_lit = on;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        out.push(Span::styled(run, if run_lit { lit } else { base }));
+    }
+    out
 }
 
 /* The row under the cursor is what the next key acts on, so its name is bold
@@ -2128,6 +2208,62 @@ mod tests {
         assert!(joined.contains("e"), "{joined}");
         assert!(joined.contains("j k"), "{joined}");
         assert!(joined.contains("group"), "{joined}");
+    }
+
+    /* A sorted list still leaves the reader working out why each row is
+       there: the matched characters are lit, so the answer is visible. */
+    #[test]
+    fn search_lights_the_characters_it_matched() {
+        use crate::vault::Vault;
+        use ratatui::style::Color;
+        let backend = TestBackend::new(100, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.open_search();
+        for ch in "chk".chars() {
+            app.search_insert(ch);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let lit: String = (0..buf.area.width)
+            .flat_map(|x| (0..buf.area.height).map(move |y| (x, y)))
+            .filter(|(x, y)| buf[(*x, *y)].fg == Color::Rgb(96, 178, 158))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        /* c, h and k of "checking" are lit; the marker is teal too, so the
+           assertion is about the letters being in there. */
+        for c in ['c', 'h', 'k'] {
+            assert!(lit.contains(c), "{c} was not lit: {lit:?}");
+        }
+    }
+
+    /* The scope is a choice, and the screen says which one is in force. */
+    #[test]
+    fn the_band_names_the_scope_it_is_searching() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(100, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banking").unwrap();
+        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
+        vault.create_entry(&root, "loose", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.open_search();
+        app.search_insert('c');
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("whole vault"), "not global");
+        app.toggle_search_scope();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("Root/Banking · 1 of"), "{joined}");
+        assert!(joined.contains("^g whole vault"), "{joined}");
     }
 
     /* Enter keeps the filter and hands the keys back, so the band stops being

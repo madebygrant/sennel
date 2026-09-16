@@ -21,7 +21,9 @@ unicode-width = "0.2"
 # keepass (not keepass-rs): keepass-rs 0.2 cannot decrypt KeePassXC files
 # (CBC length / header HMAC errors on correct passwords); the keepass crate
 # opens them and is maintained. save_kdbx4 is what lets us write vaults back.
-keepass = { version = "0.13", features = ["save_kdbx4"] }
+# totp: KeePassXC writes `otp` on entries, and an entry whose code Sennel
+# cannot show is an entry the user has to open another app for.
+keepass = { version = "0.13", features = ["save_kdbx4", "totp"] }
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

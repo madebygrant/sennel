@@ -53,6 +53,9 @@ pub struct FileConfig {
     /// from the built-in default, so the order survives a restart.
     pub sort: Option<String>,
     pub generator: Option<FileGenerator>,
+    /// Wheel and click. On by default; off gives the terminal its own
+    /// selection back.
+    pub mouse: Option<bool>,
 }
 
 /// What `^s` produces. Hard-coded before this — 20 characters, no symbols —
@@ -148,6 +151,7 @@ pub struct Config {
     /// four times after every restart is a setting nobody asked to retype.
     pub sort: crate::app::SortOrder,
     pub generator: Generator,
+    pub mouse: bool,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -188,6 +192,7 @@ impl Config {
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             generator: generator(file.generator.as_ref())?,
+            mouse: file.mouse.unwrap_or(true),
             config_file,
             check: cli.check,
             list: cli.list,

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use keepass::db::{Entry, EntryId, GroupId};
+use ratatui::layout::Rect;
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
@@ -307,6 +308,10 @@ pub struct App {
     /// Whether that frame had room for the pane headers, which own the
     /// breadcrumb and the match count when they are drawn.
     pub heads: bool,
+    /* Where the lists were last drawn, so a click can be turned into a row.
+       Only the draw knows this, the same deal as `viewport`. */
+    pub group_area: Rect,
+    pub entry_area: Rect,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
        a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
@@ -318,6 +323,11 @@ pub struct App {
     pub db_path: Option<PathBuf>,
     /// True when the configured file is missing: Enter creates, with a confirm.
     pub unlock_new: bool,
+    /* Enter has been pressed and the key derivation has not started yet. KDBX4
+       unlocks run Argon2 on this thread, which freezes the frame for a second
+       or more; the loop draws once with this set so the screen says what is
+       happening rather than appearing to have died. */
+    pub unlocking: bool,
     pub unlock_field: UnlockField,
     pub unlock_password: String,
     pub unlock_keyfile: String,
@@ -358,6 +368,10 @@ pub struct App {
     pub band: bool,
     /// Char index into the search band, same rule as every other caret.
     pub search_caret: usize,
+    /* Whether a live needle searches the whole vault or only the group the
+       cursor is in. Whole-vault is right most of the time — it is why people
+       search — but it happens silently, and `^g` makes it a choice. */
+    pub search_global: bool,
     /// Ranks the current needle against every entry's haystack, reusing its
     /// scratch buffers. Lives here so the band and `entry_rows` share one.
     pub searcher: crate::search::Searcher,
@@ -395,10 +409,13 @@ impl App {
             detail: false,
             wide: false,
             heads: false,
+            group_area: Rect::ZERO,
+            entry_area: Rect::ZERO,
             order: SortOrder::default(),
             generator: crate::config::Generator::default(),
             db_path: None,
             unlock_new: false,
+            unlocking: false,
             unlock_field: UnlockField::Password,
             unlock_password: String::new(),
             unlock_keyfile: String::new(),
@@ -415,6 +432,7 @@ impl App {
             undo: None,
             search: None,
             band: false,
+            search_global: true,
             search_caret: 0,
             searcher: crate::search::Searcher::new(),
             lock_after: None,
@@ -620,6 +638,28 @@ impl App {
         self.copy_field("password", |e| e.password().to_string());
     }
 
+    /* `t`: the one-time code, not the secret behind it. Copying the seed
+       would put a permanent credential on the clipboard to save typing six
+       digits. */
+    pub fn copy_totp(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            self.say("no entry here to copy from");
+            return;
+        };
+        let Some((code, left)) = crate::vault::totp_now(&entry) else {
+            self.say("no one-time code on this entry");
+            return;
+        };
+        let Some(board) = &self.board else {
+            self.say("clipboard is not ready  ·  report this as a bug");
+            return;
+        };
+        match board.copy(&code) {
+            Ok(()) => self.say(format!("copied the code  ·  good for {left}s")),
+            Err(e) => self.error(e),
+        }
+    }
+
     pub fn copy_url(&mut self) {
         self.copy_field("url", |e| e.url().to_string());
     }
@@ -796,7 +836,19 @@ impl App {
        database when the file is missing and the confirm matches. The password
        buffer is zeroized on every path out; the retained DatabaseKey inside
        the vault is the only copy that survives, and it zeroizes on drop. */
+    /* Enter on the lock screen: say so, then let the loop draw before the
+       derivation starts. A second of frozen screen with the old stage on it
+       reads as a hang. */
+    pub fn begin_unlock(&mut self) {
+        self.unlocking = true;
+        self.stage = "unlocking…".into();
+        self.level = Level::Info;
+        self.flash_until = None;
+        self.waiting.clear();
+    }
+
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
+        self.unlocking = false;
         /* A path typed in the file box but never confirmed with Enter (Tab
            jumped to the password instead) is still the vault the user means:
            apply it here so unlock reads the path off the box it was typed in
@@ -858,13 +910,19 @@ impl App {
                 self.unlock_field = UnlockField::Password;
                 self.caret = 0;
                 self.unlock_new = false;
+                let created = self.unlock_new;
                 self.open_vault(vault);
                 /* Which vault is open, for the rest of the session: pointing
                    one session at any vault is the app's headline feature, and
                    "ready" made two vaults look identical. */
                 self.resting = vault_name(&path);
-                let plural = if n == 1 { "entry" } else { "entries" };
-                self.say(format!("unlocked {n} {plural}"));
+                if created {
+                    // The first screen of an empty vault, which has nothing to show.
+                    self.say(format!("created {}  ·  a adds your first entry", vault_name(&path)));
+                } else {
+                    let plural = if n == 1 { "entry" } else { "entries" };
+                    self.say(format!("unlocked {n} {plural}"));
+                }
             }
             Err(VaultError::WrongPassword) => {
                 self.unlock_reveal = false;
@@ -1061,10 +1119,11 @@ impl App {
         /* A live needle widens the pane to the whole vault: search is the one
            question whose answer is rarely "the folder I was already in", and
            the count in the status bar already promised the matches existed. */
-        let global = self
-            .search
-            .as_deref()
-            .is_some_and(|n| !n.is_empty());
+        let global = self.search_global
+            && self
+                .search
+                .as_deref()
+                .is_some_and(|n| !n.is_empty());
         let Some(vault) = &self.vault else {
             return Vec::new();
         };
@@ -1151,6 +1210,9 @@ impl App {
     }
 
     pub fn entry_total(&self) -> usize {
+        if !self.search_global {
+            return self.group_cursor.map_or(0, |id| self.entries_in(&id));
+        }
         self.vault.as_ref().map_or(0, Vault::entry_count)
     }
 
@@ -1159,7 +1221,13 @@ impl App {
     /// truth about the filter: the needle still matches rows elsewhere.
     /* &mut self for the same reason as entry_rows: the searcher scores with
        internal scratch state, and the draw path already holds &mut App. */
+    /* Counted over whatever the needle is searching: with `^g` narrowing it
+       to one folder, a whole-vault count is an answer to a question nobody
+       asked. */
     pub fn entry_matches(&mut self) -> usize {
+        if !self.search_global {
+            return self.entry_rows().len();
+        }
         let Some(vault) = &self.vault else {
             return 0;
         };
@@ -1208,6 +1276,46 @@ impl App {
         }
     }
 
+    /* A click lands on a row, not on an index: the pane knows where it drew,
+       and the scroll offset says which row that pixel belongs to. Clicking
+       the pane at all hands it the keys, which is what a click means
+       everywhere else. */
+    pub fn click(&mut self, column: u16, row: u16) {
+        let inside = |area: Rect| {
+            area.width > 0
+                && (area.left()..area.right()).contains(&column)
+                && (area.top()..area.bottom()).contains(&row)
+        };
+        if inside(self.group_area) {
+            let at = self.group_scroll + (row - self.group_area.top()) as usize;
+            self.active_pane = Pane::Groups;
+            let tree = self.group_tree();
+            if let Some((id, _)) = tree.get(at) {
+                self.group_cursor = Some(*id);
+            }
+            self.snap();
+        } else if inside(self.entry_area) {
+            let at = self.entry_scroll + (row - self.entry_area.top()) as usize;
+            self.active_pane = Pane::Entries;
+            let rows = self.entry_rows();
+            if let Some(id) = rows.get(at) {
+                self.entry_cursor = Some(*id);
+            }
+        }
+    }
+
+    /// Wheel over a pane scrolls that pane, whichever one has the keys.
+    pub fn wheel(&mut self, column: u16, row: u16, down: bool) {
+        let over_groups = self.group_area.width > 0
+            && (self.group_area.left()..self.group_area.right()).contains(&column)
+            && (self.group_area.top()..self.group_area.bottom()).contains(&row);
+        if over_groups {
+            self.step_group(down);
+        } else {
+            self.step_entry(down);
+        }
+    }
+
     /* `/` opens the band over whatever was last searched, so refining a
        filter does not mean retyping it. The caret lands at the end: you came
        here to add characters. */
@@ -1216,6 +1324,19 @@ impl App {
         self.search_caret = prior.chars().count();
         self.search = Some(prior);
         self.band = true;
+    }
+
+    /* `^g` in the band: swap between filtering the whole vault and filtering
+       the folder the cursor is in. Both are useful; the point is that the
+       screen says which one is happening. */
+    pub fn toggle_search_scope(&mut self) {
+        self.search_global = !self.search_global;
+        self.snap();
+        if self.search_global {
+            self.say("searching the whole vault");
+        } else {
+            self.say(format!("searching {} only", self.here()));
+        }
     }
 
     /// Enter on the band: keep the filter, hand the keys back to the browser.
@@ -3146,6 +3267,46 @@ pub mod tests {
         let mut app = App::new();
         app.save_now();
         assert!(app.stage.contains("no vault open"), "{}", app.stage);
+    }
+
+    /* A click is a selection and a focus change, the way it is everywhere
+       else; the wheel moves whichever pane it is over. */
+    #[test]
+    fn a_click_selects_the_row_it_landed_on() {
+        let mut app = open_app();
+        app.group_area = ratatui::layout::Rect::new(0, 2, 20, 10);
+        app.entry_area = ratatui::layout::Rect::new(20, 2, 40, 10);
+        // Second row of the tree is Banks, under Root.
+        app.click(3, 3);
+        assert_eq!(app.active_pane, Pane::Groups);
+        assert_eq!(app.group_cursor, Some(app.group_tree()[1].0));
+        // And a click in the entries pane takes the keys with it.
+        app.click(25, 2);
+        assert_eq!(app.active_pane, Pane::Entries);
+        let first = app.entry_rows().first().copied();
+        assert_eq!(app.entry_cursor, first);
+        // The wheel moves the pane under the pointer, not the live one.
+        let entry = app.entry_cursor;
+        app.wheel(3, 5, true);
+        assert_eq!(app.entry_cursor, entry, "the wheel moved the wrong pane");
+    }
+
+    /* `^g` narrows the needle to the cursor's folder and says so. */
+    #[test]
+    fn the_search_scope_can_be_narrowed_to_this_group() {
+        let mut app = open_app();
+        app.step_group(true); // onto Banks
+        app.open_search();
+        app.search_insert('e');
+        let global = app.entry_rows().len();
+        app.toggle_search_scope();
+        assert!(app.stage.contains("only"), "{}", app.stage);
+        assert!(
+            app.entry_rows().len() <= global,
+            "narrowing widened the list"
+        );
+        app.toggle_search_scope();
+        assert_eq!(app.entry_rows().len(), global, "the scope did not come back");
     }
 
     /* ---- Wave 5.1: entry form ---- */

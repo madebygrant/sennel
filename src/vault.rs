@@ -71,6 +71,40 @@ impl_entry_ext!(Entry);
 impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
+/// The one-time code an entry carries, if it carries one. KeePassXC writes
+/// `otp` as a field; without this an entry that has one looks like an entry
+/// that does not, and the user goes back to their phone.
+pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
+    let code = entry.get_otp().ok()?.value_now().ok()?;
+    Some((code.code, code.valid_for.as_secs()))
+}
+
+/// Fields Sennel has no row for — KeePassXC custom strings, and attachments.
+/// Named rather than shown: an entry whose extra fields are invisible reads
+/// as an entry that lost them.
+pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
+    let known = ["Title", "UserName", "Password", "URL", "Notes", "otp"];
+    let mut out = Vec::new();
+    let fields: Vec<&String> = entry
+        .fields
+        .keys()
+        .filter(|k| !known.contains(&k.as_str()))
+        .collect();
+    if !fields.is_empty() {
+        let plural = if fields.len() == 1 { "field" } else { "fields" };
+        out.push(format!("{} more {plural}", fields.len()));
+    }
+    let files = entry.attachments().count();
+    if files > 0 {
+        let plural = if files == 1 { "attachment" } else { "attachments" };
+        out.push(format!("{files} {plural}"));
+    }
+    if !entry.tags.is_empty() {
+        out.push(format!("tags: {}", entry.tags.join(", ")));
+    }
+    out
+}
+
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
 /* Payloads are Strings, not sources: io and database errors stay

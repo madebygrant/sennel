@@ -40,9 +40,10 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `Tab`           | groups pane ↔ entries pane                    |
 | `enter`         | open group / open entry (detail popup)        |
 | `j k` (in the popup) | read the next / previous entry without closing it |
-| `y` `p` `U`     | copy username / password / URL                |
+| `y` `p` `U` `t` | copy username / password / URL / one-time code |
 | `*`             | show/hide the password (needs the detail pane or popup) |
 | `/`             | fuzzy search (`enter` keeps, `esc` clears)    |
+| `^g` (in search) | narrow the needle to this group, or widen it again |
 | `n` `N`         | next / previous match                         |
 | `↑ ↓` (in search) | move through the results while still typing |
 | `a` `e` `D`     | add / edit / delete entry                     |
@@ -83,6 +84,9 @@ has a visible home in the `h` overlay.
 - **Never overwrites somebody else's write.** Sennel remembers what the file looked like when it
   opened it. If KeePassXC, a sync client or a second Sennel writes the vault in the meantime, the
   next autosave is refused rather than silently winning: `^s` overwrites theirs, `^r` takes theirs.
+- **One-time codes, not their seeds.** An entry with an `otp` field shows its current code and the
+  seconds left; `t` copies the six digits. The secret behind it is never copied — that would put a
+  permanent credential on the clipboard to save typing a code.
 - **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
   paths — never notes — and printed inventories carry titles only.
 
@@ -102,6 +106,11 @@ upper = true                   # A–Z
 digits = true                  # 0–9
 symbols = false                # !@#$… — on for sites that demand one
 ambiguous = false              # true allows l 1 I O 0, which read alike
+```
+
+```toml
+mouse = true                   # wheel scrolls, click selects; false gives the
+                               # terminal its own text selection back
 ```
 
 ## Building
