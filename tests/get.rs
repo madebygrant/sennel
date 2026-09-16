@@ -110,3 +110,60 @@ fn list_prints_the_inventory_without_secrets() {
     assert!(out.contains("xc entry"), "{out}");
     assert!(!out.contains("sennel-entry-pw"), "--list printed a password");
 }
+
+/* `sennel import` end to end. Migration is when people try a new password
+   manager, so the thing worth pinning is that a real export from another tool
+   lands, and that a dry run says so without touching the vault or asking for
+   a password. */
+#[test]
+fn import_dry_run_needs_no_password_and_writes_nothing() {
+    let dir = std::env::temp_dir().join(format!("sennel-imp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("bitwarden.csv");
+    std::fs::write(
+        &csv,
+        "folder,favorite,type,name,notes,login_uri,login_username,login_password\n\
+         Work,,login,jira,a note,https://j.example,octo,pw\n\
+         ,,login,mail,,https://m.example,octo,pw2\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sennel"))
+        .args([
+            "import",
+            csv.to_str().unwrap(),
+            "--dry-run",
+            "--db",
+            FIXTURE,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("could not run sennel");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.contains("2 entries would go into"), "{stdout}");
+    assert!(stdout.contains("jira"), "{stdout}");
+    assert!(stdout.contains("(Work)"), "{stdout}");
+    /* Columns nothing was done with are named, so nobody discovers the
+       dropped ones months later. */
+    assert!(stderr.contains("favorite"), "{stderr}");
+
+    // A file with no title column is refused, and the message says what it saw.
+    let bad = dir.join("bad.csv");
+    std::fs::write(&bad, "user,pass\nocto,pw\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sennel"))
+        .args(["import", bad.to_str().unwrap(), "--dry-run", "--db", FIXTURE])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no title column"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_file(&csv).ok();
+    std::fs::remove_file(&bad).ok();
+}
+

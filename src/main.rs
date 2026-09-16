@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod config;
 mod generator;
+mod import;
 mod search;
 mod theme;
 mod ui;
@@ -10,7 +11,7 @@ mod vault;
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -41,6 +42,10 @@ fn main() -> Result<()> {
         let field = Field::of(*user, *password, *url, *otp)?;
         let (needle, stdout, force) = (needle.clone(), *stdout, *force);
         return get(&cfg, &needle, field, stdout, force);
+    }
+    if let Some(Command::Import { file, group, dry_run }) = &cfg.command {
+        let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
+        return import_csv(&cfg, &file, group.as_deref(), dry_run);
     }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
        or in CI, crossterm's raw mode fails with an OS error about a device
@@ -200,6 +205,80 @@ fn list(cfg: &Config) -> Result<()> {
             println!("{}  {}", indent, printable(entry.title()));
         }
     }
+    Ok(())
+}
+
+/* `sennel import`: somebody else's export, into a group of its own.
+
+   Into a new group rather than merged into the tree the file describes:
+   an import is the one operation most likely to be regretted, and one
+   group is one thing to delete when it is. The file's own group column
+   becomes a subgroup, so the shape survives without colonising the vault. */
+fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> Result<()> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let text = std::fs::read_to_string(config::expand(file))
+        .with_context(|| format!("reading {file}"))?;
+    let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+    if found.rows.is_empty() {
+        anyhow::bail!("{file} has a header and no entries");
+    }
+    /* Said before the password prompt: a dry run should not need the vault's
+       password to tell you what is in somebody else's csv. */
+    if !found.ignored.is_empty() {
+        eprintln!(
+            "ignoring {} column(s): {}",
+            found.ignored.len(),
+            found
+                .ignored
+                .iter()
+                .map(|c| printable(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let into = group
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| format!("Imported {}", chrono::Local::now().format("%Y-%m-%d")));
+
+    if dry_run {
+        println!("{} entries would go into {into}:", found.rows.len());
+        for row in found.rows.iter().take(20) {
+            let where_ = match row.group.trim() {
+                "" => String::new(),
+                g => format!("  ({})", printable(g)),
+            };
+            println!("  {}{where_}", printable(&row.title));
+        }
+        if found.rows.len() > 20 {
+            println!("  … and {} more", found.rows.len() - 20);
+        }
+        return Ok(());
+    }
+
+    let mut password = ask_password("password: ")?;
+    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    let mut vault = opened?;
+
+    if !vault.writable() {
+        anyhow::bail!(
+            "{} is {} · Sennel writes KDBX 4 only · save a copy as KDBX 4 from KeePassXC first",
+            path.display(),
+            vault.format()
+        );
+    }
+    let (added, skipped) = import::into_vault(&mut vault, &found.rows, &into)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for note in &skipped {
+        eprintln!("{}", printable(note));
+    }
+    vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("imported {added} entries into {into}");
+    /* The export is still sitting on disk in the clear, which is the part
+       people forget once the import worked. */
+    eprintln!("{file} is still plaintext on disk · delete it");
     Ok(())
 }
 

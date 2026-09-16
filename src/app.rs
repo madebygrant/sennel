@@ -1248,6 +1248,11 @@ impl App {
                 self.caret = 0;
                 self.unlock_new = false;
                 let created = self.unlock_new;
+                /* Said at unlock, not at the first failed autosave: an older
+                   KDBX opens fine and can never be written, and finding that
+                   out ten minutes into editing means ten minutes of work with
+                   nowhere to go. */
+                let read_only = (!vault.writable()).then(|| vault.format());
                 self.open_vault(vault);
                 /* Which vault is open, for the rest of the session: pointing
                    one session at any vault is the app's headline feature, and
@@ -1259,6 +1264,11 @@ impl App {
                 } else {
                     let plural = if n == 1 { "entry" } else { "entries" };
                     self.say(format!("unlocked {n} {plural}"));
+                }
+                if let Some(what) = read_only {
+                    self.error(format!(
+                        "{what}  ·  read-only  ·  Sennel writes KDBX 4 only, so edits cannot be saved"
+                    ));
                 }
                 /* A vault that opened is a vault worth remembering: pointing
                    the session somewhere new used to last exactly as long as

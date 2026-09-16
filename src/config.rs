@@ -85,6 +85,20 @@ pub enum Command {
         #[arg(long, requires = "stdout")]
         force: bool,
     },
+
+    /// Read a CSV export from another password manager into the vault
+    Import {
+        /// The .csv file another tool exported
+        file: String,
+
+        /// Put everything under this group instead of `Imported <date>`
+        #[arg(long, value_name = "NAME")]
+        group: Option<String>,
+
+        /// Say what would be imported and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Which field `get` was asked for.

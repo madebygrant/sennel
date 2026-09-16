@@ -365,6 +365,8 @@ pub enum VaultError {
     EntryNotFound,
     /// `D` on something already in the bin, where the next `D` is the real one.
     AlreadyRecycled,
+    /// Opened fine, cannot be written: an older KDBX than this can save.
+    ReadOnlyFormat(String),
     CannotDeleteRoot,
     CannotMoveRoot,
     WouldCycle,
@@ -385,6 +387,10 @@ impl std::fmt::Display for VaultError {
             VaultError::GroupNotFound => write!(f, "no such group"),
             VaultError::EntryNotFound => write!(f, "no such entry"),
             VaultError::AlreadyRecycled => write!(f, "already in the recycle bin"),
+            VaultError::ReadOnlyFormat(what) => write!(
+                f,
+                "{what} files can be read but not written · save a copy as KDBX 4 from KeePassXC"
+            ),
             VaultError::CannotDeleteRoot => write!(f, "cannot delete the root group"),
             VaultError::CannotMoveRoot => write!(f, "cannot move the root group"),
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
@@ -505,10 +511,33 @@ impl Vault {
         })
     }
 
+    /* KDBX 4 is the only format this can write: the keepass crate refuses
+       KDB, KDB2 and KDB3 on save. Sennel opens all of them happily, so
+       without this a user edits a 3.1 file for ten minutes and meets
+       "Unsupported database version" at the first autosave — with no hint
+       that the file was never writable and no way to get the work out. */
+    pub fn writable(&self) -> bool {
+        matches!(self.db.config.version, keepass::config::DatabaseVersion::KDB4(_))
+    }
+
+    /// What the file is, for the warning and for `--check`.
+    pub fn format(&self) -> String {
+        use keepass::config::DatabaseVersion;
+        match self.db.config.version {
+            DatabaseVersion::KDB4(minor) => format!("KDBX 4.{minor}"),
+            DatabaseVersion::KDB3(minor) => format!("KDBX 3.{minor}"),
+            DatabaseVersion::KDB2(minor) => format!("KDB 2.{minor}"),
+            DatabaseVersion::KDB(minor) => format!("KDB 1.{minor}"),
+        }
+    }
+
     /// Write to the path this vault was opened from or last saved to.
     /// Refuses with `ChangedOnDisk` when somebody else wrote the file since;
     /// `save_over` is the deliberate way past that.
     pub fn save(&mut self) -> Result<(), VaultError> {
+        if !self.writable() {
+            return Err(VaultError::ReadOnlyFormat(self.format()));
+        }
         if self.changed_on_disk() {
             return Err(VaultError::ChangedOnDisk);
         }
@@ -518,6 +547,9 @@ impl Vault {
     /// Save regardless of what is on disk now. The caller has told the user
     /// what they are about to lose and been told to go ahead.
     pub fn save_over(&mut self) -> Result<(), VaultError> {
+        if !self.writable() {
+            return Err(VaultError::ReadOnlyFormat(self.format()));
+        }
         self.write_and_stamp()
     }
 
@@ -1448,6 +1480,50 @@ mod tests {
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    /* The fixture is a KeePassXC-written 3.1 file, which opens and can never
+       be written. Sennel used to find that out at the first autosave, ten
+       minutes into editing, with nowhere for the work to go. */
+    #[test]
+    fn an_older_kdbx_opens_and_says_it_cannot_be_written() {
+        let path = std::path::Path::new("tests/fixtures/keepassxc3.kdbx");
+        let mut v = Vault::open(path, "sennel-fixture", None).expect("the fixture did not open");
+        assert!(!v.writable(), "the fixture is writable now, so this test is wrong");
+        assert_eq!(v.format(), "KDBX 3.1");
+
+        /* Refused by name rather than by the crate's "Unsupported database
+           version", and refused before the file is touched. */
+        let before = std::fs::metadata(path).unwrap().len();
+        let err = v.save().unwrap_err();
+        assert_eq!(err, VaultError::ReadOnlyFormat("KDBX 3.1".into()));
+        assert!(err.to_string().contains("KDBX 4"), "{err}");
+        // `^s`, the deliberate overwrite, is refused for the same reason.
+        assert_eq!(v.save_over().unwrap_err(), VaultError::ReadOnlyFormat("KDBX 3.1".into()));
+        assert_eq!(std::fs::metadata(path).unwrap().len(), before, "the fixture was written");
+
+        // A vault Sennel made is KDBX 4, and writable.
+        let dir = std::env::temp_dir().join(format!("sennel-fmt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("mine.kdbx");
+        let mut fresh = Vault::new();
+        fresh.save_as(&mine, "pw", None).unwrap();
+        let fresh = Vault::open(&mine, "pw", None).unwrap();
+        assert!(fresh.writable());
+        assert!(fresh.format().starts_with("KDBX 4"), "{}", fresh.format());
+        std::fs::remove_file(&mine).ok();
+    }
+
+    /* Not a test: a way to get a real KDBX 4 file to point the binary at,
+       since the only vault in the repo is a 3.1 fixture that cannot be
+       written. `cargo test -- --ignored make_a_vault_to_smoke_test_against`
+       then `sennel import ... --db /tmp/sennel-smoke.kdbx`, password
+       `smoke-pw`. Ignored, so it never runs in a normal pass. */
+    #[test]
+    #[ignore]
+    fn make_a_vault_to_smoke_test_against() {
+        let mut v = Vault::new();
+        v.save_as(std::path::Path::new("/tmp/sennel-smoke.kdbx"), "smoke-pw", None).unwrap();
     }
 
     /* Sennel writes no history, so the only way to get one in a test is the

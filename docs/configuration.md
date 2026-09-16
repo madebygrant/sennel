@@ -37,6 +37,7 @@ sennel --lock-timeout 60   # override lock_timeout · --clipboard-timeout does t
 sennel --check             # print what the app sees: config, paths, clipboard backend
 sennel --list --db v.kdbx  # group and entry inventory, titles only, no secrets
 sennel get <needle> -p     # copy one field and exit · see docs/get.md
+sennel import e.csv        # read another manager's export · see docs/import.md
 sennel --no-config         # ignore the config file and write nothing back
 sennel --config path.toml  # read this file instead of the one in ~/.config/sennel
 ```
