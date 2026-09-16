@@ -187,6 +187,17 @@ const FLASH_MAX: Duration = Duration::from_secs(8);
    nobody is still reading cannot build up behind one flash. */
 const QUEUE: usize = 3;
 
+/// How a flash reads at a glance. Every message rendered the same cream, so
+/// "save failed" and "unlocked 42 entries" were one colour apart from each
+/// other: none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Level {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
 /* Rows of context kept either side of the cursor. `ListState` is built fresh
    every frame, so with no offset of our own ratatui scrolls the least it can
    to make the selection visible: past the first screenful the cursor sits on
@@ -217,6 +228,13 @@ pub fn char_index_to_byte(s: &str, at: usize) -> usize {
         .map_or(s.len(), |(byte, _)| byte)
 }
 
+/// The vault's file name — the whole path would push the header off the row,
+/// and the directory is not what tells two vaults apart.
+fn vault_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
 pub struct App {
     pub tick: usize,
     pub view: View,
@@ -224,9 +242,12 @@ pub struct App {
     pub stage: String,
     /// What the header goes back to once a flash expires.
     resting: String,
+    /// What the flash on screen is: colour, not text, so a failure reads as
+    /// one before it is read.
+    pub level: Level,
     flash_until: Option<Instant>,
     /// Messages that arrived while one was still being read.
-    waiting: VecDeque<String>,
+    waiting: VecDeque<(String, Level)>,
     /// A question the UI raised itself, waiting on y or n.
     pub confirm: Option<Confirm>,
     pub quit: bool,
@@ -323,6 +344,7 @@ impl App {
             show_help: false,
             stage: "locked".into(),
             resting: "locked".into(),
+            level: Level::default(),
             flash_until: None,
             waiting: VecDeque::new(),
             confirm: None,
@@ -366,23 +388,40 @@ impl App {
     /// involved. A key that deliberately does nothing has to report that, or
     /// it reads as a key that is broken.
     pub fn say(&mut self, text: impl Into<String>) {
+        self.flash(text, Level::Info);
+    }
+
+    /// Something to look at but not a failure: a refusal, a mismatch, a
+    /// secret now on screen.
+    pub fn warn(&mut self, text: impl Into<String>) {
+        self.flash(text, Level::Warn);
+    }
+
+    /// Something did not work. Red, because a save that failed must not look
+    /// like a save that worked.
+    pub fn error(&mut self, text: impl Into<String>) {
+        self.flash(text, Level::Error);
+    }
+
+    fn flash(&mut self, text: impl Into<String>, level: Level) {
         let text = text.into();
         /* A second message used to overwrite the first, so two quick copies
            arrived and left inside one blink and only the last was ever
            readable. */
         if self.flash_until.is_some() {
             if self.waiting.len() < QUEUE {
-                self.waiting.push_back(text);
+                self.waiting.push_back((text, level));
             }
             return;
         }
-        self.show_flash(text);
+        self.show_flash(text, level);
     }
 
-    fn show_flash(&mut self, text: String) {
+    fn show_flash(&mut self, text: String, level: Level) {
         let reading = PER_CHAR * text.chars().count() as u32;
         self.flash_until = Some(Instant::now() + (FLASH + reading).min(FLASH_MAX));
         self.stage = text;
+        self.level = level;
     }
 
     /// Called every frame: a flash has to expire on its own, since the thing
@@ -393,8 +432,11 @@ impl App {
         }
         self.flash_until = None;
         match self.waiting.pop_front() {
-            Some(next) => self.show_flash(next),
-            None => self.stage = self.resting.clone(),
+            Some((next, level)) => self.show_flash(next, level),
+            None => {
+                self.stage = self.resting.clone();
+                self.level = Level::Info;
+            }
         }
     }
 
@@ -441,12 +483,12 @@ impl App {
         /* Nowhere to show it is a refusal, not a flip: the flash would
            otherwise announce a reveal the screen has no room for. */
         if !self.wide && !self.detail {
-            self.say("no detail pane this narrow  ·  enter opens the entry");
+            self.warn("no detail pane this narrow  ·  enter opens the entry");
             return;
         }
         self.show_password = !self.show_password;
         if self.show_password {
-            self.say("password shown  ·  * hides it");
+            self.warn("password shown  ·  * hides it");
         }
     }
 
@@ -495,7 +537,7 @@ impl App {
     pub fn toggle_unlock_reveal(&mut self) {
         self.unlock_reveal = !self.unlock_reveal;
         if self.unlock_reveal {
-            self.say("password shown  ·  ^r hides it");
+            self.warn("password shown  ·  ^r hides it");
         }
     }
 
@@ -596,7 +638,16 @@ impl App {
         // Or the lock screen's header keeps the open vault's "ready".
         self.resting = "locked".into();
         self.refresh_db_state();
-        self.say(format!("locked after {secs} seconds idle"));
+        self.warn(format!("locked after {secs} seconds idle"));
+    }
+
+    /// What the terminal window is called. The vault while one is open, so a
+    /// tab strip of terminals says which is which.
+    pub fn window_title(&self) -> String {
+        match (&self.vault, &self.db_path) {
+            (Some(_), Some(path)) => format!("Sennel — {}", vault_name(path)),
+            _ => "Sennel".to_string(),
+        }
     }
 
     /// Where the vault file lives. Set once at startup from the config; the
@@ -645,12 +696,12 @@ impl App {
             }
         }
         let Some(path) = self.db_path.clone() else {
-            self.say("no database configured  ·  run `Sennel --help` for --db");
+            self.warn("no database configured  ·  run `Sennel --help` for --db");
             password.zeroize();
             return;
         };
         if password.is_empty() {
-            self.say("empty password  ·  type one or ^c quits");
+            self.warn("empty password  ·  type one or ^c quits");
             password.zeroize();
             return;
         }
@@ -660,13 +711,13 @@ impl App {
            keepass 0.13's DatabaseKey speaks &str, so refuse raw-byte
            passwords honestly instead of guessing at them. */
         let Ok(pw) = std::str::from_utf8(password) else {
-            self.say("password has bytes that are not text · keepass cannot use it");
+            self.error("password has bytes that are not text · keepass cannot use it");
             password.zeroize();
             return;
         };
         let result = if self.unlock_new {
             if self.unlock_confirm.as_bytes() != password.as_slice() {
-                self.say("passwords differ  ·  retype both fields");
+                self.warn("passwords differ  ·  retype both fields");
                 self.unlock_confirm.clear();
                 self.caret = 0;
                 password.zeroize();
@@ -695,15 +746,18 @@ impl App {
                 self.caret = 0;
                 self.unlock_new = false;
                 self.open_vault(vault);
-                self.resting = "ready".into();
+                /* Which vault is open, for the rest of the session: pointing
+                   one session at any vault is the app's headline feature, and
+                   "ready" made two vaults look identical. */
+                self.resting = vault_name(&path);
                 let plural = if n == 1 { "entry" } else { "entries" };
                 self.say(format!("unlocked {n} {plural}"));
             }
             Err(VaultError::WrongPassword) => {
                 self.unlock_reveal = false;
-                self.say("wrong password or key file  ·  try again");
+                self.error("wrong password or key file  ·  try again");
             }
-            Err(e) => self.say(format!("cannot open {}  ·  {e}", path.display())),
+            Err(e) => self.error(format!("cannot open {}  ·  {e}", path.display())),
         }
     }
 
@@ -1371,7 +1425,7 @@ impl App {
             Ok(()) => self.dirty = false,
             Err(e) => {
                 self.dirty = true;
-                self.say(format!("save failed  ·  {e} · kept in memory"));
+                self.error(format!("save failed  ·  {e} · kept in memory"));
             }
         }
     }
@@ -2733,6 +2787,42 @@ mod tests {
         app.toggle_password();
         app.close_detail();
         assert!(!app.show_password, "the reveal survived the popup");
+    }
+
+    /* An unlocked session says which vault it is in — the header's resting
+       stage and the window title both name the file, since pointing one
+       session at any vault is the whole feature. */
+    #[test]
+    fn an_open_vault_names_itself() {
+        let (mut app, tmp) = locked_app_with_db("pw");
+        let name = tmp.0.file_name().unwrap().to_string_lossy().into_owned();
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        assert!(app.vault.is_some(), "{}", app.stage);
+        assert_eq!(app.window_title(), format!("Sennel — {name}"));
+        app.expire_now();
+        assert_eq!(app.stage, name, "the header did not name the vault");
+        // Locked again, the title and the header drop the vault with it.
+        app.set_lock_timeout(1);
+        app.last_activity = Instant::now() - Duration::from_secs(2);
+        app.check_idle();
+        assert_eq!(app.window_title(), "Sennel");
+        app.expire_now();
+        assert_eq!(app.stage, "locked");
+    }
+
+    /* A failure must not render as a success: the flash carries a level, and
+       it goes back to Info once the message has been read. */
+    #[test]
+    fn failures_flash_at_their_own_level() {
+        let mut app = App::new();
+        app.set_db_path(Some(std::path::PathBuf::from("/nowhere/none.kdbx")));
+        app.unlock_new = false;
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        assert_eq!(app.level, Level::Error, "{}", app.stage);
+        app.expire_now();
+        assert_eq!(app.level, Level::Info, "the level outlived the flash");
     }
 
     /* ---- Wave 5.1: entry form ---- */

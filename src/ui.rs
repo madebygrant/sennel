@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Pane, View, char_index_to_byte};
+use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, Pane, View, char_index_to_byte};
 use crate::vault::EntryExt;
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
 
@@ -114,11 +114,20 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
     );
 }
 
+/* The flash carries its own colour: a failure that renders the same cream as
+   "unlocked 42 entries" is a failure nobody sees. Truncated to the row, since
+   an error message is the longest thing the header ever holds. */
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let ink = match app.level {
+        Level::Info => CREAM,
+        Level::Warn => AMBER,
+        Level::Error => RED,
+    };
+    let room = (area.width as usize).saturating_sub(cols(" Sennel  ·  "));
     let spans = vec![
         Span::styled(" Sennel", Style::new().fg(GOLD)),
         dim("  ·  "),
-        Span::styled(app.stage.clone(), Style::new().fg(CREAM)),
+        Span::styled(truncate(&app.stage, room), Style::new().fg(ink)),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -607,46 +616,76 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     popup(frame, title, rows, width.max(20));
 }
 
+/* Left to right in priority order, with `h keys` right-aligned in whatever
+   is left: the bar used to append until the line clipped, and the first thing
+   off the end was the one hint that always matters. What does not fit is
+   dropped whole — half a count is worse than no count. */
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mut spans = vec![Span::raw(" ")];
-    if app.view == View::Browser {
-        spans.push(Span::styled("y user", Style::new().fg(GOLD)));
-        spans.push(dim("   p pass   U url"));
-        /* Whole-vault health where earworm puts the run summary: the panes
-           show one group at a time, so only the bar says how big the vault
-           is. Skipped while locked: there is no vault to count. */
-        if let Some(vault) = &app.vault {
-            let groups = app.group_tree().len();
-            let entries = vault.entry_count();
-            let g = if groups == 1 { "group" } else { "groups" };
-            let e = if entries == 1 { "entry" } else { "entries" };
-            spans.push(dim(format!("  {groups} {g} · {entries} {e}   ")));
-        }
-        /* While the band filters, the bar counts honestly: N of M tells the
-           truth about matches across the whole vault, not just this pane. */
-        if app.search.is_some() {
-            let shown = app.entry_matches();
-            let total = app.entry_total();
-            spans.push(Span::styled(
-                format!("  {shown} of {total} shown  "),
-                Style::new().fg(GOLD),
-            ));
-        }
-        /* An armed cut is one keypress from moving something: the bar names
-           it so X never reads as a silent no-op. */
-        if let Some(note) = app.cut_note() {
-            spans.push(Span::styled(format!("{note} · V pastes  "), Style::new().fg(AMBER)));
-        }
-        /* The undo slot is the same deal: `u` has a name, so the key can be
-           pressed on purpose rather than as a gamble. */
-        if let Some(note) = app.undo_note() {
-            spans.push(Span::styled(format!("{note}  "), Style::new().fg(AMBER)));
-        }
-    } else {
-        spans.push(dim("   enter unlock   "));
+    const KEYS: &str = "h keys";
+    let width = area.width as usize;
+    if app.view != View::Browser {
+        let spans = vec![
+            Span::raw(" "),
+            dim("  enter unlock"),
+            Span::raw(" ".repeat(pad(width, cols("   enter unlock"), cols(KEYS)))),
+            dim(KEYS),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
     }
-    spans.push(Span::styled("h keys", Style::new().fg(DIM)));
+    /* The copy keys are the bar: they name what the whole app is for, so they
+       are what everything else has to fit around. */
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("y user", Style::new().fg(GOLD)),
+        dim("   p pass   U url"),
+    ];
+    let mut used = cols(" y user   p pass   U url");
+    /* In the order they may be dropped, last first: unsaved work outranks a
+       count, and a count outranks the notes about keys the bar also names. */
+    let mut optional: Vec<Span> = Vec::new();
+    if app.working() {
+        optional.push(Span::styled("  unsaved", Style::new().fg(AMBER)));
+    }
+    if app.search.is_some() {
+        let (shown, total) = (app.entry_matches(), app.entry_total());
+        optional.push(Span::styled(
+            format!("  {shown} of {total} shown"),
+            Style::new().fg(GOLD),
+        ));
+    }
+    if let Some(vault) = &app.vault {
+        let groups = app.group_tree().len();
+        let entries = vault.entry_count();
+        let g = if groups == 1 { "group" } else { "groups" };
+        let e = if entries == 1 { "entry" } else { "entries" };
+        optional.push(dim(format!("  {groups} {g} · {entries} {e}")));
+    }
+    /* An armed cut and a live undo slot are one keypress from mattering, so
+       they are named — but they are also the first things the bar can lose. */
+    if let Some(note) = app.cut_note() {
+        optional.push(Span::styled(format!("  {note} · V pastes"), Style::new().fg(AMBER)));
+    }
+    if let Some(note) = app.undo_note() {
+        optional.push(Span::styled(format!("  {note}"), Style::new().fg(AMBER)));
+    }
+    for span in optional {
+        let want = cols(&span.content);
+        if used + want + cols(KEYS) + 3 > width {
+            continue;
+        }
+        used += want;
+        spans.push(span);
+    }
+    spans.push(Span::raw(" ".repeat(pad(width, used, cols(KEYS)))));
+    spans.push(dim(KEYS));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Gap that right-aligns the trailing hint, and one space when the line is
+/// already full: a bar that clips must not also run its words together.
+fn pad(width: usize, used: usize, tail: usize) -> usize {
+    width.saturating_sub(used + tail + 1).max(1)
 }
 
 /* The filter band, one row between body and status: `/needle█` like earworm.
@@ -1233,6 +1272,38 @@ mod tests {
         assert!(joined.contains("/check"), "{joined}");
         assert!(joined.contains("1 of 2 shown"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
+    }
+
+    /* `h keys` is the one hint that always matters, so it is pinned to the
+       right of the bar and the notes are what drop when 80 columns run out.
+       Unsaved work is named for as long as it is unsaved, not for one flash. */
+    #[test]
+    fn the_status_bar_pins_the_hint_and_names_unsaved_work() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "p", "", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        app.mark_dirty();
+        app.switch_pane();
+        app.cut_selected();
+        app.open_search();
+        for ch in "check".chars() {
+            app.search_insert(ch);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let bar = screen(&t).last().cloned().unwrap_or_default();
+        assert!(bar.ends_with("h keys"), "the hint was pushed off: {bar:?}");
+        assert!(bar.contains("y user"), "{bar:?}");
+        assert!(bar.contains("unsaved"), "{bar:?}");
+        assert!(cols(&bar) <= 80, "the bar overran the row: {bar:?}");
     }
 
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group

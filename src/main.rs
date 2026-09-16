@@ -13,6 +13,8 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::SetTitle;
 use zeroize::Zeroize;
 
 use app::{App, Confirm};
@@ -52,6 +54,8 @@ fn main() -> Result<()> {
     app.set_board(Board::new(cfg.clipboard_timeout));
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
+    // The vault's name must not outlive the session in the window title.
+    let _ = execute!(std::io::stdout(), SetTitle(""));
     result
 }
 
@@ -120,12 +124,21 @@ fn walk_groups(vault: &Vault) -> Vec<(GroupId, usize)> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+    /* The window title follows the vault, so a wall of terminals says which
+       one holds what. Only written when it changes: an escape sequence per
+       frame is a write per frame for nothing. */
+    let mut titled = String::new();
     while !app.quit {
         app.expire_flash();
         /* Once per frame, not per keypress: idleness is the absence of keys,
            and nothing else on screen moves between messages to re-check it. */
         app.check_idle();
         terminal.draw(|frame| ui::draw(frame, app))?;
+        let title = app.window_title();
+        if title != titled {
+            let _ = execute!(std::io::stdout(), SetTitle(&title));
+            titled = title;
+        }
         app.tick = app.tick.wrapping_add(1);
 
         if event::poll(Duration::from_millis(120))?
@@ -430,7 +443,7 @@ fn unlock_now(app: &mut App) {
                check, and the content is key material that never reaches the
                screen. */
             Err(_) => {
-                app.say(format!("cannot read key file {path}"));
+                app.error(format!("cannot read key file {path}"));
                 password.zeroize();
                 return;
             }
