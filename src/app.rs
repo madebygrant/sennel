@@ -354,6 +354,10 @@ pub struct App {
     pub tick: usize,
     pub view: View,
     pub show_help: bool,
+    /* The colours this session draws in. A value on `App`, not a global: a
+       theme that can be switched at runtime cannot live in a OnceLock, and a
+       mutable global would make the per-theme tests race each other. */
+    pub theme: crate::theme::Palette,
     pub stage: String,
     /// What the header goes back to once a flash expires.
     resting: String,
@@ -494,6 +498,7 @@ impl App {
             tick: 0,
             view: View::Unlock,
             show_help: false,
+            theme: crate::theme::WARM,
             stage: "locked".into(),
             resting: "locked".into(),
             level: Level::default(),

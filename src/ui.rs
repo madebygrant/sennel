@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, Pane, View, char_index_to_byte};
 use crate::vault::EntryExt;
-use crate::theme::{self, AMBER, CREAM, DIM, GOLD, RED, RULE, SURFACE, TEAL};
+use crate::theme::{self, Palette};
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
    takes none, so a column padded to a character count steps out of line by
@@ -20,11 +20,43 @@ fn cols(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-fn dim(text: impl Into<String>) -> Span<'static> {
-    Span::styled(text.into(), Style::new().fg(DIM))
+impl Palette {
+    /// Secondary text: usernames, urls, hints — the app's most-used span.
+    fn faint(&self, text: impl Into<String>) -> Span<'static> {
+        Span::styled(text.into(), Style::new().fg(self.muted))
+    }
+
+    /// The cursor colour, for the marks and matches that say "here".
+    fn lit(&self, text: impl Into<String>) -> Span<'static> {
+        Span::styled(text.into(), Style::new().fg(self.cursor))
+    }
+
+    /* The row under the cursor is what the next key acts on, so its name is
+       bold as well as marked. Bold is safe here because every colour is RGB:
+       a terminal cannot swap it for a bright ANSI variant. */
+    fn row(&self, selected: bool) -> Style {
+        let style = Style::new().fg(self.text);
+        if selected {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style
+        }
+    }
+
+    /* Which row, and which pane owns the keys. Two glyphs, not two colours:
+       with NO_COLOR every colour collapses to the terminal's own, and focus
+       was then invisible — both panes drew the same bar. */
+    fn mark(&self, selected: bool, live: bool) -> Span<'static> {
+        match (selected, live) {
+            (true, true) => self.lit("▌"),
+            (true, false) => self.faint("│"),
+            _ => Span::raw(" "),
+        }
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let p = app.theme;
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() {
@@ -42,14 +74,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    draw_background(frame);
+    draw_background(frame, &p);
     draw_header(frame, app, header);
-    draw_rule(frame, rule);
+    draw_rule(frame, rule, &p);
     draw_body(frame, app, body);
     if app.search.is_some() {
         draw_search(frame, app, band_area);
     }
-    draw_rule(frame, footrule);
+    draw_rule(frame, footrule, &p);
     draw_status(frame, app, status);
 
     if app.detail {
@@ -94,7 +126,7 @@ fn recolour(frame: &mut Frame) {
 
 /* Painted before anything else: every other widget styles only its
    foreground, so the gradient survives underneath them. */
-fn draw_background(frame: &mut Frame) {
+fn draw_background(frame: &mut Frame, p: &Palette) {
     if theme::plain() {
         return;
     }
@@ -102,17 +134,17 @@ fn draw_background(frame: &mut Frame) {
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let bg = theme::background(x - area.left(), y - area.top(), area.width, area.height);
+            let bg = p.background(x - area.left(), y - area.top(), area.width, area.height);
             buffer[(x, y)].set_bg(bg);
         }
     }
 }
 
-fn draw_rule(frame: &mut Frame, area: Rect) {
+fn draw_rule(frame: &mut Frame, area: Rect, p: &Palette) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             "─".repeat(area.width as usize),
-            Style::new().fg(RULE),
+            Style::new().fg(p.rule),
         )),
         area,
     );
@@ -122,10 +154,11 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
    "unlocked 42 entries" is a failure nobody sees. Truncated to the row, since
    an error message is the longest thing the header ever holds. */
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let ink = match app.level {
-        Level::Info => CREAM,
-        Level::Warn => AMBER,
-        Level::Error => RED,
+        Level::Info => p.text,
+        Level::Warn => p.warn,
+        Level::Error => p.error,
     };
     /* Colour is not the only channel: under NO_COLOR every shade collapses to
        the terminal's own, and a failure then read exactly like a success. */
@@ -150,11 +183,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(lead + cols(&stage) + cols(&tail) + 1)
         .max(1);
     let spans = vec![
-        Span::styled(" Sennel", Style::new().fg(GOLD)),
-        dim("  ·  "),
+        Span::styled(" Sennel", Style::new().fg(p.accent)),
+        p.faint("  ·  "),
         Span::styled(stage, Style::new().fg(ink)),
         Span::raw(" ".repeat(gap)),
-        dim(tail),
+        p.faint(tail),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -175,8 +208,9 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 const PREVIEW_FROM: u16 = 100;
 
 fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     if app.vault.is_none() {
-        frame.render_widget(Paragraph::new(Line::from(dim(" no vault open"))), area);
+        frame.render_widget(Paragraph::new(Line::from(p.faint(" no vault open"))), area);
         return;
     }
     /* Headers cost a row and answer the question three unlabelled columns
@@ -253,9 +287,10 @@ enum Head {
 }
 
 /* Draws the pane's header row and hands back what is left for the list. The
-   live pane's header is CREAM, the others DIM: focus then has a word as well
+   live pane's header is p.text, the others p.muted: focus then has a word as well
    as a marker, which is the only channel left when colour is off. */
 fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> Rect {
+    let p = app.theme;
     if !on || area.height < 2 {
         return area;
     }
@@ -299,9 +334,9 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
         }
     };
     let style = if live {
-        Style::new().fg(CREAM).add_modifier(Modifier::BOLD)
+        Style::new().fg(p.text).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(DIM)
+        Style::new().fg(p.muted)
     };
     let text = truncate(&text, area.width as usize);
     frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), row);
@@ -343,7 +378,7 @@ const LABEL: usize = 10;
 /* Only worth the column when the list actually runs off the pane. Drawn into
    the pane's own last column, so the lists hand that column back (see
    `list_width`) rather than letting the thumb land on a name. */
-fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize) {
+fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize, p: &Palette) {
     if !overflows(area, len) {
         return;
     }
@@ -352,7 +387,7 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize) {
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .thumb_style(Style::new().fg(DIM))
+            .thumb_style(Style::new().fg(p.muted))
             .track_symbol(None),
         area,
         &mut state,
@@ -416,13 +451,14 @@ fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, Strin
 
 /* Pre-order with two cells of indent per depth: a flat list of names hides
    which folder an entry row belongs to, and the tree is the only place depth
-   is visible. The marker is TEAL in the live pane and DIM in the other, so
+   is visible. The marker is p.cursor in the live pane and p.muted in the other, so
    each pane still says where its own cursor is. */
 fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     let tree = app.group_tree();
     if tree.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(dim(" no groups  ·  A adds one"))),
+            Paragraph::new(Line::from(p.faint(" no groups  ·  A adds one"))),
             area,
         );
         return;
@@ -468,11 +504,11 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 &format!("{}{}{name}", "  ".repeat(*depth), branch),
                 width.saturating_sub(cols(&count)),
             );
-            let mark = mark(selected, live);
+            let mark = p.mark(selected, live);
             ListItem::new(Line::from(vec![
                 mark,
-                Span::styled(format!(" {shown}"), row_style(selected)),
-                dim(count),
+                Span::styled(format!(" {shown}"), p.row(selected)),
+                p.faint(count),
             ]))
         })
         .collect();
@@ -482,22 +518,23 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut state = ListState::default().with_offset(app.group_scroll);
     state.select(Some(at));
     frame.render_stateful_widget(List::new(items), area, &mut state);
-    draw_scrollbar(frame, area, tree.len(), at);
+    draw_scrollbar(frame, area, tree.len(), at, &p);
 }
 
 fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     let rows = app.entry_rows();
     /* A live needle owns the empty state: "no entries here" would be a lie
        when the pane is global, and the way out (Esc) is part of the message. */
     let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
     if rows.is_empty() {
         let text = if searching {
-            dim(format!(
+            p.faint(format!(
                 " nothing matches {} · esc clears it",
                 app.search.as_deref().unwrap_or("")
             ))
         } else {
-            dim(" no entries here  ·  a adds one")
+            p.faint(" no entries here  ·  a adds one")
         };
         frame.render_widget(Paragraph::new(Line::from(text)), area);
         return;
@@ -560,19 +597,19 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 Some(needle) => app.searcher.indices(needle, &title),
                 None => Vec::new(),
             };
-            let mark = mark(selected, live);
+            let mark = p.mark(selected, live);
             let mut spans = vec![mark, Span::raw(" ")];
-            spans.extend(highlight(&name, &hits, row_style(selected)));
+            spans.extend(highlight(&name, &hits, p.row(selected), &p));
             if !user.is_empty() {
-                spans.push(dim(format!("  {user}")));
+                spans.push(p.faint(format!("  {user}")));
             }
             if !group.is_empty() {
-                spans.push(dim(format!("  · {group}")));
+                spans.push(p.faint(format!("  · {group}")));
             }
             /* A field lookup, not a parse: the marker says a row has a code
                without pricing every row on every frame. */
             if has_code {
-                spans.push(dim(" ⊙"));
+                spans.push(p.faint(" ⊙"));
             }
             ListItem::new(Line::from(spans))
         })
@@ -582,16 +619,17 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(at.saturating_sub(first)));
     frame.render_stateful_widget(List::new(items), area, &mut state);
-    draw_scrollbar(frame, area, rows.len(), at);
+    draw_scrollbar(frame, area, rows.len(), at, &p);
 }
 
 /* The row keeps only title and user, so the pane says the rest: url, notes,
    and the password masked to a fixed run of bullets. Fixed length because
    even the length is something the screen may not reveal. */
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let block = Block::new()
         .borders(Borders::LEFT)
-        .border_style(Style::new().fg(RULE));
+        .border_style(Style::new().fg(p.rule));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -600,23 +638,23 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let width = inner.width as usize;
     let Some(entry) = app.selected_entry() else {
         frame.render_widget(
-            Paragraph::new(Line::from(dim(" no entry  ·  a adds one"))),
+            Paragraph::new(Line::from(p.faint(" no entry  ·  a adds one"))),
             inner,
         );
         return;
     };
     let row = |label: &str, value: String, style: Style| {
         Line::from(vec![
-            dim(format!(" {label:<LABEL$}")),
+            p.faint(format!(" {label:<LABEL$}")),
             Span::styled(value, style),
         ])
     };
-    let cream = Style::new().fg(CREAM);
-    let faint = Style::new().fg(DIM);
+    let cream = Style::new().fg(p.text);
+    let faint = Style::new().fg(p.muted);
     let mut lines = vec![
         Line::from(Span::styled(
             truncate(entry.title(), width),
-            row_style(true),
+            p.row(true),
         )),
         Line::default(),
         row(
@@ -656,13 +694,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
        without one, and the answer was to pick up a phone. */
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
         lines.push(Line::from(vec![
-            dim(format!(" {:<LABEL$}", "totp")),
-            Span::styled(code, Style::new().fg(TEAL)),
-            dim(format!("  {left}s")),
+            p.faint(format!(" {:<LABEL$}", "totp")),
+            Span::styled(code, Style::new().fg(p.cursor)),
+            p.faint(format!("  {left}s")),
         ]));
     }
     for extra in crate::vault::extras(&entry) {
-        lines.push(Line::from(dim(format!(" {:<LABEL$}{extra}", ""))));
+        lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), width.saturating_sub(LABEL + 1)), faint));
     for (label, value) in stamps(&entry) {
@@ -673,9 +711,9 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         format!(" {}", "─".repeat(width.saturating_sub(2))),
-        Style::new().fg(RULE),
+        Style::new().fg(p.rule),
     )));
-    lines.push(Line::from(dim(truncate(
+    lines.push(Line::from(p.faint(truncate(
         " y p U copy · t totp · * reveal · e edit",
         width,
     ))));
@@ -707,6 +745,7 @@ fn local(utc: chrono::NaiveDateTime) -> String {
    enough for the notes, on the 80-column terminal where no side pane fits.
    Same masking rule as the pane — `*` is the only way to a plain password. */
 fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let Some(entry) = app.selected_entry() else {
         return;
     };
@@ -715,11 +754,11 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
        what the notes actually need. */
     let width = area.width.saturating_sub(8).clamp(20, 76);
     let inner = width.saturating_sub(4) as usize;
-    let cream = Style::new().fg(CREAM);
-    let faint = Style::new().fg(DIM);
+    let cream = Style::new().fg(p.text);
+    let faint = Style::new().fg(p.muted);
     let row = |label: &str, value: String, style: Style| {
         Line::from(vec![
-            dim(format!(" {label:<LABEL$}")),
+            p.faint(format!(" {label:<LABEL$}")),
             Span::styled(value, style),
         ])
     };
@@ -751,13 +790,13 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     }
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
         lines.push(Line::from(vec![
-            dim(format!(" {:<LABEL$}", "totp")),
-            Span::styled(code, Style::new().fg(TEAL)),
-            dim(format!("  {left}s · t copies")),
+            p.faint(format!(" {:<LABEL$}", "totp")),
+            Span::styled(code, Style::new().fg(p.cursor)),
+            p.faint(format!("  {left}s · t copies")),
         ]));
     }
     for extra in crate::vault::extras(&entry) {
-        lines.push(Line::from(dim(format!(" {:<LABEL$}{extra}", ""))));
+        lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), value), faint));
     for (label, stamp) in stamps(&entry) {
@@ -765,19 +804,19 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(" y p U", Style::new().fg(GOLD)),
-        dim(" copy   "),
-        Span::styled("*", Style::new().fg(GOLD)),
-        dim(" reveal   "),
-        Span::styled("e", Style::new().fg(GOLD)),
-        dim(" edit   "),
-        Span::styled("j k", Style::new().fg(GOLD)),
-        dim(" next entry   "),
-        Span::styled("esc", Style::new().fg(GOLD)),
-        dim(" close"),
+        Span::styled(" y p U", Style::new().fg(p.accent)),
+        p.faint(" copy   "),
+        Span::styled("*", Style::new().fg(p.accent)),
+        p.faint(" reveal   "),
+        Span::styled("e", Style::new().fg(p.accent)),
+        p.faint(" edit   "),
+        Span::styled("j k", Style::new().fg(p.accent)),
+        p.faint(" next entry   "),
+        Span::styled("esc", Style::new().fg(p.accent)),
+        p.faint(" close"),
     ]));
     let title = truncate(entry.title(), inner);
-    popup(frame, &title, lines, width);
+    popup(frame, &title, lines, width, &p);
 }
 
 /// Where the popup stops reading notes: past this it is an editor, not a view.
@@ -790,6 +829,7 @@ const NOTE_LINES: usize = 8;
    revealed it — length is otherwise the only thing about it the screen may
    show. */
 fn draw_unlock(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     use crate::app::UnlockField;
     /* The picker stands in for this box while it is open: two popups over
        each other read as one broken one, and the boxes behind are not
@@ -807,7 +847,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
 
     let mut rows: Vec<Line> = Vec::new();
     if app.db_path.is_none() && !app.unlock_new {
-        rows.push(Line::from(dim(
+        rows.push(Line::from(p.faint(
             " no vault yet  ·  set one in the file box below",
         )));
         rows.push(Line::default());
@@ -840,12 +880,12 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             shown
         };
         let style = if focused {
-            Style::new().fg(CREAM)
+            Style::new().fg(p.text)
         } else {
-            Style::new().fg(DIM)
+            Style::new().fg(p.muted)
         };
         Line::from(vec![
-            dim(format!(" {label:<LABEL$}")),
+            p.faint(format!(" {label:<LABEL$}")),
             Span::styled(text, style),
         ])
     };
@@ -888,11 +928,11 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     } else {
         "enter unlock"
     };
-    rows.push(Line::from(dim(format!(
+    rows.push(Line::from(p.faint(format!(
         " tab field   {go}   ^o browse   esc clear   ^r reveal"
     ))));
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
-    popup(frame, title, rows, width.max(20));
+    popup(frame, title, rows, width.max(20), &p);
 }
 
 /* Left to right in priority order, with `h keys` right-aligned in whatever
@@ -900,6 +940,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
    off the end was the one hint that always matters. What does not fit is
    dropped whole — half a count is worse than no count. */
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     const KEYS: &str = "h keys";
     let width = area.width as usize;
     /* Narrower than this and the copy keys are what has to go: `h keys` is
@@ -909,7 +950,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         let keys = if app.view == View::Browser { KEYS } else { "F1 keys" };
         let spans = vec![
             Span::raw(" ".repeat(pad(width, 0, cols(keys)))),
-            dim(keys),
+            p.faint(keys),
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -922,9 +963,9 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         let left = "  enter unlock   ^r reveal   ^c quit";
         let spans = vec![
             Span::raw(" "),
-            dim(left),
+            p.faint(left),
             Span::raw(" ".repeat(pad(width, cols(left) + 1, cols(LOCK_KEYS)))),
-            dim(LOCK_KEYS),
+            p.faint(LOCK_KEYS),
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -939,23 +980,23 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             "y user",
-            Style::new().fg(if armed { GOLD } else { DIM }),
+            Style::new().fg(if armed { p.accent } else { p.muted }),
         ),
-        dim("   p pass   U url"),
+        p.faint("   p pass   U url"),
     ];
     let mut used = cols(" y user   p pass   U url");
     /* In the order they may be dropped, last first: unsaved work outranks a
        count, and a count outranks the notes about keys the bar also names. */
     let mut optional: Vec<Span> = Vec::new();
     if app.working() {
-        optional.push(Span::styled("  unsaved", Style::new().fg(AMBER)));
+        optional.push(Span::styled("  unsaved", Style::new().fg(p.warn)));
     }
     /* A secret is on the clipboard until this reaches zero. The flash says so
        once; the chip says so for as long as it is true. */
     if let Some(left) = app.clipboard_left() {
         optional.push(Span::styled(
             format!("  clipboard {left}s"),
-            Style::new().fg(TEAL),
+            Style::new().fg(p.cursor),
         ));
     }
     /* The entries header counts the matches where it is drawn; on a window
@@ -964,7 +1005,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         let (shown, total) = (app.entry_matches(), app.entry_total());
         optional.push(Span::styled(
             format!("  {shown} of {total} shown"),
-            Style::new().fg(GOLD),
+            Style::new().fg(p.accent),
         ));
     }
     if let Some(vault) = &app.vault {
@@ -972,15 +1013,15 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         let entries = vault.entry_count();
         let g = if groups == 1 { "group" } else { "groups" };
         let e = if entries == 1 { "entry" } else { "entries" };
-        optional.push(dim(format!("  {groups} {g} · {entries} {e}")));
+        optional.push(p.faint(format!("  {groups} {g} · {entries} {e}")));
     }
     /* An armed cut and a live undo slot are one keypress from mattering, so
        they are named — but they are also the first things the bar can lose. */
     if let Some(note) = app.cut_note() {
-        optional.push(Span::styled(format!("  {note} · V pastes"), Style::new().fg(AMBER)));
+        optional.push(Span::styled(format!("  {note} · V pastes"), Style::new().fg(p.warn)));
     }
     if let Some(note) = app.undo_note() {
-        optional.push(Span::styled(format!("  {note}"), Style::new().fg(AMBER)));
+        optional.push(Span::styled(format!("  {note}"), Style::new().fg(p.warn)));
     }
     for span in optional {
         let want = cols(&span.content);
@@ -991,7 +1032,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         spans.push(span);
     }
     spans.push(Span::raw(" ".repeat(pad(width, used, cols(KEYS)))));
-    spans.push(dim(KEYS));
+    spans.push(p.faint(KEYS));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -1005,13 +1046,14 @@ fn pad(width: usize, used: usize, tail: usize) -> usize {
    The caret is a block between the split halves of the needle, the same
    char-index rule as every other box in the app. */
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let needle = app.search.as_deref().unwrap_or_default();
     /* A kept filter gave the keys back: a caret on a box that no longer takes
        typing reads as one that does. */
     if !app.band {
         let line = Line::from(vec![
-            Span::styled(format!("/{needle}"), Style::new().fg(GOLD)),
-            dim("  esc clears"),
+            Span::styled(format!("/{needle}"), Style::new().fg(p.accent)),
+            p.faint("  esc clears"),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         return;
@@ -1019,11 +1061,11 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let at = char_index_to_byte(needle, app.search_caret);
     let (head, tail) = needle.split_at(at.min(needle.len()));
     let line = Line::from(vec![
-        Span::styled("/", Style::new().fg(GOLD)),
-        Span::styled(head.to_string(), Style::new().fg(CREAM)),
-        Span::styled("█", Style::new().fg(GOLD)),
-        Span::styled(tail.to_string(), Style::new().fg(CREAM)),
-        dim(if app.search_global {
+        Span::styled("/", Style::new().fg(p.accent)),
+        Span::styled(head.to_string(), Style::new().fg(p.text)),
+        Span::styled("█", Style::new().fg(p.accent)),
+        Span::styled(tail.to_string(), Style::new().fg(p.text)),
+        p.faint(if app.search_global {
             "  enter keep · esc clear · ^g this group"
         } else {
             "  enter keep · esc clear · ^g whole vault"
@@ -1032,7 +1074,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
+fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &Palette) {
     let height = lines.len() as u16 + 2;
     let area = frame.area();
     let at = Rect::new(
@@ -1044,9 +1086,9 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
     frame.render_widget(Clear, at);
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(GOLD))
-        .title(Span::styled(format!(" {title} "), Style::new().fg(GOLD)))
-        .style(Style::new().bg(SURFACE));
+        .border_style(Style::new().fg(p.accent))
+        .title(Span::styled(format!(" {title} "), Style::new().fg(p.accent)))
+        .style(Style::new().bg(p.surface));
     let inner = block.inner(at);
     frame.render_widget(block, at);
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1056,6 +1098,7 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
    title, and a typed filter that narrows rather than ranks. Nobody knows the
    path to a vault they have not opened yet. */
 fn draw_browse(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let Some(browse) = &app.browse else {
         return;
     };
@@ -1070,10 +1113,10 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     if let Some(problem) = &browse.problem {
         lines.push(Line::from(Span::styled(
             truncate(&format!(" {problem}"), inner),
-            Style::new().fg(RED),
+            Style::new().fg(p.error),
         )));
     } else if shown.is_empty() {
-        lines.push(Line::from(dim(if browse.filter.is_empty() {
+        lines.push(Line::from(p.faint(if browse.filter.is_empty() {
             " no vaults or folders here  ·  ← goes up".to_string()
         } else {
             format!(" nothing matches {}  ·  backspace clears", browse.filter)
@@ -1084,16 +1127,16 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     let first = browse.cursor.saturating_sub(room.saturating_sub(1));
     for (n, row) in shown.iter().enumerate().skip(first).take(room) {
         let live = n == browse.cursor;
-        let mark = if live { teal("▌") } else { Span::raw(" ") };
+        let mark = if live { p.lit("▌") } else { Span::raw(" ") };
         let name = if row.dir {
             format!("{}/", row.name)
         } else {
             row.name.clone()
         };
         let style = if row.dir {
-            Style::new().fg(DIM)
+            Style::new().fg(p.muted)
         } else {
-            row_style(live)
+            p.row(live)
         };
         lines.push(Line::from(vec![
             mark,
@@ -1101,7 +1144,7 @@ fn draw_browse(frame: &mut Frame, app: &App) {
         ]));
     }
     if shown.len() > room {
-        lines.push(dim(format!(
+        lines.push(p.faint(format!(
             " {} of {} shown",
             room.min(shown.len()),
             shown.len()
@@ -1110,11 +1153,11 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     lines.push(Line::default());
     if !browse.filter.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(" /", Style::new().fg(GOLD)),
-            Span::styled(browse.filter.clone(), Style::new().fg(CREAM)),
+            Span::styled(" /", Style::new().fg(p.accent)),
+            Span::styled(browse.filter.clone(), Style::new().fg(p.text)),
         ]));
     }
-    lines.push(Line::from(dim(truncate(
+    lines.push(Line::from(p.faint(truncate(
         " enter open · ← up · type to narrow · esc cancel",
         inner,
     ))));
@@ -1134,13 +1177,14 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     } else {
         title
     };
-    popup(frame, &title, lines, width);
+    popup(frame, &title, lines, width, &p);
 }
 
 /* Its own question rather than a prompt: no vault is blocked on the answer,
    so it carries no reply channel. Only a named key confirms, so an
    unrecognised key must not be an accidental yes. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
+    let p = app.theme;
     let _ = app;
     /* The title is the part that truncates, never the sentence: a question
        that renders as "…this cannot be" has lost the only word doing any
@@ -1150,7 +1194,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
         Confirm::Quit => (
             "quit?",
             " unsaved changes would be lost".to_string(),
-            Span::styled(" q  quit", Style::new().fg(GOLD)),
+            Span::styled(" q  quit", Style::new().fg(p.accent)),
             "",
         ),
         /* The title travels in the confirm so the answer is about a row the
@@ -1158,7 +1202,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
         Confirm::DeleteEntry { title, .. } => (
             "delete?",
             delete_question("entry", title, room),
-            Span::styled(" y  delete", Style::new().fg(RED)),
+            Span::styled(" y  delete", Style::new().fg(p.error)),
             /* `u` really does bring an entry back (Undo::Delete), so the box
                says so: a warning that overstates the risk is a warning people
                learn to click through. */
@@ -1167,18 +1211,18 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
         Confirm::DeleteGroup { title, .. } => (
             "delete?",
             delete_question("group", title, room),
-            Span::styled(" y  delete", Style::new().fg(RED)),
+            Span::styled(" y  delete", Style::new().fg(p.error)),
             // Groups have no undo slot, and delete refuses unless empty.
             "this cannot be undone",
         ),
     };
     let lines = vec![
-        Line::from(Span::styled(question, Style::new().fg(CREAM))),
+        Line::from(Span::styled(question, Style::new().fg(p.text))),
         Line::default(),
         Line::from(vec![
             yes,
-            dim("     esc  keep going"),
-            dim(if after.is_empty() {
+            p.faint("     esc  keep going"),
+            p.faint(if after.is_empty() {
                 String::new()
             } else {
                 format!("     {after}")
@@ -1186,7 +1230,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
         ]),
     ];
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
-    popup(frame, title, lines, width);
+    popup(frame, title, lines, width, &p);
 }
 
 /// The question with the name cut to fit, so the verb always renders.
@@ -1209,6 +1253,7 @@ fn split_at_char(text: &str, caret: usize) -> (String, String) {
 }
 
 fn draw_form(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let Some(form) = &app.form else {
         return;
     };
@@ -1239,9 +1284,9 @@ fn draw_form(frame: &mut Frame, app: &App) {
         };
         let (head, tail) = split_at_char(&shown, if focused { form.caret } else { 0 });
         let style = if focused {
-            Style::new().fg(CREAM)
+            Style::new().fg(p.text)
         } else {
-            Style::new().fg(DIM)
+            Style::new().fg(p.muted)
         };
         Line::from(vec![
             Span::styled(format!(" {label:<LABEL$}"), style),
@@ -1260,9 +1305,9 @@ fn draw_form(frame: &mut Frame, app: &App) {
        is actually in. */
     let notes_rows = |value: &str, focused: bool, caret: usize| -> Vec<Line<'_>> {
         let style = if focused {
-            Style::new().fg(CREAM)
+            Style::new().fg(p.text)
         } else {
-            Style::new().fg(DIM)
+            Style::new().fg(p.muted)
         };
         let mut out = Vec::new();
         let mut seen = 0;
@@ -1283,7 +1328,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
                 spans.push(Span::styled((*part).to_string(), style));
             }
             if !last {
-                spans.push(dim("⏎"));
+                spans.push(p.faint("⏎"));
             }
             out.push(Line::from(spans));
             seen += len + 1;
@@ -1302,9 +1347,9 @@ fn draw_form(frame: &mut Frame, app: &App) {
     if !form.password.is_empty() {
         let bits = crate::generator::typed_bits(&form.password);
         let word = crate::generator::strength(bits);
-        let ink = if bits < 60.0 { AMBER } else { TEAL };
+        let ink = if bits < 60.0 { p.warn } else { p.cursor };
         lines.push(Line::from(vec![
-            dim(format!(" {:<LABEL$}", "")),
+            p.faint(format!(" {:<LABEL$}", "")),
             Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
         ]));
     }
@@ -1318,14 +1363,14 @@ fn draw_form(frame: &mut Frame, app: &App) {
             Ok(url) => match url.parse::<keepass::db::TOTP>().ok().and_then(|t| t.value_now().ok()) {
                 Some(code) => (
                     format!("{} · {}s", code.code, code.valid_for.as_secs()),
-                    TEAL,
+                    p.cursor,
                 ),
-                None => ("cannot read the clock".to_string(), AMBER),
+                None => ("cannot read the clock".to_string(), p.warn),
             },
-            Err(why) => (why, AMBER),
+            Err(why) => (why, p.warn),
         };
         lines.push(Line::from(vec![
-            dim(format!(" {:<LABEL$}", "")),
+            p.faint(format!(" {:<LABEL$}", "")),
             Span::styled(note.0, Style::new().fg(note.1)),
         ]));
     }
@@ -1336,19 +1381,19 @@ fn draw_form(frame: &mut Frame, app: &App) {
     ));
     lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(" enter", Style::new().fg(GOLD)),
-        dim(" save   "),
-        Span::styled("^s", Style::new().fg(GOLD)),
-        dim(" generate   "),
-        Span::styled("^r", Style::new().fg(GOLD)),
-        dim(" reveal   "),
-        Span::styled("tab", Style::new().fg(GOLD)),
-        dim(" next   "),
-        Span::styled("esc", Style::new().fg(GOLD)),
-        dim(" throw away"),
+        Span::styled(" enter", Style::new().fg(p.accent)),
+        p.faint(" save   "),
+        Span::styled("^s", Style::new().fg(p.accent)),
+        p.faint(" generate   "),
+        Span::styled("^r", Style::new().fg(p.accent)),
+        p.faint(" reveal   "),
+        Span::styled("tab", Style::new().fg(p.accent)),
+        p.faint(" next   "),
+        Span::styled("esc", Style::new().fg(p.accent)),
+        p.faint(" throw away"),
     ]));
     if form.field == FormField::Notes {
-        lines.push(Line::from(dim(" alt+enter starts a new line")));
+        lines.push(Line::from(p.faint(" alt+enter starts a new line")));
     }
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     /* Entries land in the cursor group, which may be scrolled out of sight;
@@ -1357,12 +1402,13 @@ fn draw_form(frame: &mut Frame, app: &App) {
         FormKind::Add => format!("new entry in {}", app.here()),
         FormKind::Edit(_) => format!("edit entry · {}", app.here()),
     };
-    popup(frame, &truncate(&title, width.saturating_sub(4) as usize), lines, width);
+    popup(frame, &truncate(&title, width.saturating_sub(4) as usize), lines, width, &p);
 }
 
 /* One entry per line in three aligned columns. Only live keys: a row naming
    a key that does nothing on this screen is documentation for a bug. */
 fn draw_help(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     /* Only live keys: a row naming a key that does nothing on this screen is
        documentation for a bug. The lock owns every printable key, so its
        table names the boxes rather than the browser's list. */
@@ -1406,9 +1452,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let render = |(label, keys, what): &(&str, &str, &str)| {
         vec![
-            Span::styled(format!(" {label:group$}"), Style::new().fg(DIM)),
-            Span::styled(format!("{keys:key$}"), Style::new().fg(GOLD)),
-            Span::styled((*what).to_string(), Style::new().fg(CREAM)),
+            Span::styled(format!(" {label:group$}"), Style::new().fg(p.muted)),
+            Span::styled(format!("{keys:key$}"), Style::new().fg(p.accent)),
+            Span::styled((*what).to_string(), Style::new().fg(p.text)),
         ]
     };
     let mut lines: Vec<Line> = rows.iter().map(|r| Line::from(render(r))).collect();
@@ -1425,7 +1471,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             .map(|n| {
                 let mut spans = render(&rows[n]);
                 if let Some(right) = rows.get(n + half) {
-                    spans.push(dim("   "));
+                    spans.push(p.faint("   "));
                     spans.extend(render(right));
                 }
                 Line::from(spans)
@@ -1442,22 +1488,23 @@ fn draw_help(frame: &mut Frame, app: &App) {
         let room = (area.height as usize).saturating_sub(3).max(1);
         let hidden = lines.len() - room;
         lines.truncate(room);
-        lines.push(dim(format!(" +{hidden} more · a taller window shows them")).into());
+        lines.push(p.faint(format!(" +{hidden} more · a taller window shows them")).into());
     }
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
-    popup(frame, "keys", lines, content + 3);
+    popup(frame, "keys", lines, content + 3, &p);
 }
 
 /* The one-box group prompt behind A and E. Same field shape as the entry
    form's rows so the caret and styling read identically, minus the cycling:
    there is only the name. */
 fn draw_group_prompt(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let Some(prompt) = &app.group_prompt else {
         return;
     };
     /* One box, always focused: the popup only exists while it holds the keys. */
-    let style = Style::new().fg(CREAM);
+    let style = Style::new().fg(p.text);
     let mut first = prompt.value.chars();
     let head: String = first.by_ref().take(prompt.caret).collect();
     let tail: String = first.collect();
@@ -1470,10 +1517,10 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
         ]),
         Line::default(),
         Line::from(vec![
-            Span::styled(" enter", Style::new().fg(GOLD)),
-            dim(" save   "),
-            Span::styled("esc", Style::new().fg(GOLD)),
-            dim(" throw away"),
+            Span::styled(" enter", Style::new().fg(p.accent)),
+            p.faint(" save   "),
+            Span::styled("esc", Style::new().fg(p.accent)),
+            p.faint(" throw away"),
         ]),
     ];
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
@@ -1481,18 +1528,18 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
         GroupPromptKind::New => "new group",
         GroupPromptKind::Rename(_) => "rename group",
     };
-    popup(frame, title, lines, width);
+    popup(frame, title, lines, width, &p);
 }
 
-/* The matched characters of a row, in TEAL and bold against the rest: a list
+/* The matched characters of a row, in p.cursor and bold against the rest: a list
    sorted by relevance still leaves the reader working out why each row is
    there. Indices are char positions into the untruncated title, so anything
    past the cut simply does not match a span. */
-fn highlight(text: &str, hits: &[u32], base: Style) -> Vec<Span<'static>> {
+fn highlight(text: &str, hits: &[u32], base: Style, p: &Palette) -> Vec<Span<'static>> {
     if hits.is_empty() {
         return vec![Span::styled(text.to_string(), base)];
     }
-    let lit = Style::new().fg(TEAL).add_modifier(Modifier::BOLD);
+    let lit = Style::new().fg(p.cursor).add_modifier(Modifier::BOLD);
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
     let mut run_lit = false;
@@ -1510,32 +1557,6 @@ fn highlight(text: &str, hits: &[u32], base: Style) -> Vec<Span<'static>> {
     out
 }
 
-/* The row under the cursor is what the next key acts on, so its name is bold
-   as well as marked. Bold is safe here because every colour is RGB: a
-   terminal cannot swap it for a bright ANSI variant. */
-fn row_style(selected: bool) -> Style {
-    let style = Style::new().fg(CREAM);
-    if selected {
-        style.add_modifier(Modifier::BOLD)
-    } else {
-        style
-    }
-}
-
-/* Which row, and which pane owns the keys. Two glyphs, not two colours: with
-   NO_COLOR every colour collapses to the terminal's own, and focus was then
-   invisible — both panes drew the same bar. */
-fn mark(selected: bool, live: bool) -> Span<'static> {
-    match (selected, live) {
-        (true, true) => teal("▌"),
-        (true, false) => dim("│"),
-        _ => Span::raw(" "),
-    }
-}
-
-fn teal(text: impl Into<String>) -> Span<'static> {
-    Span::styled(text.into(), Style::new().fg(TEAL))
-}
 
 #[cfg(test)]
 mod tests {
@@ -2530,6 +2551,7 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 
 
