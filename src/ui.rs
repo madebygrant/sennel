@@ -611,7 +611,18 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         ));
     }
     rows.push(Line::default());
-    rows.push(Line::from(dim(" tab field   enter unlock   esc clear   ^r reveal")));
+    /* Enter does three different things on this screen, so the hint names the
+       one the focused box will do. */
+    let go = if app.unlock_field == UnlockField::File {
+        "enter apply path"
+    } else if app.unlock_new {
+        "enter create"
+    } else {
+        "enter unlock"
+    };
+    rows.push(Line::from(dim(format!(
+        " tab field   {go}   esc clear   ^r reveal"
+    ))));
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, title, rows, width.max(20));
 }
@@ -839,31 +850,35 @@ fn draw_help(frame: &mut Frame, app: &App) {
     /* Only live keys: a row naming a key that does nothing on this screen is
        documentation for a bug. The lock owns every printable key, so its
        table names the boxes rather than the browser's list. */
-    let mut rows: Vec<(&str, &str, &str)> = if app.view == View::Unlock {
+    let rows: Vec<(&str, &str, &str)> = if app.view == View::Unlock {
         vec![
             ("type", "a–z  0–9", "the boxes take every key"),
             ("move", "tab  ↑ ↓", "between boxes"),
             ("edit", "^u  ^w", "clear box, kill word"),
             ("reveal", "^r", "show the password plainly"),
-            ("go", "enter", "unlock"),
+            ("go", "enter", "unlock · apply path from the file box"),
             ("quit", "^c", ""),
         ]
     } else {
         vec![
             ("move", "j k  ↑ ↓", "through the panes"),
+            ("page", "^d ^u  PgUp PgDn", "a screen at a time"),
+            ("ends", "g G", "top, bottom of the pane"),
+            ("panes", "Tab", "groups ↔ entries"),
+            ("open", "enter", "open group, open entry"),
+            ("copy", "y p U", "username, password, url"),
+            ("reveal", "*", "show the password"),
+            ("edit", "a e D", "add, edit, delete entry"),
+            ("groups", "A E D", "add, rename, delete group"),
+            ("cut", "X V", "cut, paste"),
+            ("fold", "← →", "collapse, expand · ← hops from entries"),
+            ("order", "o", "entries: name, recent, updated"),
+            ("find", "/", "fuzzy search"),
+            ("match", "n N", "next, previous match"),
+            ("undo", "u", "one level"),
             ("quit", "q  ^c", ""),
         ]
     };
-    if app.view == View::Browser {
-        rows.insert(1, ("copy", "y p U", "username, password, url"));
-        rows.insert(2, ("edit", "a e D", "add, edit, delete entry"));
-        rows.insert(3, ("groups", "A E D", "add, rename, delete group"));
-        rows.insert(4, ("move", "X V", "cut, paste"));
-        rows.insert(5, ("fold", "← →", "collapse, expand group"));
-        rows.insert(6, ("order", "o", "entries: name, recent, updated"));
-        rows.insert(7, ("undo", "u", "one level · ^s generates"));
-        rows.insert(7, ("find", "/", "fuzzy search"));
-    }
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
     let key = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0) + 2;
@@ -1120,6 +1135,45 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("keys"), "{joined}");
         assert!(joined.contains("Sennel"), "{joined}");
+    }
+
+    /* The overlay only names live keys, and it names all of them: the keys
+       that were missing from it were keys nobody could find. */
+    #[test]
+    fn the_overlay_names_the_browsers_live_keys() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(100, 40);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.show_help = true;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        for key in ["enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/"] {
+            assert!(joined.contains(key), "the overlay forgot {key}: {joined}");
+        }
+        // ^s belongs to the form, which advertises it itself.
+        assert!(!joined.contains("^s"), "the overlay claimed a form-only key");
+    }
+
+    /* Enter means three things on the lock screen, and the hint names the one
+       the focused box will do. */
+    #[test]
+    fn the_unlock_hint_follows_the_focused_box() {
+        use crate::app::UnlockField;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.set_db_path(Some(std::path::PathBuf::from("/nowhere/new.kdbx")));
+        app.unlock_field = UnlockField::Password;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("new database"), "{joined}");
+        assert!(joined.contains("enter create"), "{joined}");
+        app.unlock_field = UnlockField::File;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("enter apply path"), "{joined}");
     }
 
     /* The edit form masks the password box and advertises that empty keeps;

@@ -35,10 +35,12 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `tab ↑ ↓`       | move between boxes on prompt screens (unlock, forms) |
 | `enter`         | unlock / save the form                        |
 | `j k ↑ ↓`       | move within the pane                          |
+| `^d ^u` `PgUp PgDn` | move a screen at a time                   |
+| `g` `G`         | top / bottom of the pane                      |
 | `Tab`           | groups pane ↔ entries pane                    |
-| `enter`         | open group / focus detail                     |
+| `enter`         | open group / open entry (detail popup)        |
 | `y` `p` `U`     | copy username / password / URL                |
-| `*`             | show/hide the password in the detail pane     |
+| `*`             | show/hide the password (needs the detail pane or popup) |
 | `/`             | fuzzy search (`enter` keeps, `esc` clears)    |
 | `n` `N`         | next / previous match                         |
 | `a` `e` `D`     | add / edit / delete entry                     |
