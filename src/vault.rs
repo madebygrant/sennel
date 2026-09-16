@@ -422,6 +422,35 @@ impl Vault {
         Ok(())
     }
 
+    /* Re-key: the same database, written again under a new password. The
+       file is written before the key is swapped, so a refused or failed write
+       leaves the vault openable with the password it already had — a rekey
+       that half-lands is a vault nobody can open.
+
+       Guarded like `save`, because it is a save: re-keying over somebody
+       else's write would lose their work *and* change the password they would
+       need to get it back. */
+    pub fn rekey(&mut self, password: &str, key_file: Option<&[u8]>) -> Result<(), VaultError> {
+        let Some(path) = self.path.clone() else {
+            return Err(VaultError::Unsaved);
+        };
+        if self.changed_on_disk() {
+            return Err(VaultError::ChangedOnDisk);
+        }
+        let key = Self::build_key(password, key_file)?;
+        // KeePassXC shows this, and a vault that never records it reads as one
+        // whose password has never been changed.
+        let was = self.db.meta.master_key_changed;
+        self.db.meta.master_key_changed = Some(Times::now());
+        if let Err(e) = Self::write_file(&self.db, &key, &path) {
+            self.db.meta.master_key_changed = was;
+            return Err(e);
+        }
+        self.key = Some(key);
+        self.stamp = Stamp::of(&path);
+        Ok(())
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }

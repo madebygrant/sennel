@@ -99,6 +99,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.group_prompt.is_some() {
         draw_group_prompt(frame, app);
     }
+    if app.rekey.is_some() {
+        draw_rekey(frame, app);
+    }
     if app.browse.is_some() {
         draw_browse(frame, app);
     }
@@ -1464,6 +1467,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("undo", "u", "one level"),
             ("save", "^s  ^r", "save now · reload the file on disk"),
             ("lock", "^l", "lock now"),
+            ("master", "^p", "change the master password"),
             ("theme", "^t", "next palette · remembered"),
             ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
@@ -1516,6 +1520,79 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3, &p);
+}
+
+/* The change-password prompt: two masked boxes, and a line saying what is
+   about to happen. Worth more words than the other popups, because this is
+   the one action in Sennel nobody can take back and nothing can remind them
+   of — a forgotten master password is a lost vault. */
+fn draw_rekey(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(rekey) = &app.rekey else {
+        return;
+    };
+    let file = app
+        .vault
+        .as_ref()
+        .and_then(|v| v.path())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let row = |label: &str, value: &str, focused: bool| {
+        /* Masked to its own length, not a fixed run: on the box you are
+           typing into, the count is the only feedback there is, and it is
+           already on your screen and nowhere else. */
+        let shown = if rekey.reveal {
+            value.to_string()
+        } else {
+            "•".repeat(value.chars().count())
+        };
+        let (head, tail) = split_at_char(&shown, if focused { rekey.caret } else { 0 });
+        let style = if focused {
+            Style::new().fg(p.text)
+        } else {
+            Style::new().fg(p.muted)
+        };
+        Line::from(vec![
+            Span::styled(format!(" {label:<LABEL$}"), style),
+            Span::styled(head, style),
+            Span::styled(if focused { "█" } else { "" }, Style::new().fg(p.accent)),
+            Span::styled(tail, style),
+        ])
+    };
+    let mut lines = vec![
+        Line::from(p.faint(truncate(&format!(" {file}"), 60))),
+        Line::default(),
+        row("new", &rekey.password, rekey.field == crate::app::RekeyField::New),
+        row("again", &rekey.confirm, rekey.field == crate::app::RekeyField::Again),
+    ];
+    /* Strength on the way in, the same estimate the entry form gives: a
+       master password is the one worth measuring before it is committed. */
+    if !rekey.password.is_empty() {
+        let bits = crate::generator::typed_bits(&rekey.password);
+        let word = crate::generator::strength(bits);
+        let ink = if bits < 60.0 { p.warn } else { p.cursor };
+        lines.push(Line::from(vec![
+            p.faint(format!(" {:<LABEL$}", "")),
+            Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " nothing can recover this password if you forget it",
+        Style::new().fg(p.warn),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(" enter", Style::new().fg(p.accent)),
+        p.faint(" change   "),
+        Span::styled("tab", Style::new().fg(p.accent)),
+        p.faint(" field   "),
+        Span::styled("^r", Style::new().fg(p.accent)),
+        p.faint(" reveal   "),
+        Span::styled("esc", Style::new().fg(p.accent)),
+        p.faint(" keep the old one"),
+    ]));
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    popup(frame, "change master password", lines, width.max(30), &p);
 }
 
 /* The one-box group prompt behind A and E. Same field shape as the entry
@@ -1960,6 +2037,32 @@ mod tests {
             crate::theme::WARM.muted,
             "a live group drew like the bin"
         );
+    }
+
+    /* The one action nobody can take back and nothing can remind them of, so
+       the popup has to say so, mask both boxes and name the file. */
+    #[test]
+    fn the_change_password_popup_warns_and_masks_both_boxes() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.rekey = Some(crate::app::Rekey::default());
+        for c in "hunter2".chars() {
+            app.rekey_insert(c);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("change master password"), "{joined}");
+        assert!(joined.contains("nothing can recover"), "{joined}");
+        assert!(!joined.contains("hunter2"), "the password drew in the clear");
+        assert!(joined.contains("•••••••"), "the box did not mask: {joined}");
+
+        // ^r is the way to read it back, the same as every other secret box.
+        app.rekey_reveal();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("hunter2"), "^r revealed nothing");
     }
 
     /* The group prompt: one box, named for what it does, prefilled with the

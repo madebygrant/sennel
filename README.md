@@ -40,6 +40,10 @@ and `NO_COLOR` still gives you a usable app.
 KeePassXC uses, so a mistake costs one `u` rather than a restore from backup. Binned rows stay out
 of counts, search and `--list`. Inside the bin, `D` means it.
 
+**Change the master password without leaving.** `^p` re-keys the vault in place, writing the file
+under the new password before the session swaps to it. A failed write leaves the old password
+working rather than a vault nobody can open.
+
 **It locks itself.** Five idle minutes and the vault closes, with every secret in memory
 overwritten rather than dropped. `^l` does it now.
 

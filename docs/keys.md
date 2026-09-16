@@ -46,6 +46,7 @@ not the browser's `*`.
 | `o`                 | entries order: stored, name, recent, updated                  |
 | `u`                 | undo the last change, including a delete (one level)          |
 | `^l`                | lock now (same wipe as the idle auto-lock)                    |
+| `^p`                | change the master password (typed twice, `^r` reveals)        |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |

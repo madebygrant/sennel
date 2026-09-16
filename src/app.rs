@@ -156,6 +156,36 @@ pub struct GroupPrompt {
     pub caret: usize,
 }
 
+/// Which box of the change-password prompt the keys are typing into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RekeyField {
+    #[default]
+    New,
+    Again,
+}
+
+/* Changing the master password: the new one, typed twice. Both boxes mask,
+   and both are zeroized on drop like every other typed secret — this prompt
+   holds the only plaintext copy of what is about to become the key to
+   everything. */
+#[derive(Default)]
+pub struct Rekey {
+    pub password: String,
+    pub confirm: String,
+    pub field: RekeyField,
+    /// Char index into whichever box has the keys, same rule as the unlock caret.
+    pub caret: usize,
+    /// `^r`, for reading back what was typed before committing to it.
+    pub reveal: bool,
+}
+
+impl Drop for Rekey {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.confirm.zeroize();
+    }
+}
+
 /* Something sitting on the shelf between `X` and `V`. The id travels alone:
    the title is looked up fresh wherever it is shown, so a rename between the
    cut and the paste still reads right, and a deleted source disarms itself
@@ -474,6 +504,8 @@ pub struct App {
     /* The one-box group prompt (A/E). None when closed; same handover rule
        as the entry form. */
     pub group_prompt: Option<GroupPrompt>,
+    /// The change-master-password prompt, when it is open.
+    pub rekey: Option<Rekey>,
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
@@ -557,6 +589,7 @@ impl App {
             overwrite_armed: false,
             form: None,
             group_prompt: None,
+            rekey: None,
             cut: None,
             undo: None,
             search: None,
@@ -891,6 +924,9 @@ impl App {
         self.show_password = false;
         self.form = None;
         self.group_prompt = None;
+        /* Dropping it zeroizes both boxes: a half-typed master password must
+           not survive the lock that was supposed to clear the screen. */
+        self.rekey = None;
         self.confirm = None;
         self.cut = None;
         self.undo = None;
@@ -2593,6 +2629,148 @@ impl App {
         }
     }
 
+    /* `^p`: change the master password. Only on an open vault with a file
+       behind it — an unsaved vault has no password to change yet, and the
+       unlock screen is where that one is set. */
+    pub fn open_rekey(&mut self) {
+        let has_file = self.vault.as_ref().is_some_and(|v| v.path().is_some());
+        if !has_file {
+            self.say("no vault file to re-key  ·  unlock one first");
+            return;
+        }
+        self.rekey = Some(Rekey::default());
+    }
+
+    pub fn close_rekey(&mut self) {
+        // The drop zeroizes; taking it is what makes the drop happen now.
+        self.rekey = None;
+        self.say("password unchanged");
+    }
+
+    pub fn rekey_next_field(&mut self) {
+        let Some(rekey) = &mut self.rekey else {
+            return;
+        };
+        rekey.field = match rekey.field {
+            RekeyField::New => RekeyField::Again,
+            RekeyField::Again => RekeyField::New,
+        };
+        rekey.caret = match rekey.field {
+            RekeyField::New => rekey.password.chars().count(),
+            RekeyField::Again => rekey.confirm.chars().count(),
+        };
+    }
+
+    pub fn rekey_reveal(&mut self) {
+        if let Some(rekey) = &mut self.rekey {
+            rekey.reveal = !rekey.reveal;
+        }
+    }
+
+    pub fn rekey_insert(&mut self, c: char) {
+        let Some(rekey) = &mut self.rekey else {
+            return;
+        };
+        let caret = rekey.caret;
+        let field = match rekey.field {
+            RekeyField::New => &mut rekey.password,
+            RekeyField::Again => &mut rekey.confirm,
+        };
+        let at = field
+            .char_indices()
+            .nth(caret)
+            .map_or(field.len(), |(at, _)| at);
+        field.insert(at, c);
+        rekey.caret += 1;
+    }
+
+    pub fn rekey_backspace(&mut self) {
+        let Some(rekey) = &mut self.rekey else {
+            return;
+        };
+        if rekey.caret == 0 {
+            return;
+        }
+        let caret = rekey.caret;
+        let field = match rekey.field {
+            RekeyField::New => &mut rekey.password,
+            RekeyField::Again => &mut rekey.confirm,
+        };
+        let at = field
+            .char_indices()
+            .nth(caret - 1)
+            .map_or(field.len(), |(at, _)| at);
+        field.remove(at);
+        rekey.caret -= 1;
+    }
+
+    /* Enter on the prompt. Both boxes must agree, because the only check on a
+       new master password is that it was typed the same way twice: nothing
+       else in the app will ever be able to tell the user what it was. */
+    pub fn submit_rekey(&mut self) {
+        let Some(rekey) = self.rekey.take() else {
+            return;
+        };
+        if rekey.password.is_empty() {
+            self.warn("empty password  ·  the prompt stays open");
+            self.rekey = Some(rekey);
+            return;
+        }
+        if rekey.password != rekey.confirm {
+            /* The second box clears, not the first: the retype is what went
+               wrong, and making them type both again is a punishment. */
+            let mut rekey = rekey;
+            rekey.confirm.zeroize();
+            rekey.field = RekeyField::Again;
+            rekey.caret = 0;
+            self.rekey = Some(rekey);
+            self.warn("passwords differ  ·  retype the second box");
+            return;
+        }
+        /* A key file is part of the key, so a rekey that forgets it writes a
+           vault the user cannot open. The path is the one the unlock screen
+           still holds; it names a file, not a secret. */
+        let key_path = self.unlock_keyfile.trim().to_string();
+        let mut key_bytes: Option<Vec<u8>> = None;
+        if !key_path.is_empty() {
+            match std::fs::read(&key_path) {
+                Ok(bytes) => key_bytes = Some(bytes),
+                Err(_) => {
+                    self.error(format!(
+                        "cannot read key file {key_path}  ·  password unchanged"
+                    ));
+                    return;
+                }
+            }
+        }
+        let done = self
+            .vault
+            .as_mut()
+            .expect("the prompt only opens on an open vault")
+            .rekey(&rekey.password, key_bytes.as_deref());
+        if let Some(b) = key_bytes.as_mut() {
+            b.zeroize();
+        }
+        match done {
+            Ok(()) => {
+                /* The file on disk is now the new password's, so anything the
+                   session had pending is written too. Nothing is left dirty. */
+                self.dirty = false;
+                self.overwrite_armed = false;
+                self.say(match key_path.is_empty() {
+                    true => "master password changed".to_string(),
+                    false => format!("master password changed  ·  key file {key_path} kept"),
+                });
+            }
+            Err(e) => {
+                /* The vault still opens with the old password: `rekey` writes
+                   before it swaps. Say which one is live, because "failed" on
+                   a password change is the most frightening word in the app. */
+                self.error(format!("password unchanged  ·  {e}"));
+            }
+        }
+    }
+
     pub fn group_prompt_insert(&mut self, c: char) {
         let Some(prompt) = &mut self.group_prompt else {
             return;
@@ -4028,6 +4206,118 @@ pub mod tests {
         app.cycle_theme();
         assert_ne!(app.theme, crate::theme::WARM);
         assert!(!app.stage.contains("remembered"), "{}", app.stage);
+    }
+
+    /* ---- Change the master password ---- */
+
+    /* The whole point: after a rekey the file opens with the new password and
+       refuses the old one. Through a real file, because an in-memory swap
+       that never reaches disk is the failure this feature would have. */
+    #[test]
+    fn changing_the_master_password_rewrites_the_file_under_it() {
+        let tmp = temp_path("rekey");
+        let mut app = App::new();
+        app.db_path = Some(tmp.0.clone());
+        app.unlock_new = true;
+        app.unlock_confirm = "first-pw".into();
+        let mut typed = b"first-pw".to_vec();
+        app.try_unlock(&mut typed, None);
+        assert!(app.vault.is_some(), "the vault did not open: {}", app.stage);
+        let root = app.vault.as_ref().unwrap().root_id();
+        app.vault.as_mut().unwrap().create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        app.persist();
+
+        app.open_rekey();
+        assert!(app.rekey.is_some(), "the prompt did not open: {}", app.stage);
+        for c in "second-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
+        for c in "second-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.submit_rekey();
+        assert!(app.rekey.is_none(), "the prompt stayed open: {}", app.stage);
+        app.expire_now();
+        assert!(app.stage.contains("changed"), "{}", app.stage);
+
+        // The file on disk is the new password's, and only the new one's.
+        assert!(crate::vault::Vault::open(&tmp.0, "second-pw", None).is_ok());
+        assert!(
+            crate::vault::Vault::open(&tmp.0, "first-pw", None).is_err(),
+            "the old password still opens the vault"
+        );
+        // And the session kept working against the file it just rewrote.
+        let entry = app.entry_rows()[0];
+        app.vault.as_mut().unwrap().update_entry(&entry, "mail2", "u", None, "", "").unwrap();
+        app.persist();
+        assert!(!app.stage.contains("cannot"), "{}", app.stage);
+    }
+
+    /* Typed twice, and the prompt says so rather than setting a password
+       nobody meant: the retype is the only check there will ever be. */
+    #[test]
+    fn a_mistyped_retype_keeps_the_prompt_and_the_old_password() {
+        let tmp = temp_path("rekey-differ");
+        let mut app = App::new();
+        app.db_path = Some(tmp.0.clone());
+        app.unlock_new = true;
+        app.unlock_confirm = "first-pw".into();
+        let mut typed = b"first-pw".to_vec();
+        app.try_unlock(&mut typed, None);
+
+        app.open_rekey();
+        for c in "second-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
+        for c in "secnod-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.submit_rekey();
+        let rekey = app.rekey.as_ref().expect("the prompt closed on a mismatch");
+        assert_eq!(rekey.password, "second-pw", "the first box was cleared too");
+        assert!(rekey.confirm.is_empty(), "the retype box kept the typo");
+        assert_eq!(rekey.field, crate::app::RekeyField::Again, "focus did not go back");
+        app.expire_now();
+        assert!(app.stage.contains("differ"), "{}", app.stage);
+        // Nothing was written: the old password still opens the file.
+        assert!(crate::vault::Vault::open(&tmp.0, "first-pw", None).is_ok());
+    }
+
+    /* Empty is not a password, and `esc` leaves the old one alone. */
+    #[test]
+    fn an_empty_or_cancelled_rekey_changes_nothing() {
+        let tmp = temp_path("rekey-empty");
+        let mut app = App::new();
+        app.db_path = Some(tmp.0.clone());
+        app.unlock_new = true;
+        app.unlock_confirm = "first-pw".into();
+        let mut typed = b"first-pw".to_vec();
+        app.try_unlock(&mut typed, None);
+
+        app.open_rekey();
+        app.submit_rekey();
+        assert!(app.rekey.is_some(), "an empty password closed the prompt");
+        app.expire_now();
+        assert!(app.stage.contains("empty"), "{}", app.stage);
+
+        app.close_rekey();
+        assert!(app.rekey.is_none());
+        assert!(crate::vault::Vault::open(&tmp.0, "first-pw", None).is_ok());
+    }
+
+    /* The prompt holds the only plaintext copy of what is about to become the
+       key to everything, so locking has to take it with everything else. */
+    #[test]
+    fn locking_takes_a_half_typed_master_password_with_it() {
+        let mut app = open_app();
+        app.rekey = Some(crate::app::Rekey::default());
+        for c in "half-typed".chars() {
+            app.rekey_insert(c);
+        }
+        app.lock();
+        assert!(app.rekey.is_none(), "the prompt survived the lock");
     }
 
     /* ---- Wave 5.1: entry form ---- */

@@ -256,6 +256,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.confirm.is_some()
         || app.form.is_some()
         || app.group_prompt.is_some()
+        || app.rekey.is_some()
         || app.detail
         || app.show_help
     {
@@ -290,6 +291,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* The group prompt is modal on the same terms, one box instead of five. */
     if app.group_prompt.is_some() {
         handle_group_prompt_key(app, code, mods);
+        return;
+    }
+    /* So is the change-password prompt, and more so than most: every
+       printable key is part of a master password, so `q` and `h` are text
+       here the way they are on the lock screen. */
+    if app.rekey.is_some() {
+        handle_rekey_key(app, code, mods);
         return;
     }
     /* The search band is modal the same way: `q` types a letter into the
@@ -393,6 +401,10 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Tab => app.switch_pane(),
         KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') => app.copy_username(),
+        /* Before the bare `p`, which matches whatever modifiers are held:
+           changing the master password sits one key away from copying one,
+           so the ctrl arm has to be the one tested first. */
+        KeyCode::Char('p') if ctrl => app.open_rekey(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
         KeyCode::Char('t') => app.copy_totp(),
@@ -547,6 +559,22 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
    Esc. Same shape as the entry form minus the field movement. */
+/* Two masked boxes and nothing else. Every printable key is text, including
+   the ones that are verbs everywhere else, so the reveal is `^r` and the way
+   out is Esc. */
+fn handle_rekey_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc => app.close_rekey(),
+        KeyCode::Char('r') if ctrl => app.rekey_reveal(),
+        KeyCode::Tab | KeyCode::Down | KeyCode::Up => app.rekey_next_field(),
+        KeyCode::Enter => app.submit_rekey(),
+        KeyCode::Backspace => app.rekey_backspace(),
+        KeyCode::Char(c) if !ctrl => app.rekey_insert(c),
+        _ => {}
+    }
+}
+
 fn handle_group_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {

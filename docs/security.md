@@ -22,6 +22,14 @@ immediately, because the timer is a thread inside the process and cannot outlive
 counts the wipe down, so the screen tells you when a secret is still on the clipboard.
 `clipboard_timeout = 0` means leave it there, and that is honoured on the way out too.
 
+**Changing the master password.** `^p` re-keys the vault in place: the database is written again
+under the new password before the session swaps to it, so a refused or failed write leaves a file
+that still opens with the password you already had. The write is guarded like any other, so it
+cannot land on top of somebody else's. A key file stays part of the key and is re-read from the
+path you unlocked with, because a re-key that forgot it would write a vault you could not open.
+Sennel records the change in the file's metadata the way KeePassXC does. Nothing can recover the
+new password if you forget it, and the prompt says so.
+
 **Idle auto-lock.** After the idle timeout, 300 seconds by default and `0` to disable, the vault
 locks and the in-memory secrets are zeroized. `^l` does the same on demand.
 
