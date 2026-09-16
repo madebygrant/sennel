@@ -49,6 +49,7 @@ not the browser's `*`.
 | `^p`                | change the master password (typed twice, `^r` reveals)        |
 | `!`                 | reused, weak and empty passwords · `enter` goes to one        |
 | `F`                 | custom fields and attachments                                 |
+| `H`                 | old versions of the entry · `D` clears them                   |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |

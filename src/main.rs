@@ -368,6 +368,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.rekey.is_some()
         || app.audit.is_some()
         || app.fields.is_some()
+        || app.history.is_some()
         || app.detail
         || app.show_help
     {
@@ -402,6 +403,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* The group prompt is modal on the same terms, one box instead of five. */
     if app.group_prompt.is_some() {
         handle_group_prompt_key(app, code, mods);
+        return;
+    }
+    /* Old versions of an entry: a list you steer, like the audit. */
+    if app.history.is_some() {
+        handle_history_key(app, code, mods);
         return;
     }
     /* The fields screen owns the keys, and its own add prompt owns them
@@ -542,6 +548,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `F`: custom fields and attachments. Upper case, beside the other
            structural keys, and never a slip from `f`. */
         KeyCode::Char('F') => app.open_fields(),
+        /* `H`: old versions, which only ever come from another client. */
+        KeyCode::Char('H') => app.open_history(),
         KeyCode::Char('A') => app.open_group_prompt_new(),
         KeyCode::Char('E') => app.open_group_prompt_rename(),
         KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),
@@ -687,6 +695,22 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
    Esc. Same shape as the entry form minus the field movement. */
+/* Old versions of an entry. `D` clears the lot, which is the only write this
+   screen has: there is no "restore this version", because that is an edit and
+   the form is where edits happen. */
+fn handle_history_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('H') => app.close_history(),
+        KeyCode::Char('j') | KeyCode::Down => app.history_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.history_move(false),
+        KeyCode::Char('*') => app.history_reveal(),
+        KeyCode::Char('D') => app.clear_history(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
 /* The fields screen. While the add prompt is up it takes every printable
    key, because a field name or value can be any of them; otherwise this is a
    list you steer, with one key per verb. */

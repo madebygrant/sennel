@@ -64,10 +64,11 @@ otherwise, which is the rule every authenticator app follows.
 may have written, so Sennel strips control characters everywhere text leaves the TUI, meaning
 `--list` output and the window title. Inside the browser, ratatui's cell buffer drops them.
 
-**Entry history is not Sennel's.** Editing an entry here writes no history record, so an old
-password is not kept behind your back. Entries imported from KeePassXC may already carry history
-from that client. Sennel preserves it untouched but neither displays nor clears it. Use KeePassXC if
-you need to purge it.
+**Entry history is not Sennel's, but you can see and clear it.** Editing an entry here writes no
+history record, so an old password is never kept behind your back. Entries imported from KeePassXC
+may already carry history from that client, and `H` shows it: every old version, newest first, with
+the password masked until `*`. `D` throws the lot away and writes it out, so the old passwords are
+gone from the file rather than merely hidden. That has no undo, and the message says so.
 
 **`get` keeps the clipboard rules.** The non-interactive path copies through the same board as the
 TUI, waits out the wipe rather than abandoning a secret on the clipboard, and gives the current

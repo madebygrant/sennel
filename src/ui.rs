@@ -108,6 +108,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.fields.is_some() {
         draw_fields(frame, app);
     }
+    if app.history.is_some() {
+        draw_history(frame, app);
+    }
     if app.browse.is_some() {
         draw_browse(frame, app);
     }
@@ -1476,6 +1479,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("master", "^p", "change the master password"),
             ("audit", "!", "reused, weak and empty passwords"),
             ("fields", "F", "custom fields and attachments"),
+            ("history", "H", "old versions · D clears them"),
             ("theme", "^t", "next palette · remembered"),
             ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
@@ -1528,6 +1532,64 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3, &p);
+}
+
+/* The `H` screen: old versions of an entry, newest first. Every row is a
+   password somebody used to have, so they mask like any other. */
+fn draw_history(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(history) = &app.history else {
+        return;
+    };
+    let title = app
+        .vault
+        .as_ref()
+        .and_then(|v| v.get_entry(&history.entry).map(|e| e.title().to_string()))
+        .unwrap_or_default();
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(40, 76);
+    let inner = width.saturating_sub(4) as usize;
+    let mut lines = vec![
+        Line::from(p.faint(" Sennel writes none of these · they came from another client")),
+        Line::default(),
+    ];
+    let room = (area.height as usize).saturating_sub(8).max(1);
+    let first = history.cursor.saturating_sub(room.saturating_sub(1));
+    for (n, row) in history.rows.iter().enumerate().skip(first).take(room) {
+        let live = n == history.cursor;
+        let when = row
+            .modified
+            .map(local)
+            .unwrap_or_else(|| "unknown".to_string());
+        let secret = if history.reveal {
+            row.password.clone()
+        } else {
+            "•".repeat(row.password.chars().count().min(24))
+        };
+        let head = truncate(&format!("{when}  {}", row.username), inner / 2);
+        lines.push(Line::from(vec![
+            if live { p.lit("▌") } else { Span::raw(" ") },
+            Span::styled(format!(" {head}  "), p.row(live)),
+            Span::styled(
+                truncate(&secret, inner.saturating_sub(cols(&head) + 3)),
+                Style::new().fg(p.muted),
+            ),
+        ]));
+    }
+    if history.rows.len() > room {
+        lines.push(p.faint(format!(" {room} of {} shown", history.rows.len())).into());
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" *", Style::new().fg(p.accent)),
+        p.faint(" reveal   "),
+        Span::styled("D", Style::new().fg(p.error)),
+        p.faint(" clear them all   "),
+        Span::styled("esc", Style::new().fg(p.accent)),
+        p.faint(" close"),
+    ]));
+    let head = truncate(&format!("{title} · old versions"), inner);
+    popup(frame, &head, lines, width, &p);
 }
 
 /* The `F` screen: custom fields and attachments, with their values. These

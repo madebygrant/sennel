@@ -190,6 +190,16 @@ impl Drop for AddField {
     }
 }
 
+/* The `H` screen: old versions of an entry, which only ever arrive from
+   another client. Held rather than recomputed because it carries passwords,
+   and rebuilding it per frame would mean rebuilding those per frame. */
+pub struct History {
+    pub entry: EntryId,
+    pub rows: Vec<crate::vault::Version>,
+    pub cursor: usize,
+    pub reveal: bool,
+}
+
 /* What `!` found, held rather than recomputed: the walk touches every entry
    and every password in the vault, which is fine once and wrong per frame. */
 pub struct Audit {
@@ -552,6 +562,8 @@ pub struct App {
     pub audit: Option<Audit>,
     /// The custom-fields and attachments screen, when it is open.
     pub fields: Option<Fields>,
+    /// Old versions of an entry, when that screen is open.
+    pub history: Option<History>,
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
@@ -642,6 +654,7 @@ impl App {
             rekey: None,
             audit: None,
             fields: None,
+            history: None,
             cut: None,
             undo: Vec::new(),
             search: None,
@@ -1005,6 +1018,8 @@ impl App {
         /* Holds field values, which are secrets as often as not, and the
            add prompt's own box. Dropping it wipes them. */
         self.fields = None;
+        // Holds old passwords, which is the whole reason it is worth showing.
+        self.history = None;
         self.confirm = None;
         self.cut = None;
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
@@ -3117,6 +3132,75 @@ impl App {
                 self.warn(said);
             }
             Err(e) => self.error(format!("cannot remove · {e}")),
+        }
+    }
+
+    /* `H`: the old versions an entry carries. Sennel writes none — its edits
+       leave no history record on purpose — but KeePassXC does, so an entry
+       imported from there arrives holding every password it ever had. The
+       docs used to say "use KeePassXC if you need to purge it", which is a
+       strange place for a password manager to leave somebody. */
+    pub fn open_history(&mut self) {
+        let Some(id) = self.entry_cursor else {
+            self.say("no entry here");
+            return;
+        };
+        let rows = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.get_entry(&id))
+            .map(|e| crate::vault::history(&e))
+            .unwrap_or_default();
+        if rows.is_empty() {
+            self.say("no old versions  ·  Sennel's own edits keep none");
+            return;
+        }
+        self.history = Some(History { entry: id, rows, cursor: 0, reveal: false });
+    }
+
+    pub fn close_history(&mut self) {
+        self.history = None;
+    }
+
+    pub fn history_move(&mut self, down: bool) {
+        let Some(history) = &mut self.history else {
+            return;
+        };
+        let last = history.rows.len().saturating_sub(1);
+        history.cursor = match down {
+            true => (history.cursor + 1).min(last),
+            false => history.cursor.saturating_sub(1),
+        };
+    }
+
+    pub fn history_reveal(&mut self) {
+        if let Some(history) = &mut self.history {
+            history.reveal = !history.reveal;
+        }
+    }
+
+    /* `D` on the history screen: throw the lot away. All of it rather than
+       one version, because the reason to be here is "I do not want this vault
+       carrying my old passwords" and deleting them one at a time is a chore
+       that ends in the same place. */
+    pub fn clear_history(&mut self) {
+        let Some(id) = self.history.as_ref().map(|h| h.entry) else {
+            return;
+        };
+        let done = self
+            .vault
+            .as_mut()
+            .expect("the screen only opens on a vault")
+            .clear_history(&id);
+        match done {
+            Ok(gone) => {
+                self.history = None;
+                self.snap();
+                self.persist();
+                let plural = if gone == 1 { "version" } else { "versions" };
+                self.warn(format!("cleared {gone} old {plural}  ·  this has no undo"));
+            }
+            Err(e) => self.error(format!("cannot clear · {e}")),
         }
     }
 

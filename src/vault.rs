@@ -238,6 +238,49 @@ pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
     fields
 }
 
+/// One old version of an entry, as the history screen reads it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Version {
+    /// Newest first, so 0 is the version just before the current one.
+    pub at: usize,
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    /// When that version was last modified, UTC as KDBX stores it.
+    pub modified: Option<chrono::NaiveDateTime>,
+}
+
+/* Old versions of an entry, newest first. Sennel writes none of these — its
+   own edits deliberately leave no history record — but KeePassXC does, and an
+   entry imported from there arrives carrying every password it ever had.
+   Invisible is the wrong way to hold that: you cannot decide whether to keep
+   something you cannot see. */
+pub fn history(entry: &EntryRef<'_>) -> Vec<Version> {
+    let mut out = Vec::new();
+    let Some(count) = entry.history.as_ref().map(|h| h.get_entries().len()) else {
+        return out;
+    };
+    for at in 0..count {
+        let Some(old) = entry.historical(at) else {
+            continue;
+        };
+        out.push(Version {
+            at,
+            title: old.title().to_string(),
+            username: old.username().to_string(),
+            password: old.password().to_string(),
+            modified: old.times.last_modification,
+        });
+    }
+    /* Sorted by the stamp each version carries rather than trusting the
+       stored order: this crate prepends new history, a KDBX file written
+       elsewhere may hold the other order, and "newest first" has to mean the
+       same thing whichever client wrote the file. Versions with no stamp sink
+       to the bottom, where an undated old password belongs. */
+    out.sort_by_key(|v| std::cmp::Reverse(v.modified));
+    out
+}
+
 /// Fields Sennel has no row for — KeePassXC custom strings, and attachments.
 /// Named rather than shown: an entry whose extra fields are invisible reads
 /// as an entry that lost them.
@@ -1062,6 +1105,26 @@ impl Vault {
         Ok(())
     }
 
+    /* Throw away every old version an entry carries. The one thing Sennel
+       could not do about history before: it preserved what KeePassXC wrote
+       and told the user to go there to clear it, which is a strange place
+       for a password manager to leave somebody. */
+    pub fn clear_history(&mut self, id: &EntryId) -> Result<usize, VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        let gone = entry.history.as_ref().map_or(0, |h| h.get_entries().len());
+        if gone == 0 {
+            return Ok(0);
+        }
+        /* Emptied rather than set to None: an entry with no History element
+           and an entry with an empty one read the same to KeePassXC, and
+           keeping the element is the smaller change to the file. */
+        entry.history = Some(keepass::db::History::default());
+        entry.times.last_modification = Some(Times::now());
+        Ok(gone)
+    }
+
     /* Gone for good: an add that `u` takes back, and `D` on something
        already in the bin. The one path in Sennel that destroys an entry, and
        both callers have either just created it or already deleted it once. */
@@ -1337,6 +1400,77 @@ mod tests {
         assert_eq!(back.get_group(&bin).unwrap().name, RECYCLE_BIN);
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* Sennel writes no history, so the only way to get one in a test is the
+       way KeePassXC gets one: edit through the crate's tracking API, which
+       pushes the pre-edit state into the entry's history. */
+    fn with_history(v: &mut Vault, id: &EntryId, passwords: &[&str]) {
+        for pw in passwords {
+            let mut entry = v.db.entry_mut(*id).expect("no entry");
+            let mut tracked = entry.track_changes();
+            tracked.set_protected(PASSWORD, *pw);
+        }
+    }
+
+    /* An entry imported from KeePassXC arrives holding every password it ever
+       had. Invisible is the wrong way to hold that: you cannot decide whether
+       to keep something you cannot see. */
+    #[test]
+    fn history_reads_newest_first_and_clears_in_one_go() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "first-pw", "", "").unwrap();
+        with_history(&mut v, &id, &["second-pw", "third-pw"]);
+
+        let versions = crate::vault::history(&v.get_entry(&id).unwrap());
+        assert_eq!(versions.len(), 2, "{versions:?}");
+        // Newest first: index 0 is the version just before the current one.
+        assert_eq!(versions[0].password, "second-pw");
+        assert_eq!(versions[1].password, "first-pw");
+        assert_eq!(versions[0].username, "octo");
+        // The live entry is not one of them.
+        assert_eq!(v.get_entry(&id).unwrap().password(), "third-pw");
+
+        /* And Sennel's own edits add none: that is the promise the security
+           page makes, so it is the one worth a test. */
+        v.update_entry(&id, "mail", "octo", Some("fourth-pw"), "", "").unwrap();
+        assert_eq!(crate::vault::history(&v.get_entry(&id).unwrap()).len(), 2);
+
+        let gone = v.clear_history(&id).unwrap();
+        assert_eq!(gone, 2);
+        assert!(crate::vault::history(&v.get_entry(&id).unwrap()).is_empty());
+        assert_eq!(v.get_entry(&id).unwrap().password(), "fourth-pw", "the live entry changed");
+        // Clearing an entry with nothing to clear is not an error.
+        assert_eq!(v.clear_history(&id), Ok(0));
+    }
+
+    /* Cleared has to mean cleared in the file, or the old passwords are still
+       there for anyone who opens it with another client. */
+    #[test]
+    fn cleared_history_stays_cleared_through_a_save() {
+        let dir = std::env::temp_dir().join(format!("sennel-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hist.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "old-pw", "", "").unwrap();
+        with_history(&mut v, &id, &["new-pw"]);
+        v.save_as(&path, "pw", None).unwrap();
+
+        // It survives a round trip while it is there...
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(crate::vault::history(&back.get_entry(&id).unwrap()).len(), 1);
+
+        let mut back = back;
+        back.clear_history(&id).unwrap();
+        back.save().unwrap();
+        let after = Vault::open(&path, "pw", None).unwrap();
+        assert!(
+            crate::vault::history(&after.get_entry(&id).unwrap()).is_empty(),
+            "the old password is still in the file"
+        );
         std::fs::remove_file(&path).ok();
     }
 

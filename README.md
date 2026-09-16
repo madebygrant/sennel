@@ -45,6 +45,10 @@ and `NO_COLOR` still gives you a usable app.
 cannot show: KeePassXC's custom string fields with their values, and the files on an entry. `y`
 copies a field, `s` writes an attachment out, `a` and `f` add them.
 
+**It can forget, too.** Sennel's own edits write no history, so an old password is never kept
+behind your back. Entries that arrive from KeePassXC often carry one anyway, and `H` shows every old
+version it holds and clears them for good.
+
 **It tells you which passwords to change.** `!` lists every reused, weak or empty password in the
 vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
 finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
