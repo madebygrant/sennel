@@ -9,8 +9,15 @@ from your config, or press `^o` to pick from a list of folders and `.kdbx` files
 a folder or takes a vault, `←` goes back up, and typing narrows the list. Then `tab` to the password
 box and `enter` to unlock.
 
-A vault that opens is remembered. Its path goes into `config.toml` as `db`, and Sennel says so when
-it writes it. Under `--no-config` there is nowhere to write, so nothing is written.
+A vault that opens is remembered. Its path goes into `config.toml` as `db`, and it joins the vault
+library, which `^v` opens: every vault this machine has unlocked, newest first, with the current one
+marked and any that have since moved marked `missing`. `enter` points the session at one, `^d`
+forgets a row (the file itself is never touched), and typing narrows the list over the whole path,
+so `work` finds a vault by its folder as well as by its name. Under `--no-config` there is nowhere
+to write, so nothing is remembered.
+
+Picking a vault whose file is gone is allowed, and the screen then reads `new database`: it is a
+path with nothing behind it, and `enter` would create one.
 
 The path field is editable every time the app locks. An idle auto-lock drops the secrets and the
 editor state, not the vault path, so switching vaults after a lock is `esc`, edit the file box,
@@ -25,6 +32,7 @@ not the browser's `*`.
 | ------------------- | ------------------------------------------------------------- |
 | `tab ↑ ↓`           | move between boxes on prompt screens (unlock, forms)          |
 | `^o`                | pick the vault file from a list (unlock screen)               |
+| `^v`                | the vault library · `^d` forgets a row (unlock screen)        |
 | `enter`             | unlock, or save the form                                      |
 | `j k ↑ ↓`           | move within the pane                                          |
 | `^d ^u` `PgUp PgDn` | move a screen at a time                                       |

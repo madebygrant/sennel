@@ -473,7 +473,7 @@ fn home() -> PathBuf {
 
 /// The vault's file name — the whole path would push the header off the row,
 /// and the directory is not what tells two vaults apart.
-fn vault_name(path: &std::path::Path) -> String {
+pub fn vault_name(path: &std::path::Path) -> String {
     path.file_name()
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
@@ -507,6 +507,39 @@ impl Browse {
         self.rows
             .iter()
             .filter(|row| needle.is_empty() || row.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+}
+
+/// One row of the vault library: a file opened before, and whether it is
+/// still on the disk.
+pub struct Shelf {
+    pub path: PathBuf,
+    /// Statted when the list opens, not per frame: the draw loop must not
+    /// touch the disk, and a vault on a network share can be slow to answer.
+    pub missing: bool,
+}
+
+/* The vault library behind `^v`. `^o` answers "where is it"; this answers
+   "which one", which is the question anybody with a work vault and a personal
+   one actually has. The list is paths, never contents: nothing here is
+   unlocked, so it holds no secret. */
+pub struct Library {
+    pub rows: Vec<Shelf>,
+    pub cursor: usize,
+    /// Typed narrowing, a plain substring over the whole path, so `work`
+    /// finds a vault by its folder as well as by its name.
+    pub filter: String,
+}
+
+impl Library {
+    pub fn shown(&self) -> Vec<&Shelf> {
+        let needle = self.filter.to_lowercase();
+        self.rows
+            .iter()
+            .filter(|row| {
+                needle.is_empty() || row.path.display().to_string().to_lowercase().contains(&needle)
+            })
             .collect()
     }
 }
@@ -612,6 +645,10 @@ pub struct App {
     pub unlock_file: String,
     /// The file picker, while it is open. `^o` on the unlock screen.
     pub browse: Option<Browse>,
+    /// The vault library, while it is open. `^v` on the unlock screen.
+    pub library: Option<Library>,
+    /// Every vault opened before, newest first, from the config.
+    pub recent: Vec<PathBuf>,
     /* Where a chosen vault is remembered, and what is already written there.
        Both `None` under --no-config, which asked for the file to be left out
        of the run and so cannot be where a choice is kept. */
@@ -730,6 +767,8 @@ impl App {
             browse: None,
             config_file: None,
             configured_db: None,
+            library: None,
+            recent: Vec::new(),
             board: None,
             unlock_confirm: String::new(),
             caret: 0,
@@ -1321,8 +1360,12 @@ impl App {
                 self.unlock_reveal = false;
                 self.unlock_field = UnlockField::Password;
                 self.caret = 0;
-                self.unlock_new = false;
+                /* Read before it is cleared. It used to be cleared first and
+                   read after, so `created` was always false and the line
+                   telling a brand-new vault's owner what to press next had
+                   never once been shown. */
                 let created = self.unlock_new;
+                self.unlock_new = false;
                 /* Said at unlock, not at the first failed autosave: an older
                    KDBX opens fine and can never be written, and finding that
                    out ten minutes into editing means ten minutes of work with
@@ -1350,6 +1393,7 @@ impl App {
                    the session. Written after the unlock, never before, so a
                    mistyped path cannot become the default. */
                 self.remember_vault(&path);
+                self.remember_recent(&path);
             }
             Err(VaultError::WrongPassword) => {
                 self.unlock_reveal = false;
@@ -1414,6 +1458,156 @@ impl App {
 
     pub fn close_browse(&mut self) {
         self.browse = None;
+    }
+
+    /// The library the config remembers, at startup.
+    pub fn set_recent(&mut self, recent: Vec<PathBuf>) {
+        self.recent = recent;
+    }
+
+    /* `^v`: every vault this machine has opened, newest first. Statted once
+       here rather than per frame — the draw loop must not touch the disk, and
+       a vault on a network share can take its time answering. */
+    pub fn open_library(&mut self) {
+        if self.recent.is_empty() {
+            self.say("no vaults remembered yet  ·  ^o finds one, and opening it adds it here");
+            return;
+        }
+        let rows = self
+            .recent
+            .iter()
+            .map(|path| Shelf {
+                missing: !path.is_file(),
+                path: path.clone(),
+            })
+            .collect();
+        self.library = Some(Library {
+            rows,
+            cursor: 0,
+            filter: String::new(),
+        });
+    }
+
+    pub fn close_library(&mut self) {
+        self.library = None;
+    }
+
+    pub fn library_step(&mut self, down: bool) {
+        let Some(library) = &mut self.library else {
+            return;
+        };
+        let n = library.shown().len();
+        if n == 0 {
+            return;
+        }
+        library.cursor = if down {
+            (library.cursor + 1) % n
+        } else {
+            (library.cursor + n - 1) % n
+        };
+    }
+
+    pub fn library_end(&mut self, bottom: bool) {
+        let Some(library) = &mut self.library else {
+            return;
+        };
+        library.cursor = if bottom {
+            library.shown().len().saturating_sub(1)
+        } else {
+            0
+        };
+    }
+
+    pub fn library_filter(&mut self, c: char) {
+        let Some(library) = &mut self.library else {
+            return;
+        };
+        library.filter.push(c);
+        library.cursor = 0;
+    }
+
+    pub fn library_backspace(&mut self) {
+        let Some(library) = &mut self.library else {
+            return;
+        };
+        library.filter.pop();
+        library.cursor = 0;
+    }
+
+    /* Enter on the library: point the session at that vault and hand the keys
+       to the password box. A missing file is still chosen rather than
+       refused — the box then says "new database", which is the honest reading
+       of a path with nothing behind it. */
+    pub fn library_choose(&mut self) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let rows = library.shown();
+        let Some(row) = rows.get(library.cursor) else {
+            self.say("nothing here to choose");
+            return;
+        };
+        let (path, missing) = (row.path.clone(), row.missing);
+        drop(rows);
+        self.unlock_file = path.display().to_string();
+        self.db_path = Some(path.clone());
+        self.library = None;
+        self.refresh_db_state();
+        self.unlock_field = UnlockField::Password;
+        self.caret = 0;
+        if missing {
+            self.warn(format!(
+                "{}  ·  the file is gone  ·  enter would create a new one",
+                vault_name(&path)
+            ));
+        } else {
+            self.say(format!("{}  ·  enter the password", vault_name(&path)));
+        }
+    }
+
+    /* `^d` on the library: drop a vault from the list. The file is never
+       touched — this is a list of paths, and a password manager that deletes
+       vaults off a keypress is not one anybody should run. */
+    pub fn library_forget(&mut self) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let rows = library.shown();
+        let Some(row) = rows.get(library.cursor) else {
+            return;
+        };
+        let path = row.path.clone();
+        drop(rows);
+        self.recent.retain(|p| p != &path);
+        if let Some(library) = &mut self.library {
+            library.rows.retain(|r| r.path != path);
+            library.cursor = library.cursor.min(library.shown().len().saturating_sub(1));
+        }
+        let name = vault_name(&path);
+        match self.write_recent() {
+            Ok(()) => self.say(format!("forgot {name}  ·  the file itself is untouched")),
+            Err(e) => self.warn(format!("forgot {name} for this session only  ·  {e}")),
+        }
+        if self.recent.is_empty() {
+            self.library = None;
+        }
+    }
+
+    /* A vault that opened goes to the front of the library. Newest first and
+       deduplicated, so opening the same two vaults all week leaves two rows
+       rather than ten. */
+    fn remember_recent(&mut self, path: &Path) {
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(crate::config::RECENT_MAX);
+        /* Silent on failure, unlike the `db` key beside it: that one is a
+           choice the user just made, this one is bookkeeping, and two
+           warnings about the same unwritable file is one too many. */
+        let _ = self.write_recent();
+    }
+
+    fn write_recent(&self) -> anyhow::Result<()> {
+        crate::config::remember_recent(self.config_file.as_deref(), &self.recent)
     }
 
     /* Directories and vaults, nothing else: a picker that lists every file on
@@ -6157,5 +6351,183 @@ pub mod tests {
         let mut app = open_app();
         app.undo_last();
         assert!(app.stage.contains("nothing to undo"), "{}", app.stage);
+    }
+
+    /// A throwaway config file, so the library tests exercise the real
+    /// write-back rather than a list that only ever lived in memory.
+    fn temp_config(tag: &str) -> TempPath {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TempPath(std::env::temp_dir().join(format!(
+            "sennel-test-{tag}-{}-{n}.toml",
+            std::process::id()
+        )))
+    }
+
+    /* A vault that opened goes to the front of the library, and it goes into
+       the config file: a list that lasted exactly as long as the session
+       would be no better than retyping the path. */
+    #[test]
+    fn an_opened_vault_joins_the_library() {
+        let cfg = temp_config("library");
+        let (mut app, tmp) = locked_app_with_db("correct horse");
+        app.config_file = Some(cfg.0.clone());
+        let mut pw = "correct horse".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.recent, vec![tmp.0.clone()]);
+
+        let text = std::fs::read_to_string(&cfg.0).unwrap();
+        assert!(
+            text.contains(&format!("recent = [\"{}\"]", tmp.0.display())),
+            "{text}"
+        );
+        // And it reads back through the real parser, which is the only proof.
+        use clap::Parser;
+        let cli = crate::config::Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            cfg.0.display().to_string(),
+        ])
+        .unwrap();
+        let parsed = crate::config::Config::build(cli).unwrap();
+        assert_eq!(parsed.recent, vec![tmp.0.clone()]);
+    }
+
+    /* Newest first, deduplicated and capped: opening the same two vaults all
+       week must leave two rows, not ten. */
+    #[test]
+    fn the_library_is_newest_first_and_never_repeats_itself() {
+        let mut app = App::new();
+        for n in 0..crate::config::RECENT_MAX + 3 {
+            app.remember_recent(Path::new(&format!("/vaults/{n}.kdbx")));
+        }
+        assert_eq!(app.recent.len(), crate::config::RECENT_MAX, "the cap slipped");
+        assert_eq!(app.recent[0], PathBuf::from("/vaults/12.kdbx"), "newest first");
+        assert!(
+            !app.recent.contains(&PathBuf::from("/vaults/0.kdbx")),
+            "the oldest survived the cap"
+        );
+
+        // Reopening a vault moves it to the front rather than adding a row.
+        let before = app.recent.len();
+        let old = app.recent[4].clone();
+        app.remember_recent(&old);
+        assert_eq!(app.recent.len(), before, "a reopen added a second row");
+        assert_eq!(app.recent[0], old);
+        assert_eq!(
+            app.recent.iter().filter(|p| **p == old).count(),
+            1,
+            "the same vault is in the library twice: {:?}",
+            app.recent
+        );
+    }
+
+    /* Enter on the library points the session at that vault and hands the
+       keys to the password box, which is the next thing to fill. */
+    #[test]
+    fn choosing_from_the_library_points_the_session_at_it() {
+        let (mut app, tmp) = locked_app_with_db("correct horse");
+        let other = temp_path("shelf");
+        app.set_recent(vec![other.0.clone(), tmp.0.clone()]);
+        app.unlock_field = UnlockField::File;
+        app.open_library();
+        app.library_step(true);
+        app.library_choose();
+        assert!(app.library.is_none(), "the popup stayed up");
+        assert_eq!(app.db_path, Some(tmp.0.clone()));
+        assert_eq!(app.unlock_file, tmp.0.display().to_string());
+        assert_eq!(app.unlock_field, UnlockField::Password);
+        assert!(!app.unlock_new, "an existing file read as create");
+    }
+
+    /* A remembered path whose file is gone is still selectable — the unlock
+       screen then offers to create it — but it says so first, because
+       "enter" meaning "make a new empty vault" is not something to discover
+       after the fact. */
+    #[test]
+    fn a_vault_that_moved_is_marked_and_warned_about() {
+        let mut app = App::new();
+        let gone = std::env::temp_dir().join("sennel-test-never-existed.kdbx");
+        let _ = std::fs::remove_file(&gone);
+        app.set_recent(vec![gone.clone()]);
+        app.open_library();
+        assert!(app.library.as_ref().unwrap().rows[0].missing);
+        app.library_choose();
+        assert!(app.stage.contains("the file is gone"), "{}", app.stage);
+        assert_eq!(app.level, Level::Warn);
+        assert!(app.unlock_new, "a missing file did not read as create");
+    }
+
+    /* `^d` forgets a vault. The file is never touched: this is a list of
+       paths, and a password manager that deletes a vault off a keypress is
+       not one anybody should run. */
+    #[test]
+    fn forgetting_a_vault_leaves_the_file_alone() {
+        let cfg = temp_config("forget");
+        let (mut app, tmp) = locked_app_with_db("correct horse");
+        app.config_file = Some(cfg.0.clone());
+        let keep = temp_path("keep");
+        app.set_recent(vec![tmp.0.clone(), keep.0.clone()]);
+        crate::config::remember_recent(Some(&cfg.0), &app.recent).unwrap();
+
+        app.open_library();
+        app.library_forget();
+        assert_eq!(app.recent, vec![keep.0.clone()]);
+        assert!(tmp.0.is_file(), "forgetting a vault deleted it");
+        assert!(app.stage.contains("untouched"), "{}", app.stage);
+
+        // And it is gone from the file too, not just from this session.
+        let text = std::fs::read_to_string(&cfg.0).unwrap();
+        assert!(!text.contains(&tmp.0.display().to_string()), "{text}");
+        assert!(text.contains(&keep.0.display().to_string()), "{text}");
+    }
+
+    /* A key that opens an empty popup is a key that does nothing the first
+       time anybody presses it, so it says where vaults come from instead. */
+    #[test]
+    fn the_library_says_so_when_it_is_empty() {
+        let mut app = App::new();
+        app.open_library();
+        assert!(app.library.is_none());
+        assert!(app.stage.contains("no vaults remembered"), "{}", app.stage);
+    }
+
+    /* Typing narrows the list over the whole path, so a folder name finds a
+       vault as well as its own name does. */
+    #[test]
+    fn typing_narrows_the_library() {
+        let mut app = App::new();
+        app.set_recent(vec![
+            PathBuf::from("/vaults/work/main.kdbx"),
+            PathBuf::from("/vaults/home/main.kdbx"),
+        ]);
+        app.open_library();
+        for c in "work".chars() {
+            app.library_filter(c);
+        }
+        let library = app.library.as_ref().unwrap();
+        assert_eq!(library.shown().len(), 1);
+        assert_eq!(library.shown()[0].path, PathBuf::from("/vaults/work/main.kdbx"));
+        for _ in 0..4 {
+            app.library_backspace();
+        }
+        assert_eq!(app.library.as_ref().unwrap().shown().len(), 2);
+    }
+
+    /* Creating a vault says what to press next. It used to clear the flag
+       before reading it, so `created` was always false and the one line an
+       empty vault's owner needs had never been shown. */
+    #[test]
+    fn a_created_vault_says_what_to_press_next() {
+        let tmp = temp_path("created");
+        let _ = std::fs::remove_file(&tmp.0);
+        let mut app = App::new();
+        app.set_db_path(Some(tmp.0.clone()));
+        assert!(app.unlock_new, "a missing file did not read as create");
+        app.unlock_confirm = "correct horse".into();
+        let mut pw = "correct horse".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser);
+        assert!(app.stage.contains("a adds your first entry"), "{}", app.stage);
     }
 }

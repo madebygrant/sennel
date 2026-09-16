@@ -105,6 +105,8 @@ fn main() -> Result<()> {
     /* Where a chosen vault gets remembered, so the next launch opens it. */
     app.config_file = cfg.config_file.clone();
     app.configured_db = cfg.db.clone();
+    /* And the vaults opened before this one, which `^v` picks from. */
+    app.set_recent(cfg.recent.clone());
     app.refresh_db_state();
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
@@ -198,6 +200,17 @@ fn check(cfg: &Config) -> Result<()> {
         }
         Some(_) => println!("vault     not there yet · unlocking creates it"),
         None => println!("vault     (none)"),
+    }
+    /* The library, since "which vaults does this machine know about" is a
+       question a bug report asks and the TUI answers only behind `^v`. */
+    if cfg.recent.is_empty() {
+        println!("library   (none yet)");
+    } else {
+        for (n, path) in cfg.recent.iter().enumerate() {
+            let label = if n == 0 { "library  " } else { "         " };
+            let state = if path.is_file() { "" } else { " · missing" };
+            println!("{label} {}{state}", path.display());
+        }
     }
     println!(
         "hardened  {}",
@@ -732,6 +745,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_browse_key(app, code, mods);
         return;
     }
+    // The library owns the keys the same way, and for the same reason.
+    if app.library.is_some() {
+        handle_library_key(app, code, mods);
+        return;
+    }
     /* The lock screen owns every printable key, so the overlay needs one no
        password can contain: `h` there types an h, which left the bar's "h
        keys" promising a key that does not exist on the first screen anybody
@@ -1096,6 +1114,27 @@ fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+/* The vault library. Same shape as the picker above, plus `^d`, which drops
+   a row from the list and never touches the file behind it. */
+fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Esc => app.close_library(),
+        KeyCode::Enter => app.library_choose(),
+        KeyCode::Up => app.library_step(false),
+        KeyCode::Down => app.library_step(true),
+        KeyCode::Char('p') if ctrl => app.library_step(false),
+        KeyCode::Char('n') if ctrl => app.library_step(true),
+        KeyCode::Char('d') if ctrl => app.library_forget(),
+        KeyCode::Home => app.library_end(false),
+        KeyCode::End => app.library_end(true),
+        KeyCode::Backspace => app.library_backspace(),
+        KeyCode::Char(c) if !ctrl => app.library_filter(c),
+        _ => {}
+    }
+}
+
 /* Every printable key is text while the lock owns the screen, so `q` types a
    letter instead of ending the session. The shape mirrors earworm's prompt
    keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
@@ -1120,6 +1159,9 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         /* `^o`: pick the vault from a list instead of typing its path. */
         KeyCode::Char('o') if ctrl => app.open_browse(),
+        /* `^v`: the vaults this machine has opened before, which is a shorter
+           list than the disk and the one a second vault lives on. */
+        KeyCode::Char('v') if ctrl => app.open_library(),
         // The first screen anybody sees is the first one worth recolouring.
         KeyCode::Char('t') if ctrl => app.cycle_theme(),
         KeyCode::Left if !ctrl => app.unlock_move(false),

@@ -6,6 +6,9 @@
 
 ```toml
 db = "~/vaults/main.kdbx"      # default database · rewritten when you open another
+recent = ["~/vaults/main.kdbx", "~/vaults/work.kdbx"]
+                               # the vault library behind ^v · written by the app,
+                               # newest first, ten at most
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
@@ -24,8 +27,12 @@ ambiguous = false              # true allows l 1 I O 0, which read alike
 cursor = "#00ff88"
 ```
 
-Sennel rewrites `db` and `theme` in place when you open another vault or press `^t`. It edits the
-one line and leaves your comments, ordering and unknown keys alone.
+Sennel rewrites `db`, `recent` and `theme` in place when you open another vault or press `^t`. It
+edits the one line and leaves your comments, ordering and unknown keys alone.
+
+`recent` holds paths and nothing else, but a list of where your vaults live is still worth keeping
+to yourself, which is why the file is `0600`. Trim it by hand, or press `^d` on a row in `^v`.
+`--check` prints it.
 
 ## Command line
 

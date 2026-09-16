@@ -130,6 +130,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.browse.is_some() {
         draw_browse(frame, app);
     }
+    if app.library.is_some() {
+        draw_library(frame, app);
+    }
     recolour(frame);
 }
 
@@ -1004,7 +1007,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     /* The picker stands in for this box while it is open: two popups over
        each other read as one broken one, and the boxes behind are not
        answering anything until a file is chosen. */
-    if app.browse.is_some() {
+    if app.browse.is_some() || app.library.is_some() {
         return;
     }
     let title = if app.unlock_new && app.db_path.is_some() {
@@ -1103,6 +1106,15 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     rows.push(Line::from(p.faint(format!(
         " tab field   {go}   ^o browse   esc clear   ^r reveal"
     ))));
+    /* Only when there is something behind it: a key naming an empty list is
+       a key that does nothing the first time anybody presses it. */
+    if !app.recent.is_empty() {
+        let n = app.recent.len();
+        let plural = if n == 1 { "vault" } else { "vaults" };
+        rows.push(Line::from(p.faint(format!(
+            " ^v  {n} {plural} opened before"
+        ))));
+    }
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, &title, rows, width.max(20), &p);
 }
@@ -1371,6 +1383,100 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     popup(frame, &title, lines, width, &p);
 }
 
+/* The vaults this machine has opened, newest first. Paths, not contents:
+   nothing here is unlocked, so the list gives away where a vault lives and
+   nothing else — which is why it lives in a 0600 config file. */
+fn draw_library(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(library) = &app.library else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(24, 72);
+    let inner = width.saturating_sub(4) as usize;
+    let room = (area.height as usize).saturating_sub(7).clamp(1, 12);
+    let shown = library.shown();
+    let mut lines: Vec<Line> = Vec::new();
+    if shown.is_empty() {
+        lines.push(Line::from(p.faint(format!(
+            " nothing matches {}  ·  backspace clears",
+            library.filter
+        ))));
+    }
+    let first = library.cursor.saturating_sub(room.saturating_sub(1));
+    for (n, row) in shown.iter().enumerate().skip(first).take(room) {
+        let live = n == library.cursor;
+        let mark = if live { p.lit("▌") } else { Span::raw(" ") };
+        /* The name is what you pick by; the folder is what tells two vaults
+           called `vault.kdbx` apart, so both are on the row and the folder
+           is the half that gives way when the popup is narrow. */
+        let name = crate::app::vault_name(&row.path);
+        let folder = row
+            .path
+            .parent()
+            .map(home_relative)
+            .unwrap_or_default();
+        let open = app.db_path.as_deref() == Some(row.path.as_path());
+        let tail = if row.missing {
+            "  missing".to_string()
+        } else if open {
+            "  ·  current".to_string()
+        } else {
+            String::new()
+        };
+        let room_for_folder = inner.saturating_sub(cols(&name) + cols(&tail) + 4);
+        let style = if row.missing {
+            Style::new().fg(p.muted)
+        } else {
+            p.row(live)
+        };
+        let tail_style = if row.missing {
+            Style::new().fg(p.warn)
+        } else {
+            Style::new().fg(p.muted)
+        };
+        lines.push(Line::from(vec![
+            mark,
+            Span::styled(format!(" {name}"), style),
+            p.faint(format!("  {}", truncate(&folder, room_for_folder))),
+            Span::styled(tail, tail_style),
+        ]));
+    }
+    if shown.len() > room {
+        lines.push(
+            p.faint(format!(" {} of {} shown", room.min(shown.len()), shown.len()))
+                .into(),
+        );
+    }
+    lines.push(Line::default());
+    if !library.filter.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" /", Style::new().fg(p.accent)),
+            Span::styled(library.filter.clone(), Style::new().fg(p.text)),
+        ]));
+    }
+    lines.push(Line::from(p.faint(truncate(
+        " enter open · ^d forget · type to narrow · esc cancel",
+        inner,
+    ))));
+    popup(frame, &format!("{MARK} vaults"), lines, width, &p);
+}
+
+/* `~/vaults` rather than `/Users/someone/vaults`: the home prefix is the same
+   on every row, so it is the part worth spending no columns on. */
+fn home_relative(dir: &std::path::Path) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let text = dir.display().to_string();
+    if home.is_empty() {
+        return text;
+    }
+    match text.strip_prefix(&home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => text,
+    }
+}
+
 /* Its own question rather than a prompt: no vault is blocked on the answer,
    so it carries no reply channel. Only a named key confirms, so an
    unrecognised key must not be an accidental yes. */
@@ -1622,6 +1728,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("reveal", "^r", "show the password plainly"),
             ("theme", "^t", "next palette · remembered"),
             ("find", "^o", "pick a vault file from a list"),
+            ("vaults", "^v", "vaults opened before · ^d forgets one"),
             ("go", "enter", "unlock · apply path from the file box"),
             ("close", "any key", "dismisses this table"),
             ("quit", "^c", ""),
@@ -3406,6 +3513,45 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("no entries here  ·  a adds one"), "{joined}");
+    }
+
+    /* `^v` lists the vaults this machine has opened, marks the one the
+       session is pointed at, and says which have gone missing rather than
+       failing at the password box. */
+    #[test]
+    fn the_library_names_the_current_vault_and_the_missing_one() {
+        let dir = std::env::temp_dir().join(format!("sennel-lib-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.join("personal.kdbx");
+        std::fs::write(&here, b"x").unwrap();
+        let gone = dir.join("moved.kdbx");
+
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.set_recent(vec![here.clone(), gone.clone()]);
+        app.set_db_path(Some(here.clone()));
+        app.open_library();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("personal.kdbx"), "{joined}");
+        assert!(joined.contains("current"), "the open vault is unmarked: {joined}");
+        assert!(joined.contains("missing"), "a vanished vault reads as fine: {joined}");
+        // The unlock boxes step aside rather than sitting under the popup.
+        assert!(!joined.contains("key file"), "two popups at once: {joined}");
+
+        // And the lock screen offers the key only once there is a list behind it.
+        app.close_library();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("^v"), "the key is unadvertised");
+        app.set_recent(Vec::new());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(
+            !screen(&t).join("\n").contains("^v"),
+            "an empty library still advertised a key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* Nobody knows the path to a vault they have not opened yet, so `^o`

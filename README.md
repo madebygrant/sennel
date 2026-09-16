@@ -11,7 +11,8 @@ sennel --db vault.kdbx      # created on first unlock
 sennel get github -p        # or copy one secret and exit
 ```
 
-Open a vault once and Sennel remembers the path, so the next launch is just `sennel`.
+Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
+and `^v` keeps them both.
 
 ## What it does
 
@@ -32,6 +33,11 @@ read-only; `sennel convert` writes a verified KDBX 4 copy beside the original.
 the one-time code — and clicking that row in the detail view does the same, lighting up `✓ copied`
 so you can see it worked. Every copy wipes after 15 seconds, and the status bar counts it down, so you always know
 when a password is still sitting on the pasteboard. Quitting wipes it immediately.
+
+**A vault library, not one favourite.** Work and personal are two vaults, and `db` in a config file
+only ever held one of them. `^v` lists every vault this machine has opened, newest first, marks the
+one that is open and the ones that have moved, and `enter` points the session at another without a
+restart. [More](docs/keys.md).
 
 **It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
 have it open, the next autosave refuses rather than quietly winning. `^s` keeps yours, `^r` takes
@@ -85,6 +91,7 @@ overwritten rather than dropped. `^l` does it now.
 | `j k` `Tab` | move in a pane, switch panes                    |
 | `enter`     | open the entry                                  |
 | `y p U t`   | copy username, password, url, one-time code     |
+| `^v`        | the vaults you have opened (unlock screen)      |
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
 | `!`         | passwords worth changing                        |

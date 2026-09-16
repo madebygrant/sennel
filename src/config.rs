@@ -178,6 +178,10 @@ impl Field {
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub db: Option<String>,
+    /* Written by the app rather than by hand, which is why it is one line of
+       paths and not a table: `^v` on the unlock screen picks from it. */
+    /// Vaults opened before, newest first.
+    pub recent: Option<Vec<String>>,
     pub clipboard_timeout: Option<u64>,
     pub lock_timeout: Option<u64>,
     /// stored · name · recent · updated. `o` cycles from here rather than
@@ -269,6 +273,9 @@ pub const DEFAULT_CLIPBOARD_TIMEOUT: u64 = 15;
 /// Idle seconds before the vault locks and its secrets are wiped. Zero
 /// disables the lock, which is only sensible on a machine nobody else touches.
 pub const DEFAULT_LOCK_TIMEOUT: u64 = 300;
+/// How many vaults the library remembers. Long enough for every vault anyone
+/// juggles, short enough that the list is still a list and not a search.
+pub const RECENT_MAX: usize = 10;
 
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -282,6 +289,9 @@ pub struct Config {
     /// The database to open. `None` means ask, since a password manager
     /// without a vault is a question, not an error.
     pub db: Option<PathBuf>,
+    /// Every vault opened before, newest first. One `db` was the whole
+    /// memory until now, so a second vault meant retyping its path forever.
+    pub recent: Vec<PathBuf>,
     pub clipboard_timeout: u64,
     pub lock_timeout: u64,
     /// Where the entries pane starts. Session-only before this: pressing `o`
@@ -336,6 +346,13 @@ impl Config {
 
         Ok(Config {
             db,
+            recent: file
+                .recent
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| expand(p))
+                .collect(),
             clipboard_timeout: cli
                 .clipboard_timeout
                 .or(file.clipboard_timeout)
@@ -470,19 +487,31 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
    comments, ordering, keys Sennel does not know — comes through untouched. A
    serialize-the-struct round trip would eat all of it. */
 pub fn remember_db(config_file: Option<&std::path::Path>, db: &std::path::Path) -> Result<()> {
-    remember(config_file, "db", &db.display().to_string())
+    remember(config_file, "db", &quote(&db.display().to_string()))
 }
 
 /// The same, for the palette a `^t` landed on.
 pub fn remember_theme(config_file: Option<&std::path::Path>, theme: &str) -> Result<()> {
-    remember(config_file, "theme", theme)
+    remember(config_file, "theme", &quote(theme))
 }
 
+/// The vault library, newest first. Rewritten whole on every open: the order
+/// is most of what the list is for, and it changes each time.
+pub fn remember_recent(config_file: Option<&std::path::Path>, paths: &[PathBuf]) -> Result<()> {
+    let list: Vec<String> = paths
+        .iter()
+        .map(|p| quote(&p.display().to_string()))
+        .collect();
+    remember(config_file, "recent", &format!("[{}]", list.join(", ")))
+}
+
+/// `value` arrives already spelled as TOML, so a caller can write an array
+/// as easily as a string.
 fn remember(config_file: Option<&std::path::Path>, key: &str, value: &str) -> Result<()> {
     let Some(path) = config_file else {
         anyhow::bail!("no config file in this session");
     };
-    let line = format!("{key} = {}", quote(value));
+    let line = format!("{key} = {value}");
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
@@ -904,6 +933,49 @@ mod tests {
         assert!(build("[colors]\ncursor = \"#00ff88\"\n", &[]).theme_overridden);
         assert!(!build("theme = \"neon\"\n", &[]).theme_overridden);
         assert!(!build("[colors]\n", &[]).theme_overridden, "an empty table repaints nothing");
+    }
+
+    /* The library is written by the app and read back by the parser, so the
+       one thing that can break it is a path TOML cannot spell: a quote or a
+       backslash in a folder name would otherwise make the next launch refuse
+       to start. */
+    #[test]
+    fn the_vault_library_survives_awkward_paths() {
+        let mut file = temp("recent");
+        writeln!(file.handle, "# mine\nlock_timeout = 90").unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        let vaults = vec![
+            PathBuf::from("/vaults/work.kdbx"),
+            PathBuf::from("/vaults/say \"hi\"/back\\slash.kdbx"),
+        ];
+        remember_recent(Some(&path), &vaults).unwrap();
+
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vaults);
+        assert_eq!(cfg.lock_timeout, 90, "the rest of the file was eaten");
+
+        // Rewritten whole on the next open, not appended to.
+        remember_recent(Some(&path), &vaults[..1]).unwrap();
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vaults[..1]);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# mine"));
+    }
+
+    /* `~` means home in the library the way it does in `db`: a config copied
+       between machines names the same vault on both. */
+    #[test]
+    fn the_library_expands_a_tilde() {
+        let cfg = build("recent = [\"~/vaults/x.kdbx\"]\n", &[]);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(cfg.recent, vec![PathBuf::from(home).join("vaults/x.kdbx")]);
     }
 
     #[test]
