@@ -784,6 +784,11 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.audit.is_some()
         || app.fields.is_some()
         || app.history.is_some()
+        /* The generator draws over the detail pane, whose copy rows match on
+           the screen row alone. A click one row under the generated password
+           used to copy the selected entry's instead — a different secret, on
+           the clipboard, with a flash naming an entry nobody was looking at. */
+        || app.mint.is_some()
         || app.show_help
     {
         return;
@@ -1852,6 +1857,63 @@ mod tests {
            force the expiry the frame loop would perform, then read. */
         app.expire_now();
         assert!(app.stage.contains("first match"), "{}", app.stage);
+    }
+
+    /* The generator draws over the detail pane, and the pane's copy rows
+       match on the screen row alone — no column. A click one row under the
+       generated password used to land on `CopyRow::Password` and put the
+       selected *entry's* password on the clipboard instead. */
+    #[test]
+    fn the_generator_keeps_the_mouse_out() {
+        use crate::vault::Vault;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault
+            .create_entry(&root, "bank", "octo", "vault-password", "", "")
+            .unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.step_pane(true);
+
+        /* Short enough that the popup, drawn centred, covers the detail
+           pane's copy rows — which is the terminal the bug needed. */
+        let mut t = Terminal::new(TestBackend::new(120, 18)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let rows = app.copy_rows.clone();
+        assert!(!rows.is_empty(), "no copy row to click through");
+
+        app.open_mint();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let before = app.stage.clone();
+        for (row, _) in &rows {
+            handle_mouse(
+                &mut app,
+                event::MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 60,
+                    row: *row,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+        }
+        assert_eq!(app.stage, before, "a click reached the vault behind the popup");
+
+        // And the panes must not scroll under a popup that is not scrollable.
+        let where_it_was = app.entry_cursor;
+        handle_mouse(
+            &mut app,
+            event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 60,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.entry_cursor, where_it_was, "the list moved behind the popup");
     }
 
     /* The form routes ^s to the generator; plainly typing 's' still types. */

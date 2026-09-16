@@ -1764,12 +1764,17 @@ impl App {
             self.say("nothing generated yet  ·  r rolls one");
             return;
         }
-        let password = mint.password.clone();
+        /* Cloned only to release the borrow `say` would collide with, and
+           wiped before anything else happens: the bytes are on the clipboard
+           already, and a second copy freed intact is a second copy. */
+        let mut password = mint.password.clone();
         let Some(board) = &self.board else {
+            password.zeroize();
             self.say("clipboard is not ready  ·  report this as a bug");
             return;
         };
         let copied = board.copy(&password);
+        password.zeroize();
         match copied {
             Ok(()) => {
                 let left = self
@@ -6927,6 +6932,35 @@ pub mod tests {
         app.mint_reroll();
         app.mint_toggle(Knob::Symbols);
         assert!(!app.dirty, "the generator dirtied the vault");
+    }
+
+    /* `y` on an empty popup says so rather than wiping whatever the user is
+       already holding on the clipboard with an empty string. */
+    #[test]
+    fn copying_nothing_says_so_and_leaves_the_clipboard_alone() {
+        let mut app = open_app();
+        app.open_mint();
+        app.mint.as_mut().unwrap().password = String::new();
+        app.mint_copy();
+        assert!(app.stage.contains("nothing generated yet"), "{}", app.stage);
+    }
+
+    /* Copying must not consume what it copied: `y` then `y` again is one
+       password twice, not a password and then an empty clipboard. A session
+       with no board reports it, which is the only end of this the tests can
+       reach — the clipboard itself needs a desktop. */
+    #[test]
+    fn copying_leaves_the_password_on_screen() {
+        let mut app = open_app();
+        app.open_mint();
+        let shown = app.mint.as_ref().unwrap().password.clone();
+        app.mint_copy();
+        assert!(app.stage.contains("clipboard is not ready"), "{}", app.stage);
+        assert_eq!(
+            app.mint.as_ref().unwrap().password,
+            shown,
+            "the copy changed what the popup was showing"
+        );
     }
 
     /* A generated password is a secret on screen, so the lock takes it with

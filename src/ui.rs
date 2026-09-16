@@ -1484,17 +1484,66 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     let settings = mint.settings;
     let bits = mint.bits();
 
+    /* Built first, because how many rows they take is part of the budget the
+       password is measured against. Each knob is coloured by its own state,
+       so the line doubles as the answer to "what is in this password", and it
+       wraps rather than clipping: a knob cut off by the border is a setting
+       whose state cannot be read. */
+    let mut knob_rows: Vec<Line> = Vec::new();
+    let mut row: Vec<Span> = vec![Span::raw(" ")];
+    let mut used = 1;
+    for (on, key, name) in [
+        (settings.classes.upper, "u", "A–Z"),
+        (settings.classes.digits, "d", "0–9"),
+        (settings.classes.symbols, "s", "!@#"),
+        (!settings.exclude_ambiguous, "a", "l1IO0"),
+    ] {
+        let cost = cols(key) + cols(name) + 3;
+        if used + cost > inner && row.len() > 1 {
+            knob_rows.push(Line::from(std::mem::replace(&mut row, vec![Span::raw(" ")])));
+            used = 1;
+        }
+        let style = if on {
+            Style::new().fg(p.text)
+        } else {
+            Style::new().fg(p.muted)
+        };
+        row.push(Span::styled(format!(" {key}"), Style::new().fg(p.accent)));
+        row.push(Span::styled(format!(" {name} "), style));
+        used += cost;
+    }
+    knob_rows.push(Line::from(row));
+
+    /* Everything that is not the password, plus the border. The rows the
+       password gets are what is left: at 256 characters on a short terminal
+       the key hints used to be pushed off the bottom, and they are the only
+       place on screen that says `y` copies. */
+    let fixed = 7 + knob_rows.len() + 2;
+    let room = (area.height as usize).saturating_sub(fixed).max(1);
+    let per_row = inner.saturating_sub(2);
+
     let mut lines: Vec<Line> = vec![Line::default()];
     /* Wrapped, not truncated: at 128 characters an ellipsis would hide most
        of what the popup exists to show. */
     if mint.password.is_empty() {
         lines.push(Line::from(p.faint("  nothing to show  ·  r rolls one")));
     } else {
-        for chunk in wrap(&mint.password, inner.saturating_sub(2)) {
+        let chunks = wrap(&mint.password, per_row);
+        let shown = if chunks.len() > room { room - 1 } else { chunks.len() };
+        for chunk in chunks.iter().take(shown) {
             lines.push(Line::from(Span::styled(
                 format!("  {chunk}"),
                 Style::new().fg(p.accent),
             )));
+        }
+        if shown < chunks.len() {
+            /* Named rather than silently clipped: what `y` copies is the
+               whole password, not the part that fit on the screen. */
+            let left = mint.password.chars().count() - shown * per_row;
+            lines.push(Line::from(p.faint(truncate(
+                &format!("  … {left} more  ·  y copies all of it"),
+                inner,
+            ))));
         }
     }
     lines.push(Line::default());
@@ -1507,26 +1556,7 @@ fn draw_mint(frame: &mut Frame, app: &App) {
         inner,
     ))));
     lines.push(Line::default());
-
-    /* Each knob coloured by its own state, so the line doubles as the answer
-       to "what is in this password". */
-    let knob = |on: bool, key: &str, name: &str| {
-        let style = if on {
-            Style::new().fg(p.text)
-        } else {
-            Style::new().fg(p.muted)
-        };
-        vec![
-            Span::styled(format!(" {key}"), Style::new().fg(p.accent)),
-            Span::styled(format!(" {name} "), style),
-        ]
-    };
-    let mut knobs = vec![Span::raw(" ")];
-    knobs.extend(knob(settings.classes.upper, "u", "A–Z"));
-    knobs.extend(knob(settings.classes.digits, "d", "0–9"));
-    knobs.extend(knob(settings.classes.symbols, "s", "!@#"));
-    knobs.extend(knob(!settings.exclude_ambiguous, "a", "l1IO0"));
-    lines.push(Line::from(knobs));
+    lines.extend(knob_rows);
     lines.push(Line::from(p.faint(truncate(
         "  - +  shorter, longer",
         inner,
@@ -3675,6 +3705,33 @@ mod tests {
         for knob in ["u A–Z", "d 0–9", "s !@#", "a l1IO0"] {
             assert!(joined.contains(knob), "the overlay forgot {knob}: {joined}");
         }
+    }
+
+    /* The keys survive a password that does not fit. At 256 characters on a
+       short terminal the hint line used to be pushed off the bottom, and it
+       is the only place on screen that says `y` copies — so what was left was
+       a password with no visible way to take it. */
+    #[test]
+    fn a_password_too_tall_for_the_screen_keeps_its_keys() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(34, 20);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.open_mint();
+        while app.mint.as_ref().unwrap().settings.length < 256 {
+            app.mint_resize(true);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("y copy"), "the keys fell off: {joined}");
+        assert!(joined.contains("256 chars"), "{joined}");
+        // And it says how much of the password is off screen, not just less of it.
+        assert!(joined.contains("more"), "the clipping is silent: {joined}");
+        /* Both knob rows are there: at this width they wrap, and a knob
+           clipped by the border is a setting whose state cannot be read. */
+        assert!(joined.contains("u A–Z"), "{joined}");
+        assert!(joined.contains("a l1IO0"), "the last knob was cut: {joined}");
     }
 
     /* A long password wraps instead of truncating. Shortened to an ellipsis
