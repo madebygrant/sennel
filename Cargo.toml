@@ -22,6 +22,9 @@ unicode-width = "0.2"
 # (CBC length / header HMAC errors on correct passwords); the keepass crate
 # opens them and is maintained. save_kdbx4 is what lets us write vaults back.
 keepass = { version = "0.13", features = ["save_kdbx4"] }
+# Already in the tree under keepass, named here for the one thing the vault
+# cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rpassword = "7"
 arboard = "3"
 nucleo-matcher = "0.3"

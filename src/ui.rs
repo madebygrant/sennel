@@ -6,6 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
     ScrollbarOrientation, ScrollbarState,
 };
+use chrono::TimeZone;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, Pane, View, char_index_to_byte};
@@ -442,18 +443,24 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/* KDBX stamps are UTC and optional, and say so: a stamp quietly converted
-   wrong reads as a wrong stamp. */
+/* KDBX stores stamps in UTC and may store none at all. Shown in local time:
+   "this afternoon" is what a timestamp is read for, and a clock the reader
+   has to shift in their head is a clock they have to check. */
 fn stamps(entry: &keepass::db::EntryRef<'_>) -> Vec<(&'static str, String)> {
     [
         ("updated", entry.times.last_modification),
         ("created", entry.times.creation),
     ]
     .into_iter()
-    .filter_map(|(label, t)| {
-        t.map(|t| (label, format!("{} UTC", t.format("%Y-%m-%d %H:%M"))))
-    })
+    .filter_map(|(label, t)| t.map(|t| (label, local(t))))
     .collect()
+}
+
+fn local(utc: chrono::NaiveDateTime) -> String {
+    chrono::Local
+        .from_utc_datetime(&utc)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }
 
 /* Enter's detail popup: the whole entry, wide enough for a url and tall
@@ -1387,6 +1394,27 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(!joined.contains("password\u{2022}"), "the label ran into the box");
         assert!(joined.contains("password  "), "{joined}");
+    }
+
+    /* Stamps are stored UTC and read local: an hour that has to be shifted
+       in the reader's head is an hour they end up checking elsewhere. */
+    #[test]
+    fn stamps_render_in_local_time() {
+        use chrono::{NaiveDate, TimeZone};
+        let utc = NaiveDate::from_ymd_opt(2026, 1, 2)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap();
+        let shown = local(utc);
+        let want = chrono::Local
+            .from_utc_datetime(&utc)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        assert_eq!(shown, want);
+        // In any zone off UTC the wall clock differs from the stored stamp.
+        if chrono::Local.from_utc_datetime(&utc).offset().to_string() != "+00:00" {
+            assert_ne!(shown, "2026-01-02 23:30", "the stamp was left in UTC");
+        }
     }
 
     /* The 80-column terminal has no side pane, so Enter's popup is where an
