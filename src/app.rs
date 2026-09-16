@@ -203,7 +203,7 @@ pub enum Cut {
     Group(GroupId),
 }
 
-/* One slot, one undo. The snapshot carries the whole entry — secrets
+/* One step of work, undone. The snapshot carries the whole entry — secrets
    included, zeroized on drop like every other copy — because a field-by-field
    restore would miss the timestamps the form never touches. */
 pub enum Undo {
@@ -519,8 +519,12 @@ pub struct App {
     /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
        before its usual report so a mis-cut is one press from undone. */
     pub cut: Option<Cut>,
-    /* One undo slot, armed by the last mutation and consumed by `u`. */
-    pub undo: Option<Undo>,
+    /* A stack, newest last, pushed by every mutation and popped by `u`.
+       Bounded, because each Delete carries a whole entry and an unbounded
+       stack is an unbounded pile of plaintext passwords in memory — the
+       snapshots zeroize on drop, so dropping the oldest is also the thing
+       that wipes it. */
+    pub undo: Vec<Undo>,
     /* Live fuzzy search. None when the band is closed; Some holds the typed
        needle and filters the entries pane as a predicate — the vault itself
        is never touched. `enter` closes the band keeping the filter; Esc
@@ -602,7 +606,7 @@ impl App {
             rekey: None,
             audit: None,
             cut: None,
-            undo: None,
+            undo: Vec::new(),
             search: None,
             band: false,
             search_global: true,
@@ -941,7 +945,9 @@ impl App {
         self.audit = None;
         self.confirm = None;
         self.cut = None;
-        self.undo = None;
+        /* Dropping the snapshots zeroizes them: an undo stack that outlived a
+           lock would be a pile of plaintext passwords behind a locked screen. */
+        self.undo.clear();
         self.search = None;
         self.band = false;
         self.view = View::Unlock;
@@ -2170,7 +2176,9 @@ impl App {
             Ok(()) => {
                 self.dirty = false;
                 self.overwrite_armed = false;
-                self.undo = None;
+                /* The database was replaced wholesale, so every snapshot on
+                   the stack describes a vault that is no longer there. */
+                self.undo.clear();
                 self.cut = None;
                 self.snap();
                 self.warn("reloaded from disk  ·  your unsaved changes are gone");
@@ -2268,7 +2276,7 @@ impl App {
             };
             match done {
                 Ok(()) => {
-                    self.undo = Some(if forever {
+                    self.push_undo(if forever {
                         Undo::Delete { id, parent, before }
                     } else {
                         Undo::Recycle { id, parent, before }
@@ -2282,10 +2290,7 @@ impl App {
                         "entry moved to the recycle bin  ·  u restores it"
                     });
                 }
-                Err(e) => {
-                    self.undo = None;
-                    self.say(format!("cannot delete  ·  {e}"));
-                }
+                Err(e) => self.say(format!("cannot delete  ·  {e}")),
             }
         }
     }
@@ -2498,15 +2503,17 @@ impl App {
                 } else {
                     None
                 };
-                let vault = self.vault.as_mut().expect("edit form needs a vault");
-                /* Snapshot before the write: undo restores the entry as the
-                   form found it, password included. */
-                if let Some(before) = vault.get_entry(&id) {
-                    self.undo = Some(Undo::Edit {
-                        id,
-                        before: before.clone(),
-                    });
+                /* Snapshot before the write, and before the mutable borrow:
+                   undo restores the entry as the form found it, password
+                   included. */
+                let before = self
+                    .vault
+                    .as_ref()
+                    .and_then(|v| v.get_entry(&id).map(|e| e.clone()));
+                if let Some(before) = before {
+                    self.push_undo(Undo::Edit { id, before });
                 }
+                let vault = self.vault.as_mut().expect("edit form needs a vault");
                 vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
                     .and_then(|()| match otp.as_ref() {
@@ -2520,7 +2527,7 @@ impl App {
         match result {
             Ok(new_id) => {
                 if let Some(id) = new_id {
-                    self.undo = Some(Undo::AddEntry {
+                    self.push_undo(Undo::AddEntry {
                         id,
                         title: form.title.clone(),
                     });
@@ -2540,7 +2547,6 @@ impl App {
             }
             Err(e) => {
                 self.say(format!("cannot save  ·  {e}"));
-                self.undo = None;
                 self.form = Some(form);
             }
         }
@@ -2603,15 +2609,16 @@ impl App {
                 }
             }
             GroupPromptKind::Rename(id) => {
-                let vault = self.vault.as_mut().expect("group prompt needs a vault");
-                /* Snapshot the old name before the rename so one `u` puts
-                  GroupName back. */
-                if let Some(group) = vault.get_group(&id) {
-                    self.undo = Some(Undo::Rename {
-                        id,
-                        before: group.name.clone(),
-                    });
+                /* Snapshot the old name before the rename, and before the
+                   mutable borrow, so one `u` puts it back. */
+                let before = self
+                    .vault
+                    .as_ref()
+                    .and_then(|v| v.get_group(&id).map(|g| g.name.clone()));
+                if let Some(before) = before {
+                    self.push_undo(Undo::Rename { id, before });
                 }
+                let vault = self.vault.as_mut().expect("group prompt needs a vault");
                 vault.rename_group(&id, &prompt.value).map(|()| None)
             }
         };
@@ -2978,10 +2985,12 @@ impl App {
                 if self.cut == Some(Cut::Group(id)) {
                     self.cut = None;
                 }
-                self.undo = match (forever, parent) {
-                    (false, Some(parent)) => Some(Undo::RecycleGroup { id, parent, title }),
-                    _ => None,
-                };
+                /* A permanent group delete takes a subtree with it and no
+                   snapshot is big enough to put that back, so it arms
+                   nothing — and leaves earlier steps alone to be undone. */
+                if let (false, Some(parent)) = (forever, parent) {
+                    self.push_undo(Undo::RecycleGroup { id, parent, title });
+                }
                 self.group_cursor = None;
                 self.snap();
                 self.persist();
@@ -3091,12 +3100,29 @@ impl App {
         }
     }
 
-    /* One slot, one undo: `u` consumes the slot. An older change simply
-       becomes unundoable — a full history is a different product, and the
-       status bar says what the slot holds so the key never surprises. */
+    /* `u` walks back through the session's changes, newest first. It used to
+       be one slot, which meant a mistake noticed one keystroke too late was
+       already permanent — the most common way to actually lose work here.
+
+       Still session-only and still bounded: this is a way back out of what
+       you just did, not a history of the vault. */
+    /* Bounded on purpose. Each Delete holds a whole entry, secrets included,
+       so an unbounded stack is an unbounded pile of plaintext in memory —
+       and dropping the oldest is what zeroizes it. Deep enough to cover a
+       mistake noticed several steps later, which is the case one slot
+       could not. */
+    const UNDO_DEPTH: usize = 32;
+
+    fn push_undo(&mut self, step: Undo) {
+        if self.undo.len() == Self::UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.undo.push(step);
+    }
+
     pub fn undo_last(&mut self) {
-        let Some(undo) = self.undo.take() else {
-            self.say("nothing to undo · the last change had no undo");
+        let Some(undo) = self.undo.pop() else {
+            self.say("nothing to undo · nothing changed this session");
             return;
         };
         let Some(vault) = self.vault.as_mut() else {
@@ -3161,7 +3187,11 @@ impl App {
     /// What the status bar says the undo slot holds, looked up fresh so a
     /// later rename or delete still names the thing it would restore.
     pub fn undo_note(&self) -> Option<String> {
-        let note = match self.undo.as_ref()? {
+        let deeper = match self.undo.len() {
+            0 | 1 => String::new(),
+            n => format!(" +{}", n - 1),
+        };
+        let note = match self.undo.last()? {
             Undo::Edit { before, .. } => format!("undo: edit of {}", before.title()),
             Undo::Delete { before, .. } => format!("undo: restore {}", before.title()),
             Undo::Recycle { before, .. } => format!("undo: restore {}", before.title()),
@@ -3169,7 +3199,7 @@ impl App {
             Undo::AddEntry { title, .. } => format!("undo: remove {title}"),
             Undo::Rename { before, .. } => format!("undo: name {before}"),
         };
-        Some(note)
+        Some(format!("{note}{deeper}"))
     }
 
     /* ^s on the form: generate into the password box. Excludes ambiguous
@@ -4273,6 +4303,108 @@ pub mod tests {
         assert!(!app.stage.contains("remembered"), "{}", app.stage);
     }
 
+    /* ---- Undo depth ---- */
+
+    /* The case one slot could not cover: a mistake noticed a few keystrokes
+       too late. `u` walks back through the session, newest first. */
+    #[test]
+    fn u_walks_back_through_several_changes() {
+        let mut app = open_app();
+        app.step_group(true);
+        let id = app.entry_cursor.unwrap();
+        let before = app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string();
+
+        // Three changes, then three undos.
+        app.open_edit_form();
+        app.form.as_mut().unwrap().title = "first-edit".into();
+        app.submit_form();
+        app.open_edit_form();
+        app.form.as_mut().unwrap().title = "second-edit".into();
+        app.submit_form();
+        app.ask_delete_entry();
+        app.confirm = None;
+        app.confirm_delete_entry(id);
+        assert_eq!(app.undo.len(), 3, "the stack did not grow");
+
+        let title = |app: &App| {
+            app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string()
+        };
+        app.undo_last(); // out of the bin
+        assert!(!app.vault.as_ref().unwrap().is_recycled(&id));
+        app.undo_last(); // back to first-edit
+        assert_eq!(title(&app), "first-edit");
+        app.undo_last(); // back to where it started
+        assert_eq!(title(&app), before);
+        assert!(app.undo.is_empty());
+
+        /* Drain first: the flash queue is bounded, so a message sent while
+           six others are waiting is dropped rather than queued, and the
+           assertion below would be reading somebody else's sentence. */
+        for _ in 0..12 {
+            app.expire_now();
+        }
+        // And the bottom of the stack says so rather than undoing twice.
+        app.undo_last();
+        assert_eq!(title(&app), before);
+        assert!(app.stage.contains("nothing to undo"), "{}", app.stage);
+    }
+
+    /* Each Delete snapshot holds a whole entry, secrets included, so the
+       stack is bounded — and dropping the oldest is what zeroizes it. */
+    #[test]
+    fn the_undo_stack_stops_growing() {
+        let mut app = open_app();
+        app.step_group(true);
+        let id = app.entry_cursor.unwrap();
+        for n in 0..App::UNDO_DEPTH + 5 {
+            app.open_edit_form();
+            app.form.as_mut().unwrap().title = format!("edit-{n}");
+            app.submit_form();
+        }
+        assert_eq!(app.undo.len(), App::UNDO_DEPTH, "the stack is unbounded");
+        /* The oldest steps fell off, so the walk back stops at the oldest
+           one kept rather than at the original title. */
+        for _ in 0..App::UNDO_DEPTH {
+            app.undo_last();
+        }
+        let title = app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string();
+        assert_eq!(title, "edit-4", "{title}");
+    }
+
+    /* A stack of snapshots is a pile of plaintext passwords, so it cannot
+       outlive the screen that was locked. */
+    #[test]
+    fn locking_empties_the_undo_stack() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_edit_form();
+        app.form.as_mut().unwrap().title = "edited".into();
+        app.submit_form();
+        assert!(!app.undo.is_empty());
+        app.lock();
+        assert!(app.undo.is_empty(), "snapshots survived the lock");
+    }
+
+    /* The bar names the next step and how many are behind it, so `u` never
+       surprises. */
+    #[test]
+    fn the_bar_counts_what_is_left_to_undo() {
+        let mut app = open_app();
+        app.step_group(true);
+        assert_eq!(app.undo_note(), None);
+        app.open_edit_form();
+        app.form.as_mut().unwrap().title = "once".into();
+        app.submit_form();
+        let note = app.undo_note().unwrap();
+        assert!(note.contains("undo: edit"), "{note}");
+        assert!(!note.contains('+'), "one step advertised a queue: {note}");
+
+        app.open_edit_form();
+        app.form.as_mut().unwrap().title = "twice".into();
+        app.submit_form();
+        assert!(app.undo_note().unwrap().ends_with(" +1"), "{:?}", app.undo_note());
+    }
+
     /* ---- Change the master password ---- */
 
     /* The whole point: after a rekey the file opens with the new password and
@@ -4632,7 +4764,7 @@ pub mod tests {
         app.ask_delete_entry();
         app.confirm = None;
         app.confirm_delete_entry(id); // to the bin
-        app.undo = None;
+        app.undo.clear();
 
         // Onto the binned row, which lives under the bin group now.
         app.entry_cursor = Some(id);

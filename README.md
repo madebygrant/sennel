@@ -66,7 +66,7 @@ overwritten rather than dropped. `^l` does it now.
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
 | `!`         | passwords worth changing                        |
-| `u`         | undo the last change                            |
+| `u`         | undo, as many steps as you made                 |
 | `h`         | every other key                                 |
 
 [The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering

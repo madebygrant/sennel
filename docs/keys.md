@@ -44,7 +44,7 @@ not the browser's `*`.
 | `X` `V`             | cut, paste entry or group                                     |
 | `←` `→`             | collapse, expand group (in the entries pane, hop)             |
 | `o`                 | entries order: stored, name, recent, updated                  |
-| `u`                 | undo the last change, including a delete (one level)          |
+| `u`                 | undo, step by step back through the session                   |
 | `^l`                | lock now (same wipe as the idle auto-lock)                    |
 | `^p`                | change the master password (typed twice, `^r` reveals)        |
 | `!`                 | reused, weak and empty passwords · `enter` goes to one        |

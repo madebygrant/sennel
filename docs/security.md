@@ -39,7 +39,10 @@ undo snapshots wipe on drop. The status bar names what was copied, never the sec
 
 **Deletes go to the recycle bin.** `D` moves an entry or a group, subtree and all, into the same
 `Recycle Bin` group KeePassXC uses, recorded in the file's own metadata. Nothing is destroyed, the
-entry keeps its id and history, and `u` moves it home. Binned rows draw back in the tree and are
+entry keeps its id and history, and `u` moves it home. `u` walks back through every change this
+session, newest first, up to 32 steps — bounded because each snapshot holds a whole entry, secrets
+included, and dropping the oldest is what zeroizes it. The stack is emptied by a lock and by a
+reload, since neither leaves a vault those snapshots still describe. Binned rows draw back in the tree and are
 left out of counts, search and `--list`, so a deleted password cannot be copied by accident. Inside
 the bin, `D` is the real delete: the confirm says so, and there is no undo for it.
 
