@@ -22,7 +22,7 @@ use zeroize::Zeroize;
 
 use app::{App, Confirm};
 use crate::clipboard::Board;
-use config::{Cli, Config};
+use config::{Cli, Command, Config, Field};
 use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
@@ -34,6 +34,13 @@ fn main() -> Result<()> {
     }
     if cfg.list {
         return list(&cfg);
+    }
+    /* Answers a question and exits, so it runs before the terminal checks
+       below: `sennel get` is the one path meant for a pipe. */
+    if let Some(Command::Get { needle, user, password, url, otp, stdout, force }) = &cfg.command {
+        let field = Field::of(*user, *password, *url, *otp)?;
+        let (needle, stdout, force) = (needle.clone(), *stdout, *force);
+        return get(&cfg, &needle, field, stdout, force);
     }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
        or in CI, crossterm's raw mode fails with an OS error about a device
@@ -179,7 +186,7 @@ fn list(cfg: &Config) -> Result<()> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
-    let mut password = rpassword::prompt_password("password: ")?;
+    let mut password = ask_password("password: ")?;
     let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
     // Used once; the key inside the vault is the only copy that lives on.
     password.zeroize();
@@ -192,6 +199,108 @@ fn list(cfg: &Config) -> Result<()> {
         for entry in vault.entries_in(&id) {
             println!("{}  {}", indent, printable(entry.title()));
         }
+    }
+    Ok(())
+}
+
+/* The master password, from a terminal or from a pipe. rpassword needs a tty
+   and fails with "Device not configured" without one, which makes `get`
+   unusable from the very scripts it exists for. A piped stdin is read as one
+   line instead — the way every other tool takes a passphrase from a pipe.
+
+   The buffer is the caller's to zeroize; this hands back the only copy. */
+fn ask_password(prompt: &str) -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    // The newline is the pipe's, not the password's.
+    let end = line.trim_end_matches(['\n', '\r']).len();
+    line.truncate(end);
+    Ok(line)
+}
+
+/* `sennel get`, the whole non-interactive path. Unlocks, resolves one entry,
+   and either copies (staying alive for the wipe) or prints.
+
+   Exit codes are the contract a script reads: 0 copied, 2 ambiguous, 3 not
+   found, 1 for everything else. Ambiguous and not-found are separated because
+   a script retrying with a longer needle wants to know which happened. */
+fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -> Result<()> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    /* Refused before the password prompt, not after: making somebody type a
+       master password and *then* telling them the output has nowhere safe to
+       go is the rude order to do this in. */
+    if to_stdout && std::io::stdout().is_terminal() && !force {
+        anyhow::bail!(
+            "--stdout into a terminal would leave the secret in your scrollback · pipe it, or --force"
+        );
+    }
+    let mut password = ask_password("password: ")?;
+    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    let vault = opened?;
+
+    let mut searcher = search::Searcher::new();
+    let id = match vault::resolve(&vault, &mut searcher, needle) {
+        vault::Found::One(id) => id,
+        vault::Found::Many(ids) => {
+            eprintln!("{needle:?} matches {} entries:", ids.len());
+            /* Titles only, and sanitised: this is vault text going to a
+               terminal, and it may have been written by anyone. */
+            for id in ids.iter().take(10) {
+                if let Some(entry) = vault.get_entry(id) {
+                    eprintln!("  {}", printable(entry.title()));
+                }
+            }
+            if ids.len() > 10 {
+                eprintln!("  … and {} more", ids.len() - 10);
+            }
+            std::process::exit(2);
+        }
+        vault::Found::None => {
+            eprintln!("nothing matches {needle:?}");
+            std::process::exit(3);
+        }
+    };
+    let entry = vault.get_entry(&id).expect("resolve returned a live id");
+    let title = printable(entry.title());
+    let value = match field {
+        Field::User => entry.username().to_string(),
+        Field::Password => entry.password().to_string(),
+        Field::Url => entry.url().to_string(),
+        /* The code, never the seed: the same rule the TUI's `t` follows, and
+           the reason `get` has no flag that would hand over the seed. */
+        Field::Otp => match vault::totp_now(&entry) {
+            Some((code, _)) => code,
+            None => anyhow::bail!("{title} has no one-time code"),
+        },
+    };
+    if value.is_empty() {
+        anyhow::bail!("{title} has no {}", field.name());
+    }
+    if to_stdout {
+        println!("{value}");
+        return Ok(());
+    }
+
+    let board = Board::new(cfg.clipboard_timeout);
+    board.copy(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match board.timeout_secs() {
+        /* The wipe is a thread inside this process, so exiting now would
+           abandon the secret on the clipboard. Wait it out, say so, and wipe
+           before returning — a `get` that exits instantly is a `get` that
+           leaves a password sitting there. */
+        Some(secs) => {
+            eprintln!("copied the {} for {title} · clears in {secs}s", field.name());
+            std::thread::sleep(Duration::from_secs(secs));
+            board.clear_now();
+        }
+        // `clipboard_timeout = 0` asked for it to stay; nothing to wait for.
+        None => eprintln!("copied the {} for {title}", field.name()),
     }
     Ok(())
 }

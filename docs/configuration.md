@@ -36,9 +36,11 @@ sennel --theme light       # draw in another palette
 sennel --lock-timeout 60   # override lock_timeout · --clipboard-timeout does the same
 sennel --check             # print what the app sees: config, paths, clipboard backend
 sennel --list --db v.kdbx  # group and entry inventory, titles only, no secrets
+sennel get <needle> -p     # copy one field and exit · see docs/get.md
 sennel --no-config         # ignore the config file and write nothing back
 sennel --config path.toml  # read this file instead of the one in ~/.config/sennel
 ```
 
 A path on the command line is visible to `ps`, which is worth knowing on a shared machine.
-`--check` runs headless and needs no TTY.
+`--check`, `--list` and `get` run headless and need no TTY. Without one, `--list` and `get` read the
+master password from the first line of stdin.

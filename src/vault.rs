@@ -908,6 +908,60 @@ impl Vault {
     }
 }
 
+/// What a needle found, for a caller with no screen to show a list on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Found {
+    One(EntryId),
+    /// More than one, best first, for a message that names the candidates.
+    Many(Vec<EntryId>),
+    None,
+}
+
+/* Resolving a needle with nobody to ask. The TUI can show a list and let the
+   cursor decide; `sennel get` has one shot, so the rules have to be ones a
+   user can predict:
+
+   an exact title match, case-insensitive, wins outright even when a dozen
+   entries fuzzy-match it — "mail" should find the entry called "mail" and not
+   the one called "mailchimp-api-key". Failing that, a single fuzzy match
+   wins. Anything else is ambiguous and gets listed rather than guessed at.
+
+   Binned entries are not candidates. Copying the password of something
+   deleted last week is the one outcome worth engineering against. */
+pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &str) -> Found {
+    let live: Vec<EntryId> = vault
+        .entry_refs()
+        .iter()
+        .map(|e| e.id())
+        .collect();
+    let exact: Vec<EntryId> = live
+        .iter()
+        .copied()
+        .filter(|id| {
+            vault
+                .get_entry(id)
+                .is_some_and(|e| e.title().eq_ignore_ascii_case(needle))
+        })
+        .collect();
+    if exact.len() == 1 {
+        return Found::One(exact[0]);
+    }
+    let mut hits: Vec<(u16, EntryId)> = live
+        .into_iter()
+        .filter_map(|id| searcher.rank_entry(needle, vault, &id).map(|score| (score, id)))
+        .collect();
+    // Best first, so an ambiguous answer lists the likeliest candidate first.
+    hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    match hits.len() {
+        0 => Found::None,
+        1 => Found::One(hits[0].1),
+        /* Two entries with the same title are ambiguous even when one scores
+           higher: the score is not something the user can see or reason
+           about, so it must not be what picks their password. */
+        _ => Found::Many(hits.into_iter().map(|(_, id)| id).collect()),
+    }
+}
+
 impl Default for Vault {
     fn default() -> Self {
         Self::new()
@@ -1019,6 +1073,61 @@ mod tests {
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    /* `get` has one shot and nobody to ask, so the rules have to be ones a
+       user can predict before they type. */
+    #[test]
+    fn a_needle_resolves_to_one_entry_or_says_why_not() {
+        let mut v = vault();
+        let root = v.root_id();
+        let mail = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        let chimp = v.create_entry(&root, "mailchimp-api-key", "u", "p", "", "").unwrap();
+        let mut s = crate::search::Searcher::new();
+
+        /* An exact title wins outright, even though "mail" fuzzy-matches the
+           longer one too — otherwise the entry actually called "mail" would
+           be unreachable by its own name. */
+        assert_eq!(resolve(&v, &mut s, "mail"), Found::One(mail));
+        assert_eq!(resolve(&v, &mut s, "MAIL"), Found::One(mail), "case mattered");
+        // A single fuzzy hit is unambiguous even without an exact title.
+        assert_eq!(resolve(&v, &mut s, "chimp"), Found::One(chimp));
+        assert_eq!(resolve(&v, &mut s, "nothinglikethis"), Found::None);
+
+        // Two hits and no exact title: listed, never guessed at.
+        let Found::Many(ids) = resolve(&v, &mut s, "mai") else {
+            panic!("an ambiguous needle picked one");
+        };
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&mail) && ids.contains(&chimp));
+
+        /* Two entries with the same title stay ambiguous: the score that
+           separates them is not something the user can see. */
+        let twin = v.create_entry(&root, "mail", "other", "p", "", "").unwrap();
+        let Found::Many(ids) = resolve(&v, &mut s, "mail") else {
+            panic!("two entries named mail resolved to one");
+        };
+        assert!(ids.contains(&mail) && ids.contains(&twin));
+    }
+
+    /* Copying the password of something deleted last week is the outcome
+       worth engineering against, so the bin is not a candidate. */
+    #[test]
+    fn a_needle_never_resolves_into_the_recycle_bin() {
+        let mut v = vault();
+        let root = v.root_id();
+        let live = v.create_entry(&root, "mail", "u", "live-pw", "", "").unwrap();
+        let dead = v.create_entry(&root, "mail-old", "u", "dead-pw", "", "").unwrap();
+        v.recycle_entry(&dead).unwrap();
+        let mut s = crate::search::Searcher::new();
+
+        assert_eq!(resolve(&v, &mut s, "mail"), Found::One(live));
+        // Even asked for by its exact name, a binned entry is not there.
+        assert_eq!(resolve(&v, &mut s, "mail-old"), Found::None);
+
+        // And once it is out of the bin it answers again.
+        v.move_entry(&dead, &root).unwrap();
+        assert_eq!(resolve(&v, &mut s, "mail-old"), Found::One(dead));
     }
 
     #[test]

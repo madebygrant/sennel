@@ -1,15 +1,21 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 /// KeePass-style terminal password manager.
 #[derive(Parser, Debug)]
 #[command(name = "sennel", version, about, long_about = None)]
 pub struct Cli {
+    /* Optional, so bare `sennel` still opens the TUI. Everything a
+       subcommand needs from the flags above is marked global, or `sennel get
+       x --db v.kdbx` would have to put the flag before the verb. */
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to the .kdbx database. Omit it and Sennel asks for one.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub db: Option<String>,
 
     /// Seconds a copied secret stays on the clipboard before it is cleared
@@ -37,12 +43,88 @@ pub struct Cli {
     pub list: bool,
 
     /// Read this config file instead of the one in ~/.config/sennel
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<String>,
 
     /// Ignore the config file entirely
-    #[arg(long, conflicts_with = "config")]
+    #[arg(long, conflicts_with = "config", global = true)]
     pub no_config: bool,
+}
+
+/* One verb so far. A subcommand rather than a flag because it takes a
+   positional needle and changes what the whole run is for: `sennel` opens a
+   TUI, `sennel get` answers a question and exits. */
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Copy one field of the entry a needle finds, without opening the TUI
+    Get {
+        /// What to look for: fuzzy over titles, usernames, urls and groups
+        needle: String,
+
+        /// Copy the username
+        #[arg(short = 'u', long)]
+        user: bool,
+
+        /// Copy the password (the default when nothing else is named)
+        #[arg(short = 'p', long)]
+        password: bool,
+
+        /// Copy the url
+        #[arg(long)]
+        url: bool,
+
+        /// Copy the current one-time code, never the seed behind it
+        #[arg(long)]
+        otp: bool,
+
+        /// Print the value instead of copying it. Refused into a terminal.
+        #[arg(long)]
+        stdout: bool,
+
+        /// Print to a terminal anyway, scrollback and all
+        #[arg(long, requires = "stdout")]
+        force: bool,
+    },
+}
+
+/// Which field `get` was asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    User,
+    Password,
+    Url,
+    Otp,
+}
+
+impl Field {
+    /// The one flag that was passed, or the password when none was.
+    pub fn of(user: bool, password: bool, url: bool, otp: bool) -> Result<Field> {
+        let asked: Vec<Field> = [
+            (user, Field::User),
+            (password, Field::Password),
+            (url, Field::Url),
+            (otp, Field::Otp),
+        ]
+        .into_iter()
+        .filter_map(|(on, field)| on.then_some(field))
+        .collect();
+        match asked.len() {
+            0 => Ok(Field::Password),
+            1 => Ok(asked[0]),
+            /* Refused rather than ranked: two fields means one clipboard
+               would silently win, and the user cannot tell which. */
+            _ => anyhow::bail!("name one field · -u, -p, --url or --otp"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::User => "username",
+            Field::Password => "password",
+            Field::Url => "url",
+            Field::Otp => "one-time code",
+        }
+    }
 }
 
 /// Every field optional, so an absent key means "no opinion" and falls through
@@ -170,6 +252,8 @@ pub struct Config {
     /// Whether a `[colors]` table is repainting the named theme. `^t` says so
     /// when it switches: the overrides stay in the file and outlive the walk.
     pub theme_overridden: bool,
+    /// The subcommand, when one was given. `None` opens the TUI.
+    pub command: Option<Command>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -217,6 +301,7 @@ impl Config {
             theme: palette,
             theme_warnings: warnings,
             theme_overridden: overridden,
+            command: cli.command,
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,

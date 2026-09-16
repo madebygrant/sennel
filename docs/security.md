@@ -66,5 +66,11 @@ password is not kept behind your back. Entries imported from KeePassXC may alrea
 from that client. Sennel preserves it untouched but neither displays nor clears it. Use KeePassXC if
 you need to purge it.
 
+**`get` keeps the clipboard rules.** The non-interactive path copies through the same board as the
+TUI, waits out the wipe rather than abandoning a secret on the clipboard, and gives the current
+one-time code rather than the seed. `--stdout` is the one way a secret leaves that path, and it
+refuses a terminal unless forced, because scrollback is exactly where a password should not be.
+Entries in the recycle bin are not candidates for any needle.
+
 **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, urls and group paths,
 never notes. Printed inventories carry titles only.

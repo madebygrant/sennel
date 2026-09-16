@@ -8,11 +8,16 @@ macOS and Linux.
 ```sh
 cargo install --path .
 sennel --db vault.kdbx      # created on first unlock
+sennel get github -p        # or copy one secret and exit
 ```
 
 Open a vault once and Sennel remembers the path, so the next launch is just `sennel`.
 
 ## What it does
+
+**Scriptable.** `sennel get github -p` copies a password without opening the TUI, wipes it on the
+same timer, and exits with a code a script can branch on. `--stdout` pipes it instead, and refuses
+to print into a terminal where it would sit in your scrollback. [More](docs/get.md).
 
 **Real KeePass files.** KDBX4 in, KDBX4 out. KeePassXC opens what Sennel writes and Sennel opens
 what KeePassXC writes. No plugins, no homebrew format, no lock-in.
@@ -64,6 +69,7 @@ keys.
 
 ## More
 
+- [`sennel get`](docs/get.md), the non-interactive path
 - [Keys and the unlock screen](docs/keys.md)
 - [Security](docs/security.md), which is the interesting one: what is wiped, when, and why
 - [Themes](docs/themes.md) and how the colours are measured
