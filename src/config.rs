@@ -86,6 +86,23 @@ pub enum Command {
         force: bool,
     },
 
+    /// Print a shell completion script: bash, zsh, fish or elvish
+    Completions {
+        /// The shell to generate for
+        shell: clap_complete::Shell,
+    },
+
+    /// Print the man page, for `sennel man | man -l -`
+    Man,
+
+    /// Print every reused, weak or empty password, without opening the TUI
+    Audit {
+        /// Also ask Have I Been Pwned whether each password is in a breach.
+        /// Only the first five characters of each SHA-1 ever leave the machine.
+        #[arg(long)]
+        pwned: bool,
+    },
+
     /// Read a CSV export from another password manager into the vault
     Import {
         /// The .csv file another tool exported

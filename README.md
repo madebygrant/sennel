@@ -57,6 +57,8 @@ version it holds and clears them for good.
 **It tells you which passwords to change.** `!` lists every reused, weak or empty password in the
 vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
 finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
+`sennel audit --pwned` adds a breach check that never sends your password anywhere.
+[More](docs/audit.md).
 
 **Deletes are recoverable.** `D` moves an entry or a whole group into the same recycle bin
 KeePassXC uses, so a mistake costs one `u` rather than a restore from backup. Binned rows stay out
@@ -90,6 +92,7 @@ keys.
 
 - [`sennel get`](docs/get.md), the non-interactive path
 - [Importing](docs/import.md) from KeePassXC, Bitwarden or 1Password
+- [Auditing](docs/audit.md), including the breach check
 - [Keys and the unlock screen](docs/keys.md)
 - [Security](docs/security.md), which is the interesting one: what is wiped, when, and why
 - [Themes](docs/themes.md) and how the colours are measured
@@ -104,6 +107,11 @@ cargo clippy -- -D warnings
 ```
 
 Rust 1.85+, 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
+
+```sh
+sennel completions zsh > ~/.zfunc/_sennel    # bash, zsh, fish, elvish
+sennel man > /usr/local/share/man/man1/sennel.1
+```
 
 ## License
 

@@ -88,6 +88,13 @@ byte, so a symlink planted at the path cannot redirect it — but it has left th
 message says so. The name is reduced to its last path component first: an attachment called
 `../../.ssh/authorized_keys` lands as a file, not as a write somewhere else entirely.
 
+**The breach check never sends a password.** `sennel audit --pwned` is the only feature that
+touches the network, it is opt-in per run, and it is not reachable from any keystroke in the TUI.
+It sends the first five hex characters of a password's SHA-1 and matches the answer locally, so the
+service learns that somebody asked about one of roughly half a million hashes. SHA-1 is implemented
+in Sennel rather than taken from a crate, and the request goes through `curl` rather than a bundled
+TLS stack — see [the audit page](audit.md) for why.
+
 **The audit runs offline.** `!` compares passwords inside the process and sends nothing anywhere.
 It groups them by hash rather than building a table of every password in the vault, names the
 finding without ever printing the password, and skips the recycle bin: telling somebody to go fix

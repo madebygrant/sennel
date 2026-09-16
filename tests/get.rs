@@ -167,3 +167,49 @@ fn import_dry_run_needs_no_password_and_writes_nothing() {
     std::fs::remove_file(&bad).ok();
 }
 
+
+/* `sennel audit` offline. The `--pwned` half is not tested here: it reaches
+   the real Have I Been Pwned API, and a test that needs the internet fails on
+   a train rather than when the code is wrong. Its arithmetic — the hash, the
+   five characters that leave, the suffix match — is unit-tested instead. */
+#[test]
+fn audit_prints_the_findings_without_printing_the_passwords() {
+    let (out, err, code) = run(&["audit", "--db", FIXTURE]);
+    assert_eq!(code, 0, "{err}");
+    /* The fixture's one entry has a strong unique password, so the clean
+       answer is the one being pinned — including that it says so rather than
+       printing nothing at all. */
+    assert!(out.contains("nothing reused, weak or empty"), "{out}");
+    assert!(!out.contains("sennel-entry-pw"), "the audit printed a password");
+}
+
+/* Completions and the man page are generated from the same clap definition
+   the binary parses with, so the only way they drift is if the generation
+   stops running. That, and working without a vault, is what this pins. */
+#[test]
+fn completions_and_the_man_page_need_no_vault() {
+    for shell in ["bash", "zsh", "fish", "elvish"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_sennel"))
+            .args(["completions", shell])
+            .env("HOME", "/nonexistent")
+            .output()
+            .unwrap();
+        let script = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        assert!(!script.is_empty(), "{shell} produced nothing");
+        // Every subcommand has to be in it, or the completion lies.
+        for verb in ["get", "import", "audit"] {
+            assert!(script.contains(verb), "{shell} completion is missing {verb}");
+        }
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sennel"))
+        .args(["man"])
+        .env("HOME", "/nonexistent")
+        .output()
+        .unwrap();
+    let page = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(page.starts_with(".ie"), "not roff: {}", &page[..40.min(page.len())]);
+    assert!(page.contains(".TH sennel 1"), "{page}");
+}

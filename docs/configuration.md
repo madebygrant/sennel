@@ -38,6 +38,9 @@ sennel --check             # print what the app sees: config, paths, clipboard b
 sennel --list --db v.kdbx  # group and entry inventory, titles only, no secrets
 sennel get <needle> -p     # copy one field and exit · see docs/get.md
 sennel import e.csv        # read another manager's export · see docs/import.md
+sennel audit               # reused, weak and empty passwords · see docs/audit.md
+sennel completions zsh     # completion script · bash, zsh, fish, elvish
+sennel man                 # the man page, as roff
 sennel --no-config         # ignore the config file and write nothing back
 sennel --config path.toml  # read this file instead of the one in ~/.config/sennel
 ```

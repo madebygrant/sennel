@@ -3,6 +3,7 @@ mod clipboard;
 mod config;
 mod generator;
 mod import;
+mod pwned;
 mod search;
 mod theme;
 mod ui;
@@ -42,6 +43,20 @@ fn main() -> Result<()> {
         let field = Field::of(*user, *password, *url, *otp)?;
         let (needle, stdout, force) = (needle.clone(), *stdout, *force);
         return get(&cfg, &needle, field, stdout, force);
+    }
+    /* Before the config is even consulted: printing a completion script is
+       not a session, and it must work on a machine with no vault. */
+    if let Some(Command::Completions { shell }) = &cfg.command {
+        let mut command = Cli::command();
+        clap_complete::generate(*shell, &mut command, "sennel", &mut std::io::stdout());
+        return Ok(());
+    }
+    if let Some(Command::Man) = &cfg.command {
+        clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
+        return Ok(());
+    }
+    if let Some(Command::Audit { pwned }) = &cfg.command {
+        return audit(&cfg, *pwned);
     }
     if let Some(Command::Import { file, group, dry_run }) = &cfg.command {
         let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
@@ -204,6 +219,63 @@ fn list(cfg: &Config) -> Result<()> {
         for entry in vault.entries_in(&id) {
             println!("{}  {}", indent, printable(entry.title()));
         }
+    }
+    Ok(())
+}
+
+/* `sennel audit`: the same findings the TUI's `!` shows, printed. The network
+   check lives out here rather than behind that key because a blocking http
+   request inside a frame loop is how a TUI stops redrawing, and because an
+   audit that reaches the internet should be something you typed. */
+fn audit(cfg: &Config, pwned: bool) -> Result<()> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let mut password = ask_password("password: ")?;
+    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    let vault = opened?;
+
+    let found = vault::audit(&vault);
+    for (id, issue) in &found {
+        let Some(entry) = vault.get_entry(id) else {
+            continue;
+        };
+        println!("{:<40}  {}", printable(entry.title()), issue.say());
+    }
+    if found.is_empty() {
+        println!("nothing reused, weak or empty");
+    }
+    if !pwned {
+        return Ok(());
+    }
+
+    /* One request per prefix, not per entry. A vault where six entries
+       share a password should ask once, and passwords that merely share the
+       first five hex characters ride along in the same answer — which is the
+       same property that makes the k-anonymity worth anything. */
+    println!();
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut breached = 0usize;
+    for entry in vault.entry_refs() {
+        let secret = entry.password();
+        if secret.is_empty() {
+            continue;
+        }
+        let (prefix, suffix) = pwned::split_hash(secret);
+        if !seen.contains_key(&prefix) {
+            let body = pwned::fetch_range(&prefix).map_err(|e| anyhow::anyhow!("{e}"))?;
+            seen.insert(prefix.clone(), body);
+        }
+        let count = pwned::count_in(&seen[&prefix], &suffix);
+        if count > 0 {
+            breached += 1;
+            println!("{:<40}  in {count} known breaches", printable(entry.title()));
+        }
+    }
+    match breached {
+        0 => println!("no password in this vault is in a known breach"),
+        n => println!("\n{n} password(s) are in a known breach · change those first"),
     }
     Ok(())
 }
