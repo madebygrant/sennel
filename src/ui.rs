@@ -2316,6 +2316,65 @@ mod tests {
         assert!(!joined.contains("entry-40"), "{joined}");
     }
 
+    /* A theme may change colour and must never change layout. Every built-in
+       draws the same screen, cell for cell, as the one before it — so a
+       palette cannot quietly take a column with a wider glyph or drop a span,
+       and the frame tests that pin content stay true under all of them. */
+    #[test]
+    fn every_palette_draws_the_same_frame() {
+        use crate::theme::BUILT_INS;
+        use crate::vault::Vault;
+        let symbols = |palette| {
+            let backend = TestBackend::new(100, 24);
+            let mut t = Terminal::new(backend).unwrap();
+            let mut app = App::new();
+            let mut vault = Vault::new();
+            let root = vault.root_id();
+            let banks = vault.create_group(&root, "Banking").unwrap();
+            vault
+                .create_entry(&banks, "checking", "octo", "p", "https://b.example", "note")
+                .unwrap();
+            app.open_vault(vault);
+            app.theme = palette;
+            app.step_group(true);
+            app.mark_dirty();
+            t.draw(|f| draw(f, &mut app)).unwrap();
+            screen(&t)
+        };
+        let (first_name, first) = BUILT_INS[0];
+        let want = symbols(first);
+        for (name, palette) in BUILT_INS {
+            assert_eq!(
+                symbols(palette),
+                want,
+                "{name} draws a different screen from {first_name}"
+            );
+        }
+    }
+
+    /* The gradient is painted from the palette, so a theme's ground has to
+       arrive on screen — a palette whose colours change while the background
+       stays put is the light theme's failure mode. */
+    #[test]
+    fn the_background_comes_from_the_palette() {
+        use crate::vault::Vault;
+        let mut pale = crate::theme::WARM;
+        pale.near = (250, 250, 250);
+        pale.far = (250, 250, 250);
+        let backend = TestBackend::new(40, 10);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.theme = pale;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = t.backend().buffer();
+        assert_eq!(
+            buf[(0, 3)].bg,
+            ratatui::style::Color::Rgb(250, 250, 250),
+            "the ground ignored the palette"
+        );
+    }
+
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
        somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]

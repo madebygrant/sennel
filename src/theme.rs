@@ -50,7 +50,13 @@ pub struct Palette {
    everything secondary is a muted sand rather than a grey. Text and ground
    are both warm, so the one cool colour is what the eye lands on. Every
    colour clears 4.5:1 over the lightest corner of the gradient except `rule`,
-   which is meant to be barely there.
+   which is meant to be barely there, and `error`, which sits at 3.73:1 and is
+   pinned there by the contrast test until it is decided whether to lighten
+   it — the red on a failure flash is the last thing that should be hard to
+   read. */
+/* Measured, not asserted: `every_palette_is_legible_on_its_own_ground` runs
+   the numbers over every built-in, against both ends of the gradient and the
+   tone popups raise themselves with.
 
    The gradient is the hues of
    linear-gradient(45deg, hsla(10,19%,36%,1) 0%, hsla(290,95%,9%,1) 76%) at
@@ -95,6 +101,35 @@ impl Palette {
             ("ink", self.ink),
         ]
     }
+}
+
+/* Every palette Sennel ships. The list is what the contrast, quantise and
+   NO_COLOR checks iterate, so a new theme is covered the moment it is added
+   here and cannot be shipped unmeasured. */
+/* Test-only until the config lookup of wave 4 resolves a name through it. */
+#[cfg(test)]
+pub const BUILT_INS: [(&str, Palette); 1] = [("warm", WARM)];
+
+/* WCAG 2.1 relative luminance and contrast ratio. A palette is a claim about
+   legibility — theme.rs has carried one in a comment since the first commit —
+   and a claim nothing measures is a claim that quietly stops being true. */
+/* Test-only until the user-defined colours of wave 6 warn on a bad override,
+   which is its second caller. */
+#[cfg(test)]
+pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let luminance = |c: (u8, u8, u8)| {
+        let channel = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.0) + 0.7152 * channel(c.1) + 0.0722 * channel(c.2)
+    };
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
 impl Default for Palette {
@@ -306,12 +341,93 @@ mod tests {
     #[test]
     fn every_palette_colour_survives_the_256_colour_cube() {
         for (name, color) in WARM.slots() {
-            let Color::Rgb(r, g, b) = color else {
-                panic!("{name} is not an RGB colour");
-            };
+            let (r, g, b) = rgb(color);
             let (qr, qg, qb) = rgb_of(shade_at(Depth::Ansi256, color));
             let off = r.abs_diff(qr).max(g.abs_diff(qg)).max(b.abs_diff(qb));
             assert!(off <= 20, "{name} moved {off} to ({qr},{qg},{qb})");
+        }
+    }
+
+    fn rgb(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("{other:?} is not an RGB colour"),
+        }
+    }
+
+    /* The three grounds anything is ever read against: the two ends of the
+       gradient, and the flat tone popups raise themselves with. The popup one
+       is not in the original claim, but half the app's text is drawn on it. */
+    fn grounds(p: &Palette) -> [(&'static str, (u8, u8, u8)); 3] {
+        [
+            ("near", p.near),
+            ("far", p.far),
+            ("surface", rgb(p.surface)),
+        ]
+    }
+
+    /* Slots that carry meaning as text, and the ratio each has to clear.
+       4.5:1 is WCAG's bar for body text, which is what all of these are.
+
+       Two are named rather than silently skipped:
+       - `rule` is structure and is meant to be barely there.
+       - `error` is the palette's one shortfall today at 3.73:1 over the warm
+         theme's lightest corner. It is pinned at its measured value rather
+         than exempted, so it cannot get worse while a decision is pending on
+         whether to lighten it — the red on the failure flash is the last
+         thing that should be hard to read. */
+    fn required(slot: &str) -> f64 {
+        match slot {
+            "rule" => 1.8,
+            "error" => 3.7,
+            _ => 4.5,
+        }
+    }
+
+    /* The claim theme.rs has always made, now measured: every palette, every
+       readable slot, against every ground it can land on. */
+    #[test]
+    fn every_palette_is_legible_on_its_own_ground() {
+        for (theme, palette) in BUILT_INS {
+            for (slot, color) in palette.slots() {
+                // Backgrounds and the unused band ink are not read as text.
+                if matches!(slot, "surface" | "ink" | "masked") {
+                    continue;
+                }
+                for (ground, bg) in grounds(&palette) {
+                    let ratio = contrast(rgb(color), bg);
+                    let want = required(slot);
+                    assert!(
+                        ratio >= want,
+                        "{theme}: {slot} on {ground} is {ratio:.2}:1, wants {want}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /* A terminal without 24-bit colour gets the nearest cube or grey, and the
+       nearest grey to a warm brown is a long way from it. 3:1 is WCAG's bar
+       for large text and interface parts, which is the honest bar for a
+       palette somebody else's terminal has already approximated. */
+    #[test]
+    fn every_palette_stays_legible_after_quantising() {
+        for (theme, palette) in BUILT_INS {
+            for (slot, color) in palette.slots() {
+                if matches!(slot, "surface" | "ink" | "masked" | "rule") {
+                    continue;
+                }
+                let ink = rgb_of(shade_at(Depth::Ansi256, color));
+                for (ground, bg) in grounds(&palette) {
+                    let ground_rgb =
+                        rgb_of(shade_at(Depth::Ansi256, Color::Rgb(bg.0, bg.1, bg.2)));
+                    let ratio = contrast(ink, ground_rgb);
+                    assert!(
+                        ratio >= 3.0,
+                        "{theme}: {slot} on {ground} quantises to {ratio:.2}:1"
+                    );
+                }
+            }
         }
     }
 
@@ -345,8 +461,14 @@ mod tests {
     /// Every colour goes, so the words and the marks have to carry it.
     #[test]
     fn no_colour_leaves_nothing_for_a_terminal_to_render() {
-        for (name, color) in WARM.slots() {
-            assert_eq!(shade_at(Depth::Plain, color), Color::Reset, "{name} kept its colour");
+        for (theme, palette) in BUILT_INS {
+            for (slot, color) in palette.slots() {
+                assert_eq!(
+                    shade_at(Depth::Plain, color),
+                    Color::Reset,
+                    "{theme}: {slot} kept its colour"
+                );
+            }
         }
         assert_eq!(shade_at(Depth::Plain, Color::Indexed(4)), Color::Reset);
         assert_eq!(shade_at(Depth::Full, WARM.text), WARM.text);
