@@ -24,7 +24,7 @@ use app::{App, Confirm};
 use crate::clipboard::Board;
 use config::{Cli, Config};
 use keepass::db::GroupId;
-use vault::{EntryExt, Vault};
+use vault::{EntryExt, Vault, printable};
 
 fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
@@ -146,9 +146,9 @@ fn list(cfg: &Config) -> Result<()> {
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
         let indent = "  ".repeat(depth);
-        println!("{}[{}]", indent, vault.get_group(&id).unwrap().name);
+        println!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
         for entry in vault.entries_in(&id) {
-            println!("{}  {}", indent, entry.title());
+            println!("{}  {}", indent, printable(entry.title()));
         }
     }
     Ok(())
@@ -183,7 +183,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
             unlock_now(app);
             terminal.draw(|frame| ui::draw(frame, app))?;
         }
-        let title = app.window_title();
+        /* Sanitised: the title is a file name, and a file name may hold an
+           escape — which would go straight into the terminal's OSC. */
+        let title = printable(&app.window_title());
         if title != titled {
             let _ = execute!(std::io::stdout(), SetTitle(&title));
             titled = title;

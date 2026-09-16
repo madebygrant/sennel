@@ -71,6 +71,18 @@ impl_entry_ext!(Entry);
 impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
+/* Text from a vault, on its way somewhere that is not the TUI. Ratatui drops
+   control characters on the way into its cell buffer, so the browser is safe
+   by construction; `println!` and the terminal-title escape are not, and a
+   `.kdbx` is a file that can arrive from anyone. An entry titled
+   "\x1b]0;owned\x07" would otherwise retitle the window of whoever ran
+   `--list`, and OSC 52 can reach the clipboard on some terminals. */
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '·' } else { c })
+        .collect()
+}
+
 /// The raw `otp` field, which is an `otpauth://` URL when there is one.
 pub fn raw_otp(entry: &EntryRef<'_>) -> Option<String> {
     entry.get_raw_otp_value().map(str::to_string)
@@ -102,6 +114,16 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
         .to_uppercase();
     if secret.is_empty() {
         return Err("nothing to read".into());
+    }
+    /* Checked against the base32 alphabet before it is put in a url, or a
+       "secret" carrying `&algorithm=SHA512` would smuggle its own parameters
+       in beside ours — base32 decoding never sees them, so nothing else would
+       catch it. */
+    if !secret
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c) || c == '=')
+    {
+        return Err("not a base32 secret or an otpauth:// url".into());
     }
     let label = if username.is_empty() {
         title.to_string()
@@ -1031,6 +1053,28 @@ mod tests {
             raw_otp(&entry).as_deref(),
             Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP")
         );
+    }
+
+    /* A "secret" that carries its own url parameters must not reach the
+       stored url: base32 decoding never sees them, so the alphabet check is
+       the only thing between a phishing setup key and a code that quietly
+       uses somebody else's algorithm. */
+    #[test]
+    fn a_seed_cannot_smuggle_url_parameters() {
+        assert!(totp_url("JBSWY3DPEHPK3PXP&algorithm=SHA512", "x", "").is_err());
+        assert!(totp_url("JBSWY3DPEHPK3PXP?digits=8", "x", "").is_err());
+        assert!(totp_url("JBSWY3DPEHPK3PXP#frag", "x", "").is_err());
+        // The real thing still passes, in every shape a site prints it.
+        assert!(totp_url("jbsw y3dp-ehpk 3pxp", "x", "").is_ok());
+    }
+
+    /* Vault text on its way to a terminal keeps its characters and loses its
+       control codes: the TUI is safe by construction, `--list` is not. */
+    #[test]
+    fn printable_strips_escapes_but_keeps_the_text() {
+        assert_eq!(printable("ev\u{1b}]0;pwned\u{7}il"), "ev·]0;pwned·il");
+        assert_eq!(printable("Commonwealth Bank — 银行"), "Commonwealth Bank — 银行");
+        assert_eq!(printable("a\nb\tc"), "a·b·c");
     }
 
     /* Set, read back, and cleared — stored protected, because the seed mints
