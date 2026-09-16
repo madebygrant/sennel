@@ -1,185 +1,65 @@
 # Sennel
 
-A KeePass-style password manager for the terminal, built with [ratatui](https://github.com/ratatui/ratatui).
-Reads and writes real KDBX4 databases (KeePass compatible), gives every secret one-key clipboard
-copy, organises entries into a folder tree, and finds anything with fuzzy search.
+A KeePass password manager that lives in your terminal. Real KDBX4 files, one key per secret,
+fuzzy search over the whole vault, and a clipboard that wipes itself.
 
-macOS and Linux only.
-
-## Quick start
+macOS and Linux.
 
 ```sh
-sennel                     # opens ~/.config/sennel/config.toml's db, or asks for one
-sennel --db vault.kdbx     # open a specific vault (created on first unlock; note that
-                           # a path on the command line is visible to `ps`)
-sennel --check             # print what the app sees: config, paths, clipboard backend
-sennel --theme light       # draw in another palette (warm, light, cool, neon)
-sennel --list --db v.kdbx  # group and entry inventory (titles only, no secrets)
+cargo install --path .
+sennel --db vault.kdbx      # created on first unlock
 ```
 
-Run without installing: `cargo run --release -- --db vault.kdbx`.
-Install onto your PATH: `cargo install --path .`, then just `sennel`.
+Open a vault once and Sennel remembers the path, so the next launch is just `sennel`.
 
-## The unlock screen
+## What it does
 
-The first box is the vault file, so one session can point at any vault. Type a path (or accept the
-one from your config), or press `^o` to pick one from a list: folders and `.kdbx` files only, `enter`
-steps into a folder or takes a vault, `←` goes back up, and typing narrows the list. Then `tab` to
-the password box and `enter` to unlock.
+**Real KeePass files.** KDBX4 in, KDBX4 out. KeePassXC opens what Sennel writes and Sennel opens
+what KeePassXC writes. No plugins, no homebrew format, no lock-in.
 
-A vault that opens is remembered — its path is written into `config.toml` as `db`, so the next launch
-opens it without arguments. Sennel says so when it does; `--no-config` has nowhere to write and so
-does not. The path field is editable every time the app locks — idle auto-lock drops the secrets and
-the editor state, not the vault path, so switching vaults after a lock is `esc`, edit the file box,
-`enter`. A path that doesn't exist yet is a new database: confirm, then set the password twice. Every
-printable key on this screen is text — a `*` in a password types as `*` — so the reveal is `^r`, not
-the browser's `*`.
+**One key per secret.** `y` copies the username, `p` the password, `U` the url, `t` the one-time
+code. Every copy wipes after 15 seconds, and the status bar counts it down, so you always know
+when a password is still sitting on the pasteboard. Quitting wipes it immediately.
 
-## Keys
+**It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
+have it open, the next autosave refuses rather than quietly winning. `^s` keeps yours, `^r` takes
+theirs.
 
-| Key             | Action                                        |
-| --------------- | --------------------------------------------- |
-| `tab ↑ ↓`       | move between boxes on prompt screens (unlock, forms) |
-| `^o`            | pick the vault file from a list (unlock screen) |
-| `enter`         | unlock / save the form                        |
-| `j k ↑ ↓`       | move within the pane                          |
-| `^d ^u` `PgUp PgDn` | move a screen at a time                   |
-| `g` `G`         | top / bottom of the pane                      |
-| `Tab`           | groups pane ↔ entries pane                    |
-| `enter`         | open group / open entry (detail popup)        |
-| `j k` (in the popup) | read the next / previous entry without closing it |
-| `y` `p` `U` `t` | copy username / password / URL / one-time code |
-| `*`             | show/hide the password (needs the detail pane or popup) |
-| `/`             | fuzzy search (`enter` keeps, `esc` clears)    |
-| `^g` (in search) | narrow the needle to this group, or widen it again |
-| `n` `N`         | next / previous match                         |
-| `↑ ↓` (in search) | move through the results while still typing |
-| `a` `e` `D`     | add / edit / delete entry (the form has an `otp` box) |
-| `A` `E`         | add / rename group                            |
-| `D` (on groups) | delete group (refused while not empty)        |
-| `X` `V`         | cut / paste entry or group                    |
-| `←` `→`         | collapse / expand group (entries pane: hop)   |
-| `o`             | entries order: stored, name, recent, updated  |
-| `u`             | undo the last change (one level)              |
-| `^l`            | lock now (same wipe as the idle auto-lock)    |
-| `^t`            | next palette, remembered for next launch      |
-| `^s`            | save now (every change already autosaves)     |
-| `^r`            | reload from disk (offered when the file changed under you) |
-| `^s` (in a form) | generate a password into the edit form       |
-| `^r` (in a form) | show what is in the password box             |
-| `alt+enter`     | new line in the notes box (`enter` saves)     |
-| `h` `?` `F1`    | keys overlay (`F1` on the lock screen, where letters are text) |
-| `esc`           | unwind: drop cut, clear filter, then report   |
-| `q` `^c`        | quit (asks when unsaved changes; `qq` answers) |
+**Fuzzy search that shows its work.** `/` searches titles, usernames, urls and group paths. Never
+notes. The characters that matched light up in each row, so you can see why a row is there.
 
-Platform note: some terminals bind `tab`–`backtab` and arrow chords themselves; every key here also
-has a visible home in the `h` overlay.
+**One-time codes without handing over the seed.** Entries with a code are marked `⊙` and show the
+digits with a countdown. `t` copies them. The seed stays in the vault, because putting a permanent
+credential on the clipboard to save typing six digits is a bad trade.
 
-## Security notes
+**Themes you pick by looking at them.** `^t` walks four palettes with the screen in front of you
+and remembers the one you stop on. Every colour is measured against WCAG 4.5:1 before it ships,
+and `NO_COLOR` still gives you a usable app.
 
-- **KDBX4 end to end.** The vault is a real KeePass database. No plugins, no homebrew format; the
-  file is never modified without your password being re-keyed.
-- **Owner-only files.** Saves are atomic (write to a sibling temp file, then rename) and
-  `chmod 0600` from the first byte, so the vault is readable only by your user. The temp file is
-  created exclusively, so a symlink planted in the vault's directory cannot redirect the write. The
-  config file is `0600` too — it holds no secret, but it names where the vault lives.
-- **No crash dumps, no ptrace.** Core dumps are disabled at startup and, on Linux, the process is
-  marked undumpable: a dump of Sennel holds every secret at once, and a dumpable process can be
-  attached to by anything running as the same user.
-- **Clipboard auto-clear.** Copies are wiped after a configurable interval (default 15s). A second
-  copy re-arms the timer instead of being wiped early, and quitting wipes immediately rather than
-  abandoning a secret on the clipboard — the timer is a thread inside the process, so it cannot
-  outlive it. `clipboard_timeout = 0` means "leave it there" and is honoured on the way out too. The
-  status bar counts the wipe down, so the screen says when a secret is still sitting on the clipboard.
-- **Idle auto-lock.** After the idle timeout (default 300s, `0` disables) the vault is locked and
-  the in-memory secrets are zeroized. `^l` does the same thing on demand.
-- **Zeroized in memory.** Typed password, key-file and one-time-seed boxes are overwritten — not
-  merely emptied — whenever they are cleared, locked or thrown away; the retained database key and
-  undo snapshots wipe on drop. The status bar names what was copied, never the secret.
-- **No recycle bin.** Deletes are confirmed; `u` restores the entry you just deleted (one level).
-  Group deletes are refused while the group holds anything, and are not undoable.
-- **Never overwrites somebody else's write.** Sennel remembers what the file looked like when it
-  opened it — modification time and length. If KeePassXC, a sync client or a second Sennel writes the
-  vault in the meantime, the next autosave is refused rather than silently winning: `^s` overwrites
-  theirs, `^r` takes theirs. (Two writes inside one filesystem timestamp tick that leave the file the
-  same length would slip past; every real edit changes one or the other.)
-- **One-time codes, not their seeds.** An entry with a code is marked `⊙` in the list and shows the
-  current digits and the seconds left; `t` copies them. The seed behind them is never copied — that
-  would put a permanent credential on the clipboard to save typing six digits. The `otp` box in the
-  entry form takes either the `otpauth://` url behind a QR code or the secret a site prints beside
-  it (spaces, hyphens and lower case are all fine), stores it protected, and shows the code it
-  produces while you type so it can be checked before it is saved. Codes are six digits unless the
-  url says otherwise — the rule every authenticator app follows.
-- **Vault text cannot drive your terminal.** Entry titles and group names come out of a file that may
-  have been written by anyone, so control characters are stripped everywhere they leave the TUI —
-  `--list` output and the window title. (Inside the browser, ratatui's cell buffer drops them.)
-- **Entry history is not Sennel's.** Editing an entry here writes no history record, so an old
-  password is not kept behind your back. Entries imported from KeePassXC may already carry history
-  from that client; Sennel preserves it untouched but does not display or clear it — use KeePassXC if
-  you need to purge it.
-- **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
-  paths — never notes — and printed inventories carry titles only.
+**It locks itself.** Five idle minutes and the vault closes, with every secret in memory
+overwritten rather than dropped. `^l` does it now.
 
-## Themes
+## The keys you need on day one
 
-Four palettes ship. `^t` walks them with the screen in front of you — which is how anyone actually
-picks a theme — and writes the one you stop on back to the config, so the next launch keeps it.
-`theme` in the config and `--theme` on the command line name one directly:
+| Key         | Action                                          |
+| ----------- | ----------------------------------------------- |
+| `j k` `Tab` | move in a pane, switch panes                    |
+| `enter`     | open the entry                                  |
+| `y p U t`   | copy username, password, url, one-time code     |
+| `/`         | search                                          |
+| `a e D`     | add, edit, delete an entry                      |
+| `u`         | undo the last change                            |
+| `h`         | every other key                                 |
 
-| Theme   | For                                                                    |
-| ------- | ---------------------------------------------------------------------- |
-| `warm`  | the default: cream and gold on a warm near-black gradient              |
-| `light` | terminals with a light background, where the other three are unreadable |
-| `cool`  | slate and steel — warm's structure with the warmth taken out           |
-| `neon`  | magenta and cyan over violet-to-black                                   |
+[The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering
+keys.
 
-Any slot can be repainted on top of whichever theme is named, so changing one colour does not mean
-restating nine:
+## More
 
-```toml
-theme = "neon"
-
-[colors]
-cursor = "#00ff88"             # text · accent · cursor · warn · error · muted · rule · surface
-```
-
-`text` is titles and anything the eye lands on first; `accent` is chrome — borders, bars, key names;
-`cursor` marks where you are; `warn` and `error` carry the flashes; `muted` is usernames, urls and
-hints; `rule` is the lines between panes; `surface` is the flat tone popups are raised with. A value
-that is not `#rrggbb`, or a slot nobody draws in, stops startup naming what it should have been. A
-colour that merely measures badly starts anyway and says so once — it is your screen. `^t` walks the
-base palette only: the `[colors]` table stays in the file and goes on repainting whatever `^t` lands
-on, which is why the flash says so while a table is there.
-
-Every palette is measured, not eyeballed: each readable colour clears WCAG 4.5:1 against both ends of
-its own gradient and against the tone popups are raised with, still clears 3:1 after a 256-colour
-terminal has quantised it, and collapses to nothing under `NO_COLOR` — where the pane marker (`▌` vs
-`│`) and the `!`/`×` flash glyphs carry what colour was saying. A theme changes colour and never
-layout; the tests assert the frame is identical cell for cell across all four.
-
-## Configuration
-
-`~/.config/sennel/config.toml`, all keys optional:
-
-```toml
-db = "~/vaults/main.kdbx"      # default database · rewritten when you open another
-clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
-lock_timeout = 300             # seconds idle before auto-lock (0 = never)
-sort = "name"                  # entries order at startup: stored, name, recent, updated
-theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
-
-[generator]                    # what ^s makes in the entry form
-length = 20                    # 4–256
-upper = true                   # A–Z
-digits = true                  # 0–9
-symbols = false                # !@#$… — on for sites that demand one
-ambiguous = false              # true allows l 1 I O 0, which read alike
-```
-
-```toml
-mouse = true                   # wheel scrolls, click selects; false gives the
-                               # terminal its own text selection back
-```
+- [Keys and the unlock screen](docs/keys.md)
+- [Security](docs/security.md), which is the interesting one: what is wiped, when, and why
+- [Themes](docs/themes.md) and how the colours are measured
+- [Configuration](docs/configuration.md)
 
 ## Building
 
@@ -189,8 +69,8 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-Rust 1.85+ (2024 edition). `--check` runs headless with no TTY required.
+Rust 1.85+, 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
 
 ## License
 
-MIT OR Apache-2.0 — see LICENSE-MIT and LICENSE-APACHE.
+MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE.
