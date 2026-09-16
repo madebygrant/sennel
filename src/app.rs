@@ -95,6 +95,10 @@ pub struct Form {
        not to keep: so one keystroke in the box flips this latch, and submit
        reads it rather than guessing from emptiness. */
     pub password_touched: bool,
+    /* Whether the password box shows what it holds. Off by default and per
+       form: `^s` generates into a masked box, and a secret you cannot read is
+       one you cannot check before saving. */
+    pub reveal: bool,
 }
 
 /* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
@@ -1582,6 +1586,7 @@ impl App {
             notes: String::new(),
             caret: 0,
             password_touched: false,
+            reveal: false,
         });
     }
 
@@ -1604,6 +1609,7 @@ impl App {
             notes: entry.notes().to_string(),
             caret: entry.title().chars().count(),
             password_touched: false,
+            reveal: false,
         });
     }
 
@@ -1688,6 +1694,32 @@ impl App {
             .char_indices()
             .nth(form.caret)
             .map_or(value.len(), |(at, _)| at)
+    }
+
+    /* `^r` in the form, the same key the lock screen uses: a generated
+       password is worth reading once before it is stored. */
+    pub fn toggle_form_reveal(&mut self) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        form.reveal = !form.reveal;
+        if form.reveal {
+            self.warn("password shown  ·  ^r hides it");
+        }
+    }
+
+    /* alt+enter (or ^j) in the notes box: Enter submits the form, so without
+       this a note could hold a line break but never gain one. Refused
+       elsewhere, where a newline is not a thing a field can hold. */
+    pub fn form_newline(&mut self) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        if form.field != FormField::Notes {
+            self.say("only notes hold more than one line");
+            return;
+        }
+        self.form_insert('\n');
     }
 
     pub fn form_insert(&mut self, c: char) {

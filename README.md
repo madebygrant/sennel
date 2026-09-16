@@ -54,7 +54,9 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `^l`            | lock now (same wipe as the idle auto-lock)    |
 | `^s`            | save now (every change already autosaves)     |
 | `^r`            | reload from disk (offered when the file changed under you) |
-| `^s`            | generate a password into the edit form        |
+| `^s` (in a form) | generate a password into the edit form       |
+| `^r` (in a form) | show what is in the password box             |
+| `alt+enter`     | new line in the notes box (`enter` saves)     |
 | `h` `?` `F1`    | keys overlay (`F1` on the lock screen, where letters are text) |
 | `esc`           | unwind: drop cut, clear filter, then report   |
 | `q` `^c`        | quit (asks when unsaved changes; `qq` answers) |

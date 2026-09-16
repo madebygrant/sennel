@@ -387,6 +387,13 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* ^s generates into the password box: a fresh secret without
            leaving the form, named in the flash with its entropy. */
         KeyCode::Char('s') if ctrl => app.form_generate(),
+        /* The lock screen's reveal, on the same key: a generated password
+           masked end to end cannot be checked before it is stored. */
+        KeyCode::Char('r') if ctrl => app.toggle_form_reveal(),
+        /* Enter submits, so a line break needs a key of its own — otherwise
+           notes can lose one and never gain one. */
+        KeyCode::Enter if mods.contains(KeyModifiers::ALT) => app.form_newline(),
+        KeyCode::Char('j') if ctrl => app.form_newline(),
         KeyCode::Char('w') if ctrl => app.form_kill_word(),
         KeyCode::Left if !ctrl => app.form_move(false),
         KeyCode::Right if !ctrl => app.form_move(true),

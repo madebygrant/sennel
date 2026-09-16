@@ -211,20 +211,78 @@ fn truncate(text: &str, width: usize) -> String {
 /// "password" straight into its value.
 const LABEL: usize = 10;
 
-/* Only worth the column when the list actually runs off the pane. */
+/* Only worth the column when the list actually runs off the pane. Drawn into
+   the pane's own last column, so the lists hand that column back (see
+   `list_width`) rather than letting the thumb land on a name. */
 fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize) {
-    if len > area.height as usize {
-        let mut state = ScrollbarState::new(len).position(at);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .thumb_style(Style::new().fg(DIM))
-                .track_symbol(None),
-            area,
-            &mut state,
-        );
+    if !overflows(area, len) {
+        return;
     }
+    let mut state = ScrollbarState::new(len).position(at);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::new().fg(DIM))
+            .track_symbol(None),
+        area,
+        &mut state,
+    );
+}
+
+fn overflows(area: Rect, len: usize) -> bool {
+    len > area.height as usize
+}
+
+/// Columns a row may use: the pane, less the marker and its space, less the
+/// scrollbar's column when one is going to be drawn.
+fn list_width(area: Rect, len: usize) -> usize {
+    (area.width as usize)
+        .saturating_sub(2 + usize::from(overflows(area, len)))
+}
+
+/* What fits on one entry row. The title used to be truncated to the pane and
+   the username appended after it, so the line ran past the edge and ratatui
+   clipped it — a username cut with no marker, the very thing `truncate`
+   exists to prevent. Everything is measured against one budget now, and the
+   least important column is the first to go. */
+fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, String, String) {
+    const GAP: usize = 2;
+    const MIN_TITLE: usize = 8;
+    const MIN_SIDE: usize = 6;
+    let mut left = avail;
+    let title_want = cols(title);
+    let mut title_room = title_want.min(left);
+
+    let fitted = |text: &str, prefix: usize, left: &mut usize, title_room: &mut usize| {
+        if text.is_empty() {
+            return String::new();
+        }
+        let want = cols(text) + prefix;
+        let spare = left.saturating_sub(*title_room);
+        /* Borrow from the title only down to a readable stub: a row whose
+           name is three characters has stopped being a list. */
+        let room = if spare >= want {
+            want
+        } else {
+            let borrow = (*title_room).saturating_sub(MIN_TITLE);
+            (spare + borrow).min(want)
+        };
+        if room < prefix + MIN_SIDE {
+            return String::new();
+        }
+        if room > spare {
+            *title_room -= room - spare;
+        }
+        *left -= room;
+        truncate(text, room - prefix)
+    };
+
+    /* Group first, because it is the one the search band adds and the one the
+       tree already answers. */
+    let group = fitted(group, 4, &mut left, &mut title_room);
+    let user = fitted(user, GAP, &mut left, &mut title_room);
+    (truncate(title, title_room), user, group)
 }
 
 /* Pre-order with two cells of indent per depth: a flat list of names hides
@@ -242,7 +300,7 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
         .position(|(id, _)| Some(*id) == app.group_cursor)
         .unwrap_or(0);
     let live = app.active_pane == Pane::Groups;
-    let width = area.width as usize;
+    let width = list_width(area, tree.len());
     let items: Vec<ListItem> = tree
         .iter()
         .map(|(id, depth)| {
@@ -266,17 +324,8 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "▸ "
             };
-            let shown = truncate(
-                &format!("{}{}{name}", "  ".repeat(*depth), branch),
-                width.saturating_sub(2),
-            );
-            let mark = if selected && live {
-                teal("▌")
-            } else if selected {
-                dim("▌")
-            } else {
-                Span::raw(" ")
-            };
+            let shown = truncate(&format!("{}{}{name}", "  ".repeat(*depth), branch), width);
+            let mark = mark(selected, live);
             ListItem::new(Line::from(vec![
                 mark,
                 Span::styled(format!(" {shown}"), row_style(selected)),
@@ -314,7 +363,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .position(|id| Some(*id) == app.entry_cursor)
         .unwrap_or(0);
     let live = app.active_pane == Pane::Entries;
-    let width = area.width as usize;
+    let width = list_width(area, rows.len());
     let items: Vec<ListItem> = rows
         .iter()
         .map(|id| {
@@ -335,14 +384,16 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                     ))
                 })
                 .unwrap_or_default();
-            let name = truncate(&title, width.saturating_sub(2));
-            let mark = if selected && live {
-                teal("▌")
-            } else if selected {
-                dim("▌")
-            } else {
-                Span::raw(" ")
-            };
+            let (name, user, group) = fit_row(
+                width,
+                &title,
+                &user,
+                /* Global search pulls rows out of their folder, so the pane
+                   says where each one lives — the same dim-suffix rule as the
+                   user, and the first column dropped when space runs out. */
+                if searching { &group } else { "" },
+            );
+            let mark = mark(selected, live);
             let mut spans = vec![
                 mark,
                 Span::styled(format!(" {name}"), row_style(selected)),
@@ -350,9 +401,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             if !user.is_empty() {
                 spans.push(dim(format!("  {user}")));
             }
-            /* Global search pulls rows out of their folder, so the pane says
-               where each one lives — the same dim-suffix rule as the user. */
-            if searching && !group.is_empty() {
+            if !group.is_empty() {
                 spans.push(dim(format!("  · {group}")));
             }
             ListItem::new(Line::from(spans))
@@ -641,6 +690,18 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     const KEYS: &str = "h keys";
     let width = area.width as usize;
+    /* Narrower than this and the copy keys are what has to go: `h keys` is
+       the row's reason to exist, and at 24 columns it was the thing falling
+       off the end. */
+    if width < 40 {
+        let keys = if app.view == View::Browser { KEYS } else { "F1 keys" };
+        let spans = vec![
+            Span::raw(" ".repeat(pad(width, 0, cols(keys)))),
+            dim(keys),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     /* The lock screen takes every printable key as text, so its bar names
        only chords: `h` there types an h, and a bar promising "h keys" on the
        first screen anybody sees was promising a key that does not exist. */
@@ -823,15 +884,17 @@ fn delete_question(kind: &str, title: &str, room: usize) -> String {
    focused one. Shape mirrors the unlock screen so muscle memory carries over.
    The password box masks as bullets and, on edit, advertises that empty
    keeps — the one box where emptiness has a meaning. */
+fn split_at_char(text: &str, caret: usize) -> (String, String) {
+    let mut first = text.chars();
+    let head: String = first.by_ref().take(caret).collect();
+    (head, first.collect())
+}
+
 fn draw_form(frame: &mut Frame, app: &App) {
     let Some(form) = &app.form else {
         return;
     };
-    let split_at_char = |text: &str, caret: usize| -> (String, String) {
-        let mut first = text.chars();
-        let head: String = first.by_ref().take(caret).collect();
-        (head, first.collect())
-    };
+
     let row = |label: &'static str, field: FormField, value: &str| -> Line<'_> {
         let focused = form.field == field;
         let shown = match field {
@@ -840,6 +903,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
             FormField::Password if value.is_empty() && !form.password_touched => {
                 "(leave empty to keep)".to_string()
             }
+            FormField::Password if form.reveal => value.to_string(),
             FormField::Password => "•".repeat(value.chars().count()),
             _ => value.to_string(),
         };
@@ -858,24 +922,72 @@ fn draw_form(frame: &mut Frame, app: &App) {
             Span::styled(tail, style),
         ])
     };
-    let lines = vec![
+
+    /* Notes are the one field that holds newlines, and rendering them as one
+       Line welded them together — "card ending 4417second line" — while Enter
+       submitted the form, so a break could be destroyed but never typed. One
+       row per line, `⏎` where a break is, and the caret lands on the row it
+       is actually in. */
+    let notes_rows = |value: &str, focused: bool, caret: usize| -> Vec<Line<'_>> {
+        let style = if focused {
+            Style::new().fg(CREAM)
+        } else {
+            Style::new().fg(DIM)
+        };
+        let mut out = Vec::new();
+        let mut seen = 0;
+        let parts: Vec<&str> = value.split('\n').collect();
+        for (n, part) in parts.iter().enumerate() {
+            let len = part.chars().count();
+            let last = n + 1 == parts.len();
+            let label = if n == 0 { "notes" } else { "" };
+            let mut spans = vec![Span::styled(format!(" {label:<LABEL$}"), style)];
+            /* The caret belongs to exactly one row: the one whose span of the
+               string contains it, and the break itself counts as a column. */
+            if focused && caret >= seen && caret <= seen + len {
+                let (head, tail) = split_at_char(part, caret - seen);
+                spans.push(Span::styled(head, style));
+                spans.push(Span::styled("█".to_string(), style));
+                spans.push(Span::styled(tail, style));
+            } else {
+                spans.push(Span::styled((*part).to_string(), style));
+            }
+            if !last {
+                spans.push(dim("⏎"));
+            }
+            out.push(Line::from(spans));
+            seen += len + 1;
+        }
+        out
+    };
+
+    let mut lines = vec![
         row("title", FormField::Title, &form.title),
         row("username", FormField::Username, &form.username),
         row("password", FormField::Password, &form.password),
         row("url", FormField::Url, &form.url),
-        row("notes", FormField::Notes, &form.notes),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(" enter", Style::new().fg(GOLD)),
-            dim(" save   "),
-            Span::styled("^s", Style::new().fg(GOLD)),
-            dim(" generate   "),
-            Span::styled("tab", Style::new().fg(GOLD)),
-            dim(" next box   "),
-            Span::styled("esc", Style::new().fg(GOLD)),
-            dim(" throw away"),
-        ]),
     ];
+    lines.extend(notes_rows(
+        &form.notes,
+        form.field == FormField::Notes,
+        form.caret,
+    ));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" enter", Style::new().fg(GOLD)),
+        dim(" save   "),
+        Span::styled("^s", Style::new().fg(GOLD)),
+        dim(" generate   "),
+        Span::styled("^r", Style::new().fg(GOLD)),
+        dim(" reveal   "),
+        Span::styled("tab", Style::new().fg(GOLD)),
+        dim(" next   "),
+        Span::styled("esc", Style::new().fg(GOLD)),
+        dim(" throw away"),
+    ]));
+    if form.field == FormField::Notes {
+        lines.push(Line::from(dim(" alt+enter starts a new line")));
+    }
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     let title = match form.kind {
         FormKind::Add => "new entry",
@@ -927,16 +1039,46 @@ fn draw_help(frame: &mut Frame, app: &App) {
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;
     let key = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0) + 2;
 
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(label, keys, what)| {
-            Line::from(vec![
-                Span::styled(format!(" {label:group$}"), Style::new().fg(DIM)),
-                Span::styled(format!("{keys:key$}"), Style::new().fg(GOLD)),
-                Span::styled((*what).to_string(), Style::new().fg(CREAM)),
-            ])
-        })
-        .collect();
+    let render = |(label, keys, what): &(&str, &str, &str)| {
+        vec![
+            Span::styled(format!(" {label:group$}"), Style::new().fg(DIM)),
+            Span::styled(format!("{keys:key$}"), Style::new().fg(GOLD)),
+            Span::styled((*what).to_string(), Style::new().fg(CREAM)),
+        ]
+    };
+    let mut lines: Vec<Line> = rows.iter().map(|r| Line::from(render(r))).collect();
+
+    /* A help table that silently loses its last five rows is worse than a
+       short one: on an 80×14 window this used to draw twelve of seventeen
+       keys, with the border sitting on the status bar. Two columns first,
+       since the window is usually wider than it is short. */
+    let area = frame.area();
+    let fits = |lines: &[Line]| lines.len() as u16 + 2 <= area.height;
+    if !fits(&lines) {
+        let half = lines.len().div_ceil(2);
+        let paired: Vec<Line> = (0..half)
+            .map(|n| {
+                let mut spans = render(&rows[n]);
+                if let Some(right) = rows.get(n + half) {
+                    spans.push(dim("   "));
+                    spans.extend(render(right));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        let width = paired.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+        if fits(&paired) && width <= area.width {
+            lines = paired;
+        }
+    }
+    /* Still too tall: say how many rows are missing rather than dropping them
+       behind the border, and name the one thing that brings them back. */
+    if !fits(&lines) {
+        let room = (area.height as usize).saturating_sub(3).max(1);
+        let hidden = lines.len() - room;
+        lines.truncate(room);
+        lines.push(dim(format!(" +{hidden} more · a taller window shows them")).into());
+    }
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
     popup(frame, "keys", lines, content + 3);
@@ -986,6 +1128,17 @@ fn row_style(selected: bool) -> Style {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
+    }
+}
+
+/* Which row, and which pane owns the keys. Two glyphs, not two colours: with
+   NO_COLOR every colour collapses to the terminal's own, and focus was then
+   invisible — both panes drew the same bar. */
+fn mark(selected: bool, live: bool) -> Span<'static> {
+    match (selected, live) {
+        (true, true) => teal("▌"),
+        (true, false) => dim("│"),
+        _ => Span::raw(" "),
     }
 }
 
@@ -1438,6 +1591,153 @@ mod tests {
         assert!(cols(&bar) <= 80, "the bar overran the row: {bar:?}");
     }
 
+    /* Every column of a row is measured against one budget: the username used
+       to be appended after a title already truncated to the pane, so the line
+       ran off the edge and was clipped with no marker. */
+    #[test]
+    fn an_entry_row_never_runs_past_its_pane() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banking").unwrap();
+        vault
+            .create_entry(
+                &banks,
+                "Commonwealth Bank — personal everyday account",
+                "grant.deelstra",
+                "p",
+                "",
+                "",
+            )
+            .unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let row = screen(&t)
+            .into_iter()
+            .find(|l| l.contains("Commonwealth"))
+            .expect("the row did not draw");
+        assert!(cols(&row) <= 80, "the row overran: {row:?}");
+        // Both columns are there, and the cut one says it was cut.
+        assert!(row.contains("grant.deelstra"), "{row:?}");
+        assert!(row.contains('…'), "the title was cut without a marker: {row:?}");
+    }
+
+    /* The scrollbar draws into the pane's last column, so the list stops one
+       column short while one is live — otherwise the thumb lands on a name. */
+    #[test]
+    fn the_scrollbar_gets_a_column_of_its_own() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(60, 8);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        for n in 0..20 {
+            vault.create_group(&root, &format!("Group {n:02}")).unwrap();
+        }
+        app.open_vault(vault);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen(&t);
+        let listed: Vec<&String> = rows.iter().filter(|l| l.contains("Group ")).collect();
+        assert!(!listed.is_empty(), "nothing drew: {rows:?}");
+        /* The groups pane is 35% of 60 = 21 columns, and the thumb owns the
+           last of them: no name may reach it. */
+        for row in listed {
+            if let Some(at) = row.chars().position(|c| c == '█') {
+                assert_eq!(at, 20, "the thumb left its column: {row:?}");
+            }
+        }
+        // And the thumb is actually drawn somewhere, or this proves nothing.
+        assert!(rows.iter().any(|l| l.contains('█')), "no scrollbar: {rows:?}");
+    }
+
+    /* A help table that does not fit says how much it is hiding. Dropping the
+       rows behind the border — which is what it used to do — is a help screen
+       lying about the keymap. */
+    #[test]
+    fn the_overlay_admits_when_it_cannot_show_everything() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 14);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.show_help = true;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("more · a taller window"), "{joined}");
+    }
+
+    /* Under 40 columns the copy keys are what has to go: the hint is the
+       row's reason to exist. */
+    #[test]
+    fn a_narrow_bar_keeps_the_hint_and_drops_the_rest() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(28, 10);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let bar = screen(&t).last().cloned().unwrap_or_default();
+        assert!(bar.trim() == "h keys", "{bar:?}");
+    }
+
+    /* Notes hold newlines; one Line welded them together and Enter submitted
+       the form, so a break could be lost but never typed. */
+    #[test]
+    fn the_form_shows_notes_one_line_at_a_time() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault
+            .create_entry(&root, "checking", "octo", "p", "", "first line\nsecond line")
+            .unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.open_edit_form();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen(&t);
+        let joined = rows.join("\n");
+        assert!(!joined.contains("first linesecond"), "the break was welded: {joined}");
+        assert!(joined.contains("first line⏎"), "{joined}");
+        assert!(
+            rows.iter().any(|l| l.contains("second line")),
+            "the second line did not draw: {joined}"
+        );
+    }
+
+    /* `^r` in the form reveals what `^s` just generated: a password masked
+       end to end cannot be checked before it is stored. */
+    #[test]
+    fn the_form_reveals_the_password_on_ctrl_r() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.open_edit_form();
+        app.next_form_field(true);
+        app.next_form_field(true);
+        for c in "hunter2".chars() {
+            app.form_insert(c);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!screen(&t).join("\n").contains("hunter2"), "masked by default");
+        app.toggle_form_reveal();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("hunter2"), "^r did not reveal");
+    }
+
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
        somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]
@@ -1586,4 +1886,5 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 }
