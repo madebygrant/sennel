@@ -20,6 +20,17 @@ fn cols(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/* A rook, because a sennel is a watchtower and the piece is the one chess
+   glyph that reads as one at this size. Filled rather than outlined: an
+   outline at 12px is a smudge, and the filled form keeps its silhouette in
+   the terminal fonts that have it at all.
+
+   One cell wide, which is not obvious and is checked by
+   `every_glyph_the_ui_draws_is_one_cell_wide`. Half the pictographic
+   candidates here — 🏰, 🔒, ⌛ — are two, and a two-cell glyph in a
+   one-cell budget is a row that wraps on somebody else's terminal. */
+const MARK: &str = "♜";
+
 impl Palette {
     /// Secondary text: usernames, urls, hints — the app's most-used span.
     fn faint(&self, text: impl Into<String>) -> Span<'static> {
@@ -188,7 +199,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
        line that says which vault is open. */
     let name = app.vault_name();
     let width = area.width as usize;
-    let lead = cols(" Sennel  ·  ");
+    let lead = cols(&format!(" {MARK} Sennel  ·  "));
     let tail = if name.is_empty() || width < lead + cols(&name) + 12 {
         String::new()
     } else {
@@ -200,7 +211,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(lead + cols(&stage) + cols(&tail) + 1)
         .max(1);
     let spans = vec![
-        Span::styled(" Sennel", Style::new().fg(p.accent)),
+        Span::styled(format!(" {MARK} Sennel"), Style::new().fg(p.accent)),
         p.faint("  ·  "),
         Span::styled(stage, Style::new().fg(ink)),
         Span::raw(" ".repeat(gap)),
@@ -513,6 +524,15 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 .vault
                 .as_ref()
                 .is_some_and(|v| v.in_recycle_bin(id));
+            /* A glyph as well as the dimming, for the same reason the pane
+               marker is a glyph: under NO_COLOR every shade collapses to the
+               terminal's own, and the bin then looked exactly like a live
+               folder — which is how somebody copies a password they threw
+               away last week. U+2326, one cell. */
+            let name = match binned {
+                true => format!("⌦ {name}"),
+                false => name.to_string(),
+            };
             /* A count turns the tree into a map: every folder otherwise looks
                equally full, and the status bar only counts the whole vault. */
             let held = app.entries_in(id);
@@ -648,11 +668,14 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             /* Expired rows say so in the list, not only in the pane: the
                whole point is spotting one you were about to reach for. In
                `warn`, and with a glyph of its own, so NO_COLOR still shows
-               it. `!` is taken by the flash line and `×` by its errors, so
-               this is the hourglass — one cell wide in every font that has
-               it, unlike the emoji form. */
+               it. `!` is taken by the flash line and `×` by its errors.
+
+               U+29D6, not the U+231B hourglass this first shipped with:
+               that one is East Asian Wide, so it took two cells out of a row
+               budgeted for one and pushed the tail of long rows off the
+               pane. This is the same picture at one cell. */
             if expired {
-                spans.push(Span::styled(" ⌛", Style::new().fg(p.warn)));
+                spans.push(Span::styled(" ⧖", Style::new().fg(p.warn)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -991,6 +1014,8 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     } else {
         "unlock"
     };
+    // The first screen anybody sees carries the mark, the way the header does.
+    let title = format!("{MARK} {title}");
 
     let mut rows: Vec<Line> = Vec::new();
     if app.db_path.is_none() && !app.unlock_new {
@@ -1079,7 +1104,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         " tab field   {go}   ^o browse   esc clear   ^r reveal"
     ))));
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
-    popup(frame, title, rows, width.max(20), &p);
+    popup(frame, &title, rows, width.max(20), &p);
 }
 
 /* Left to right in priority order, with `h keys` right-aligned in whatever
@@ -2468,14 +2493,14 @@ mod tests {
         let rows = screen(&t);
         let stale_row = rows.iter().find(|r| r.contains("old-cert")).unwrap();
         let fresh_row = rows.iter().find(|r| r.contains("fresh-cert")).unwrap();
-        assert!(stale_row.contains('⌛'), "no marker on the expired row: {stale_row:?}");
-        assert!(!fresh_row.contains('⌛'), "a live row was marked: {fresh_row:?}");
+        assert!(stale_row.contains('⧖'), "no marker on the expired row: {stale_row:?}");
+        assert!(!fresh_row.contains('⧖'), "a live row was marked: {fresh_row:?}");
 
         /* The glyph carries it without colour, but the colour is what the eye
            catches first, so both are checked. */
         let buf = t.backend().buffer();
         let y = rows.iter().position(|r| r.contains("old-cert")).unwrap() as u16;
-        let x = stale_row.chars().take_while(|c| *c != '⌛').count() as u16;
+        let x = stale_row.chars().take_while(|c| *c != '⧖').count() as u16;
         assert_eq!(buf[(x, y)].fg, crate::theme::WARM.warn, "the marker is not in warn");
 
         // And the pane spells it out, because a date alone makes the reader
@@ -2501,7 +2526,119 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(!joined.contains("expires"), "{joined}");
-        assert!(!joined.contains('⌛'), "{joined}");
+        assert!(!joined.contains('⧖'), "{joined}");
+    }
+
+    /* Every glyph this file draws has to be one cell wide, or a row budgeted
+       in columns renders wider than the pane and wraps on somebody else's
+       terminal. This is not a thing you can eyeball: `⌛` and `🔒` look
+       single-width in most editors and are East Asian Wide, which is how the
+       expired marker shipped two cells wide.
+
+       Reads this file's own source, so a glyph added next year is covered
+       without anybody remembering to add it here. Comments are stripped
+       first — they discuss wide glyphs on purpose. */
+    #[test]
+    fn every_glyph_the_ui_draws_is_one_cell_wide() {
+        let source = include_str!("ui.rs");
+        // Block comments, then line comments: the order matters, since a
+        // line comment can sit inside a block one.
+        let mut stripped = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some(open) = rest.find("/*") {
+            stripped.push_str(&rest[..open]);
+            match rest[open..].find("*/") {
+                Some(close) => rest = &rest[open + close + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        stripped.push_str(rest);
+        let code: String = stripped
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        /* Only string and char literals: an identifier cannot reach the
+           screen, and the width of one is not a question. */
+        let mut glyphs: Vec<char> = Vec::new();
+        let mut chars = code.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '"' && c != '\'' {
+                continue;
+            }
+            let quote = c;
+            for inner in chars.by_ref() {
+                if inner == quote {
+                    break;
+                }
+                if !inner.is_ascii() {
+                    glyphs.push(inner);
+                }
+            }
+        }
+        assert!(
+            glyphs.len() > 10,
+            "the scan found almost nothing, so it is not reading the source"
+        );
+        let mut wide: Vec<String> = glyphs
+            .iter()
+            .filter(|c| UnicodeWidthStr::width(c.to_string().as_str()) != 1)
+            .map(|c| format!("{c} (U+{:04X}, {} cells)", *c as u32, cols(&c.to_string())))
+            .collect();
+        wide.sort();
+        wide.dedup();
+        assert!(wide.is_empty(), "glyphs that are not one cell wide: {wide:?}");
+    }
+
+    /* The bin was told apart by dimming alone, and NO_COLOR takes dimming
+       away — the same reason the pane marker is a glyph and not a shade. */
+    #[test]
+    fn the_recycle_bin_is_marked_as_well_as_dimmed() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_group(&root, "Banks").unwrap();
+        let id = vault.create_entry(&root, "gone", "u", "p", "", "").unwrap();
+        vault.recycle_entry(&id).unwrap();
+        app.open_vault(vault);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        let rows = screen(&t);
+        let bin = rows.iter().find(|r| r.contains("Recycle Bin")).expect("no bin row");
+        assert!(bin.contains('⌦'), "the bin has no marker: {bin:?}");
+        // A live group beside it has none, so this reads as the bin and not
+        // as something every folder gets.
+        let live = rows.iter().find(|r| r.contains("Banks")).unwrap();
+        assert!(!live.contains('⌦'), "a live group was marked: {live:?}");
+    }
+
+    /* The mark in the header is the app's own, so it gets its own assertion:
+       a rook, one cell, and actually on screen. */
+    #[test]
+    fn the_header_carries_the_rook() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let top = &screen(&t)[0];
+        assert!(top.contains(MARK), "no mark in the header: {top:?}");
+        assert!(top.contains("Sennel"), "{top:?}");
+        assert_eq!(cols(MARK), 1, "the mark is not one cell");
+        /* Left of the name, which is where a logo goes — and the header's
+           own column budget counts it, so the vault name still fits. */
+        assert!(
+            top.find(MARK).unwrap() < top.find("Sennel").unwrap(),
+            "{top:?}"
+        );
     }
 
     /* Click-to-copy: the rows have to line up with what the draw put on

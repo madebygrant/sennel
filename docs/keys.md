@@ -82,6 +82,20 @@ Fields you add go in protected, because a field somebody adds by hand to a passw
 likely to be a secret than not. An extracted attachment is written beside the vault file rather than
 into the working directory, and loses the vault's protection the moment it lands.
 
+## The marks in the list
+
+| Glyph | Means                                                    |
+| ----- | -------------------------------------------------------- |
+| `▌`   | the cursor, in the pane that has the keys                |
+| `│`   | the cursor, in the pane that does not                    |
+| `⊙`   | the entry has a one-time code                            |
+| `⧖`   | the entry is past its expiry date                        |
+| `⌦`   | the recycle bin, and anything inside it                  |
+
+Every one is a glyph rather than a colour, so they still say what they say under `NO_COLOR` — and
+every one is a single cell, which is checked by a test that reads the UI's own source, because a
+two-cell glyph in a one-cell budget wraps rows on somebody else's terminal.
+
 ## The mouse
 
 Off with `mouse = false`, which gives the terminal its own text selection back. Otherwise the wheel
