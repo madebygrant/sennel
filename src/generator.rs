@@ -17,7 +17,7 @@ const AMBIGUOUS: &[u8] = b"l1IO0";
 /* One requested class. `chars` holds the pool, `required` whether the
    generator must place at least one of them — a class asked for and missing
    is a generator that lied about what it produces. */
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Classes {
     pub lower: bool,
     pub upper: bool,
@@ -155,6 +155,49 @@ pub fn entropy_bits(len: usize, alphabet_len: usize) -> f64 {
     (len as f64) * (alphabet_len as f64).log2()
 }
 
+/* What a typed password is worth, judged only by what is in it: the classes
+   it actually uses times its length. An over-estimate for "Password1!" — no
+   estimate from characters alone can know a word — so the UI shows it as a
+   rough number, never as a verdict. */
+pub fn typed_bits(password: &str) -> f64 {
+    if password.is_empty() {
+        return 0.0;
+    }
+    let mut alphabet = 0usize;
+    let mut seen = |pool: &[u8], size: usize, hit: bool| {
+        let _ = pool;
+        if hit {
+            alphabet += size;
+        }
+    };
+    let chars: Vec<char> = password.chars().collect();
+    seen(LOWER, 26, chars.iter().any(|c| c.is_ascii_lowercase()));
+    seen(UPPER, 26, chars.iter().any(|c| c.is_ascii_uppercase()));
+    seen(DIGITS, 10, chars.iter().any(|c| c.is_ascii_digit()));
+    seen(
+        SYMBOLS,
+        SYMBOLS.len(),
+        chars.iter().any(|c| c.is_ascii_punctuation() || *c == ' '),
+    );
+    // Anything outside ASCII widens the pool far past what we can count.
+    if chars.iter().any(|c| !c.is_ascii()) {
+        alphabet += 100;
+    }
+    entropy_bits(chars.len(), alphabet.max(2))
+}
+
+/// A word for a bit count, since most people do not read bits. The bands are
+/// the usual ones: below 60 is guessable offline, 80 is comfortable, 100 is
+/// more than a lifetime of hardware.
+pub fn strength(bits: f64) -> &'static str {
+    match bits {
+        b if b < 40.0 => "weak",
+        b if b < 60.0 => "fair",
+        b if b < 80.0 => "good",
+        _ => "strong",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +279,19 @@ mod tests {
         let a = generate(32, all_on(), false).unwrap();
         let b = generate(32, all_on(), false).unwrap();
         assert_ne!(a, b, "the OS source produced the same password twice");
+    }
+
+    /* The estimate reads what is in the password, not what a generator was
+       asked for: four classes in twelve characters is worth more than twelve
+       lowercase letters, and empty is worth nothing. */
+    #[test]
+    fn typed_entropy_reads_the_classes_actually_used() {
+        assert_eq!(typed_bits(""), 0.0);
+        let plain = typed_bits("abcdefghijkl");
+        let mixed = typed_bits("aB3!efghijkl");
+        assert!(mixed > plain, "{mixed} !> {plain}");
+        assert_eq!(strength(typed_bits("abc")), "weak");
+        assert_eq!(strength(typed_bits("Tr0ub4dor&3xkcd!")), "strong");
     }
 
     #[test]

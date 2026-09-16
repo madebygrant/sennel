@@ -71,6 +71,142 @@ impl_entry_ext!(Entry);
 impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
+/* Text from a vault, on its way somewhere that is not the TUI. Ratatui drops
+   control characters on the way into its cell buffer, so the browser is safe
+   by construction; `println!` and the terminal-title escape are not, and a
+   `.kdbx` is a file that can arrive from anyone. An entry titled
+   "\x1b]0;owned\x07" would otherwise retitle the window of whoever ran
+   `--list`, and OSC 52 can reach the clipboard on some terminals. */
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '·' } else { c })
+        .collect()
+}
+
+/// The raw `otp` field, which is an `otpauth://` URL when there is one.
+pub fn raw_otp(entry: &EntryRef<'_>) -> Option<String> {
+    entry.get_raw_otp_value().map(str::to_string)
+}
+
+/* What a site gives you is either a long `otpauth://` URL (behind the QR
+   code) or a run of base32 with spaces in it ("JBSW Y3DP EHPK 3PXP"). Both
+   have to work: retyping the second into the first by hand is exactly the
+   kind of chore a password manager exists to absorb. The URL is what KDBX
+   stores, so a bare secret gets wrapped in one. */
+pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("nothing to read".into());
+    }
+    if input.starts_with("otpauth://") {
+        let url = with_digits(input);
+        return url
+            .parse::<keepass::db::TOTP>()
+            .map(|_| url)
+            .map_err(|e| format!("{e}"));
+    }
+    /* Groupings and hyphens are how the secret is printed, never part of it,
+       and base32 is case-insensitive. */
+    let secret: String = input
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect::<String>()
+        .to_uppercase();
+    if secret.is_empty() {
+        return Err("nothing to read".into());
+    }
+    /* Checked against the base32 alphabet before it is put in a url, or a
+       "secret" carrying `&algorithm=SHA512` would smuggle its own parameters
+       in beside ours — base32 decoding never sees them, so nothing else would
+       catch it. */
+    if !secret
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c) || c == '=')
+    {
+        return Err("not a base32 secret or an otpauth:// url".into());
+    }
+    let label = if username.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}:{username}")
+    };
+    /* Digits and period spelled out rather than left to a default: see
+       `with_digits` for why the default is the one thing here that cannot be
+       left unsaid. */
+    let url = format!(
+        "otpauth://totp/{}?secret={secret}&digits=6&period=30",
+        urlish(&label)
+    );
+    /* Parsed before it is stored: a seed that cannot produce a code must be
+       refused while the form is still open and the text still on screen. */
+    url.parse::<keepass::db::TOTP>()
+        .map(|_| url)
+        .map_err(|_| "not a base32 secret or an otpauth:// url".to_string())
+}
+
+/* RFC 6238 and every authenticator app treat six digits as the default when
+   an `otpauth://` url does not say — the keepass crate treats it as eight, so
+   a url written by a site that left `digits` out would produce codes that are
+   the right secret and the wrong length. Spelled out on the way in and on the
+   way to the screen, and never by rewriting what is stored. */
+fn with_digits(url: &str) -> String {
+    if url.contains("digits=") || !url.contains('?') {
+        return url.to_string();
+    }
+    format!("{url}&digits=6")
+}
+
+/// Percent-encodes what a label may hold. Small by hand: the only characters
+/// a title realistically brings are spaces, slashes and the odd accent.
+fn urlish(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// The one-time code an entry carries, if it carries one. KeePassXC writes
+/// `otp` as a field; without this an entry that has one looks like an entry
+/// that does not, and the user goes back to their phone.
+pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
+    let raw = entry.get_raw_otp_value()?;
+    let totp: keepass::db::TOTP = with_digits(raw).parse().ok()?;
+    let code = totp.value_now().ok()?;
+    Some((code.code, code.valid_for.as_secs()))
+}
+
+/// Fields Sennel has no row for — KeePassXC custom strings, and attachments.
+/// Named rather than shown: an entry whose extra fields are invisible reads
+/// as an entry that lost them.
+pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
+    let known = ["Title", "UserName", "Password", "URL", "Notes", "otp"];
+    let mut out = Vec::new();
+    let fields: Vec<&String> = entry
+        .fields
+        .keys()
+        .filter(|k| !known.contains(&k.as_str()))
+        .collect();
+    if !fields.is_empty() {
+        let plural = if fields.len() == 1 { "field" } else { "fields" };
+        out.push(format!("{} more {plural}", fields.len()));
+    }
+    let files = entry.attachments().count();
+    if files > 0 {
+        let plural = if files == 1 { "attachment" } else { "attachments" };
+        out.push(format!("{files} {plural}"));
+    }
+    if !entry.tags.is_empty() {
+        out.push(format!("tags: {}", entry.tags.join(", ")));
+    }
+    out
+}
+
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
 /* Payloads are Strings, not sources: io and database errors stay
@@ -87,6 +223,9 @@ pub enum VaultError {
     WrongPassword,
     /// `save` before any `open` or `save_as` gave the vault a path and a key.
     Unsaved,
+    /// The file changed under us since it was opened or last written, so a
+    /// save would overwrite whatever wrote it. Refused until forced.
+    ChangedOnDisk,
     Io(String),
     Db(String),
 }
@@ -102,6 +241,7 @@ impl std::fmt::Display for VaultError {
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
             VaultError::WrongPassword => write!(f, "wrong password or key file"),
             VaultError::Unsaved => write!(f, "nothing to save to yet"),
+            VaultError::ChangedOnDisk => write!(f, "the file changed on disk"),
             VaultError::Io(e) => write!(f, "file error: {e}"),
             VaultError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -118,6 +258,32 @@ pub struct Vault {
        It is held by value: `save` consumes a clone of it. */
     key: Option<DatabaseKey>,
     path: Option<PathBuf>,
+    /* What the file looked like when this vault last agreed with it. Sennel
+       autosaves after every change, so without this a KeePassXC edit (or a
+       sync client, or a second Sennel) is overwritten by the next keypress
+       here, atomically and without a word. */
+    stamp: Option<Stamp>,
+}
+
+/// Enough of a file's identity to notice somebody else wrote it. Modified
+/// time and length rather than a hash: a vault is megabytes and this runs on
+/// every save.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// `None` when the file is not there to stamp — which is itself a change
+    /// worth refusing on, since something removed it.
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Stamp {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
 }
 
 impl Vault {
@@ -130,6 +296,7 @@ impl Vault {
             db,
             key: None,
             path: None,
+            stamp: None,
         }
     }
 
@@ -185,15 +352,54 @@ impl Vault {
             db,
             key: Some(key),
             path: Some(path.to_path_buf()),
+            stamp: Stamp::of(path),
         })
     }
 
     /// Write to the path this vault was opened from or last saved to.
-    pub fn save(&self) -> Result<(), VaultError> {
-        let (Some(path), Some(key)) = (self.path.as_ref(), self.key.as_ref()) else {
+    /// Refuses with `ChangedOnDisk` when somebody else wrote the file since;
+    /// `save_over` is the deliberate way past that.
+    pub fn save(&mut self) -> Result<(), VaultError> {
+        if self.changed_on_disk() {
+            return Err(VaultError::ChangedOnDisk);
+        }
+        self.write_and_stamp()
+    }
+
+    /// Save regardless of what is on disk now. The caller has told the user
+    /// what they are about to lose and been told to go ahead.
+    pub fn save_over(&mut self) -> Result<(), VaultError> {
+        self.write_and_stamp()
+    }
+
+    /// Whether the file has moved on without us. False for a vault with no
+    /// path (nothing to disagree with) and for one never yet written.
+    pub fn changed_on_disk(&self) -> bool {
+        let (Some(path), Some(stamp)) = (self.path.as_ref(), self.stamp) else {
+            return false;
+        };
+        Stamp::of(path) != Some(stamp)
+    }
+
+    /// Re-read the file this vault came from, using the key already held —
+    /// the way out of a conflict that keeps the other program's work.
+    pub fn reload(&mut self) -> Result<(), VaultError> {
+        let (Some(path), Some(key)) = (self.path.clone(), self.key.clone()) else {
             return Err(VaultError::Unsaved);
         };
-        Self::write_file(&self.db, key, path)
+        let mut file = std::fs::File::open(&path).map_err(|e| VaultError::Io(e.to_string()))?;
+        self.db = Database::open(&mut file, key).map_err(Self::map_db_error)?;
+        self.stamp = Stamp::of(&path);
+        Ok(())
+    }
+
+    fn write_and_stamp(&mut self) -> Result<(), VaultError> {
+        let (Some(path), Some(key)) = (self.path.clone(), self.key.as_ref()) else {
+            return Err(VaultError::Unsaved);
+        };
+        Self::write_file(&self.db, key, &path)?;
+        self.stamp = Stamp::of(&path);
+        Ok(())
     }
 
     /// First save of a new vault: records the path and key, so later `save`
@@ -208,6 +414,7 @@ impl Vault {
         Self::write_file(&self.db, &key, path)?;
         self.key = Some(key);
         self.path = Some(path.to_path_buf());
+        self.stamp = Stamp::of(path);
         Ok(())
     }
 
@@ -226,11 +433,17 @@ impl Vault {
         use std::os::unix::fs::OpenOptionsExt;
         /* 0600 from the first byte: File::create + set_permissions afterwards
            would leave a umask-wide window holding a full plaintext-free but
-           still sensitive copy of the vault. */
+           still sensitive copy of the vault.
+
+           create_new, not create: in a directory somebody else can write to,
+           a symlink planted at this path would be followed and the vault
+           written wherever it points — 0600 on a file that is not ours. A
+           leftover from a killed process is removed first, since the name
+           carries our own pid. */
+        let _ = std::fs::remove_file(&temp);
         let opened = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&temp)
             .map_err(|e| VaultError::Io(e.to_string()));
@@ -317,6 +530,9 @@ impl Vault {
     }
 
     /// Every live entry id in the file, for the global search scope.
+    /* Test-only since the row cache took over the counting: kept because the
+       KeePassXC fixture reads entries without knowing their ids. */
+    #[cfg(test)]
     pub fn all_entry_ids(&self) -> Vec<EntryId> {
         let dead = self.recycled();
         self.db.iter_all_entries().map(|e| e.id()).filter(|id| !dead.contains(id)).collect()
@@ -528,6 +744,23 @@ impl Vault {
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
        here to restore them. */
+    /* The `otp` field, set or cleared. Protected, like the password: it is a
+       seed that mints codes forever, so it must not sit in the file in the
+       clear. */
+    pub fn set_otp(&mut self, id: &EntryId, url: Option<&str>) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match url {
+            Some(url) => entry.set_protected("otp", url),
+            None => {
+                entry.fields.remove("otp");
+            }
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
     /// Swap an entry wholesale — the original timestamps ride along, which
     /// an update_entry-based undo would not preserve.
     pub fn replace_entry(&mut self, entry: &Entry) -> Result<(), VaultError> {
@@ -776,8 +1009,151 @@ mod tests {
 
     #[test]
     fn save_before_any_path_is_an_error_not_a_panic() {
-        let v = vault();
+        let mut v = vault();
         assert_eq!(v.save(), Err(VaultError::Unsaved));
+    }
+
+    /* Sennel autosaves after every change, so a vault that has moved on under
+       us must refuse the write: the alternative is this session silently
+       winning every race with KeePassXC or a sync client. */
+    /* What a site hands over is either the long url behind its QR code or a
+       run of base32 with spaces in it. Both have to reach the same stored
+       url, and anything that cannot mint a code has to be refused before it
+       is written. */
+    #[test]
+    fn a_seed_is_taken_as_a_url_or_as_the_printed_secret() {
+        /* A url that leaves `digits` out gets it spelled in: the crate would
+           otherwise mint eight digits where the site expects six. */
+        let url = totp_url("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP", "x", "y").unwrap();
+        assert_eq!(url, "otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&digits=6");
+
+        // Printed with groupings, lowercase, hyphenated: all the same secret.
+        let from_print = totp_url("jbsw y3dp-ehpk 3pxp", "Bank", "me").unwrap();
+        assert!(from_print.starts_with("otpauth://totp/Bank:me?secret="), "{from_print}");
+        assert!(from_print.contains("secret=JBSWY3DPEHPK3PXP"), "{from_print}");
+        assert!(from_print.contains("digits=6"), "{from_print}");
+
+        // And both produce the same six digits.
+        let a: keepass::db::TOTP = url.parse().unwrap();
+        let b: keepass::db::TOTP = from_print.parse().unwrap();
+        assert_eq!(a.value_now().unwrap().code, b.value_now().unwrap().code);
+        assert_eq!(a.value_now().unwrap().code.len(), 6, "not six digits");
+
+        // Nonsense is refused rather than stored as a code that never works.
+        assert!(totp_url("not base32 at all!!", "x", "").is_err());
+        assert!(totp_url("otpauth://totp/x?issuer=nobody", "x", "").is_err());
+        assert!(totp_url("   ", "x", "").is_err());
+    }
+
+    /* An entry written by something that left `digits` out still reads as six
+       digits here, without rewriting what is in the file. */
+    #[test]
+    fn a_url_without_digits_still_reads_as_six() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "Bank", "me", "pw", "", "").unwrap();
+        v.set_otp(&id, Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP"))
+            .unwrap();
+        let entry = v.get_entry(&id).unwrap();
+        let (code, _) = totp_now(&entry).expect("no code");
+        assert_eq!(code.len(), 6, "{code}");
+        // And the file still holds exactly what was put in it.
+        assert_eq!(
+            raw_otp(&entry).as_deref(),
+            Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP")
+        );
+    }
+
+    /* A "secret" that carries its own url parameters must not reach the
+       stored url: base32 decoding never sees them, so the alphabet check is
+       the only thing between a phishing setup key and a code that quietly
+       uses somebody else's algorithm. */
+    #[test]
+    fn a_seed_cannot_smuggle_url_parameters() {
+        assert!(totp_url("JBSWY3DPEHPK3PXP&algorithm=SHA512", "x", "").is_err());
+        assert!(totp_url("JBSWY3DPEHPK3PXP?digits=8", "x", "").is_err());
+        assert!(totp_url("JBSWY3DPEHPK3PXP#frag", "x", "").is_err());
+        // The real thing still passes, in every shape a site prints it.
+        assert!(totp_url("jbsw y3dp-ehpk 3pxp", "x", "").is_ok());
+    }
+
+    /* Vault text on its way to a terminal keeps its characters and loses its
+       control codes: the TUI is safe by construction, `--list` is not. */
+    #[test]
+    fn printable_strips_escapes_but_keeps_the_text() {
+        assert_eq!(printable("ev\u{1b}]0;pwned\u{7}il"), "ev·]0;pwned·il");
+        assert_eq!(printable("Commonwealth Bank — 银行"), "Commonwealth Bank — 银行");
+        assert_eq!(printable("a\nb\tc"), "a·b·c");
+    }
+
+    /* Set, read back, and cleared — stored protected, because the seed mints
+       codes forever while a code is worth thirty seconds. */
+    #[test]
+    fn an_entry_takes_and_drops_its_one_time_secret() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "Bank", "me", "pw", "", "").unwrap();
+        assert!(raw_otp(&v.get_entry(&id).unwrap()).is_none());
+
+        let url = totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
+        v.set_otp(&id, Some(&url)).unwrap();
+        let entry = v.get_entry(&id).unwrap();
+        assert_eq!(raw_otp(&entry).as_deref(), Some(url.as_str()));
+        let (code, left) = totp_now(&entry).expect("no code from a good seed");
+        assert_eq!(code.len(), 6);
+        assert!(left <= 30 && left > 0, "{left}");
+        assert!(
+            entry.fields.get("otp").is_some_and(keepass::db::Value::is_protected),
+            "the seed was stored in the clear"
+        );
+
+        v.set_otp(&id, None).unwrap();
+        assert!(raw_otp(&v.get_entry(&id).unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_file_written_by_somebody_else_refuses_the_next_save() {
+        let file = Temp::new("conflict");
+        let mut ours = vault();
+        ours.save_as(&file.path, "pw", None).unwrap();
+
+        // Another program writes the same vault, from its own copy.
+        let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        /* Stamps are seconds-granular on some filesystems, so make the length
+           differ too — which a real edit does anyway. */
+        theirs.save().unwrap();
+
+        assert!(ours.changed_on_disk(), "the change went unnoticed");
+        assert_eq!(ours.save(), Err(VaultError::ChangedOnDisk));
+        // Their entry is still there: the refusal actually protected it.
+        let reread = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(reread.entry_count(), 1);
+
+        // Deliberately overriding writes ours and re-agrees with the file.
+        ours.save_over().unwrap();
+        assert!(!ours.changed_on_disk());
+        assert_eq!(Vault::open(&file.path, "pw", None).unwrap().entry_count(), 0);
+    }
+
+    /* The other way out of a conflict: take theirs, using the key already
+       held so nobody retypes a master password to resolve a race. */
+    #[test]
+    fn reload_takes_the_copy_on_disk() {
+        let file = Temp::new("reload");
+        let mut ours = vault();
+        ours.save_as(&file.path, "pw", None).unwrap();
+        let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs.save().unwrap();
+
+        assert_eq!(ours.entry_count(), 0);
+        ours.reload().unwrap();
+        assert_eq!(ours.entry_count(), 1, "reload did not take theirs");
+        assert!(!ours.changed_on_disk(), "reload left the stamp stale");
+        ours.save().unwrap();
     }
 
     #[test]
