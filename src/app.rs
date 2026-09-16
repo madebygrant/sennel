@@ -6,7 +6,6 @@ use keepass::db::{Entry, EntryId, GroupId};
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
-use crate::generator::Classes;
 use crate::vault::{EntryExt, Vault, VaultError};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
@@ -311,6 +310,8 @@ pub struct App {
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
        a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
+    /// Length and character classes for `^s`, from the config.
+    generator: crate::config::Generator,
     /* Unlock state. The path comes from the config once at startup;
        `unlock_new` caches whether it names a missing file so the draw loop
        never stats. */
@@ -395,6 +396,7 @@ impl App {
             wide: false,
             heads: false,
             order: SortOrder::default(),
+            generator: crate::config::Generator::default(),
             db_path: None,
             unlock_new: false,
             unlock_field: UnlockField::Password,
@@ -748,6 +750,11 @@ impl App {
             (Some(_), Some(path)) => format!("Sennel — {}", vault_name(path)),
             _ => "Sennel".to_string(),
         }
+    }
+
+    /// What `^s` makes, from the config.
+    pub fn set_generator(&mut self, settings: crate::config::Generator) {
+        self.generator = settings;
     }
 
     /// The order the entries pane opens in, from the config. `o` still cycles
@@ -2344,21 +2351,36 @@ impl App {
        l1IO0 are the ones every font renders alike. Touching the box flips
        the keep-latch, so submit writes what was generated. */
     pub fn form_generate(&mut self) {
+        let settings = self.generator;
         let Some(form) = self.form.as_mut() else {
             return;
         };
-        let generated = match crate::generator::generate(20, Classes::default(), true) {
+        let generated = match crate::generator::generate(
+            settings.length,
+            settings.classes,
+            settings.exclude_ambiguous,
+        ) {
             Ok(pw) => pw,
             Err(e) => {
-                self.say(format!("cannot generate  ·  {e}"));
+                self.error(format!("cannot generate  ·  {e}"));
                 return;
             }
         };
         form.password = generated;
         form.password_touched = true;
         form.caret = form.password.chars().count();
-        let bits = crate::generator::entropy_bits(20, crate::generator::Classes::default().alphabet_len(false));
-        self.say(format!("generated 20 chars  ·  ~{bits:.0} bits"));
+        /* Priced against the pool it was drawn from: excluding the lookalikes
+           shrinks the alphabet, and the estimate used to quote the wider one,
+           which overstates a secret in the one direction it must not. */
+        let bits = crate::generator::entropy_bits(
+            settings.length,
+            settings.classes.alphabet_len(settings.exclude_ambiguous),
+        );
+        self.say(format!(
+            "generated {} chars  ·  {}  ·  ~{bits:.0} bits",
+            settings.length,
+            settings.describe()
+        ));
     }
 }
 

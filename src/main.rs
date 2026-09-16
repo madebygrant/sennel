@@ -50,6 +50,7 @@ fn main() -> Result<()> {
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
     app.set_order(cfg.sort);
+    app.set_generator(cfg.generator);
     /* The clipboard with its auto-clear timer, armed once like the lock:
        copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));

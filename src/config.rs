@@ -52,6 +52,57 @@ pub struct FileConfig {
     /// stored · name · recent · updated. `o` cycles from here rather than
     /// from the built-in default, so the order survives a restart.
     pub sort: Option<String>,
+    pub generator: Option<FileGenerator>,
+}
+
+/// What `^s` produces. Hard-coded before this — 20 characters, no symbols —
+/// which is wrong for every site that demands one and every site that
+/// forbids them.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileGenerator {
+    pub length: Option<usize>,
+    pub symbols: Option<bool>,
+    pub digits: Option<bool>,
+    pub upper: Option<bool>,
+    /// Exclude `l 1 I O 0`, which read alike in most fonts.
+    pub ambiguous: Option<bool>,
+}
+
+/// The generator settings a session runs with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generator {
+    pub length: usize,
+    pub classes: crate::generator::Classes,
+    /// True keeps the lookalikes out of the pool.
+    pub exclude_ambiguous: bool,
+}
+
+impl Default for Generator {
+    fn default() -> Self {
+        Generator {
+            length: 20,
+            classes: crate::generator::Classes::default(),
+            exclude_ambiguous: true,
+        }
+    }
+}
+
+impl Generator {
+    /// How the flash describes what it just made.
+    pub fn describe(&self) -> String {
+        let mut has = vec!["a–z"];
+        if self.classes.upper {
+            has.push("A–Z");
+        }
+        if self.classes.digits {
+            has.push("0–9");
+        }
+        if self.classes.symbols {
+            has.push("!@#");
+        }
+        has.join(" ")
+    }
 }
 
 impl FileConfig {
@@ -96,6 +147,7 @@ pub struct Config {
     /// Where the entries pane starts. Session-only before this: pressing `o`
     /// four times after every restart is a setting nobody asked to retype.
     pub sort: crate::app::SortOrder,
+    pub generator: Generator,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -135,6 +187,7 @@ impl Config {
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
+            generator: generator(file.generator.as_ref())?,
             config_file,
             check: cli.check,
             list: cli.list,
@@ -167,6 +220,35 @@ fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
     crate::app::SortOrder::from_name(name).ok_or_else(|| {
         anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated")
     })
+}
+
+/* Every field optional, and a length that could never produce a password is
+   a startup error rather than a surprise at `^s`. */
+fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
+    let mut out = Generator::default();
+    let Some(file) = file else {
+        return Ok(out);
+    };
+    if let Some(length) = file.length {
+        if !(4..=256).contains(&length) {
+            anyhow::bail!("generator length {length} is outside 4–256");
+        }
+        out.length = length;
+    }
+    if let Some(on) = file.symbols {
+        out.classes.symbols = on;
+    }
+    if let Some(on) = file.digits {
+        out.classes.digits = on;
+    }
+    if let Some(on) = file.upper {
+        out.classes.upper = on;
+    }
+    if let Some(on) = file.ambiguous {
+        // The key reads as "allow ambiguous", the flag as "exclude them".
+        out.exclude_ambiguous = !on;
+    }
+    Ok(out)
 }
 
 pub fn expand(path: &str) -> PathBuf {
@@ -294,6 +376,36 @@ mod tests {
             Ok(_) => panic!("an unknown sort name started the session"),
         };
         assert!(err.contains("unknown sort"), "{err}");
+    }
+
+    /* `^s` was 20 characters and no symbols, full stop — wrong for every site
+       that demands one. A length that could never work stops startup. */
+    #[test]
+    fn the_generator_reads_the_file_and_refuses_nonsense() {
+        let cfg = build("[generator]\nlength = 32\nsymbols = true\n", &[]);
+        assert_eq!(cfg.generator.length, 32);
+        assert!(cfg.generator.classes.symbols);
+        assert!(cfg.generator.exclude_ambiguous, "the default flipped");
+
+        let cfg = build("[generator]\nambiguous = true\n", &[]);
+        assert!(!cfg.generator.exclude_ambiguous);
+
+        let cfg = build("", &[]);
+        assert_eq!(cfg.generator, Generator::default());
+
+        let mut file = temp("genlen");
+        writeln!(file.handle, "[generator]\nlength = 2").unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ])
+        .unwrap();
+        let err = match Config::build(cli) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a two-character generator started the session"),
+        };
+        assert!(err.contains("outside 4–256"), "{err}");
     }
 
     #[test]

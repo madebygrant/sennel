@@ -1126,8 +1126,20 @@ fn draw_form(frame: &mut Frame, app: &App) {
         row("title", FormField::Title, &form.title),
         row("username", FormField::Username, &form.username),
         row("password", FormField::Password, &form.password),
-        row("url", FormField::Url, &form.url),
     ];
+    /* What the box is worth, in the only terms the app can honestly give:
+       the classes actually present times the length. Shown while the box
+       holds something, so `^s` and a typed password answer the same way. */
+    if !form.password.is_empty() {
+        let bits = crate::generator::typed_bits(&form.password);
+        let word = crate::generator::strength(bits);
+        let ink = if bits < 60.0 { AMBER } else { TEAL };
+        lines.push(Line::from(vec![
+            dim(format!(" {:<LABEL$}", "")),
+            Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
+        ]));
+    }
+    lines.push(row("url", FormField::Url, &form.url));
     lines.extend(notes_rows(
         &form.notes,
         form.field == FormField::Notes,
@@ -1875,6 +1887,29 @@ mod tests {
             rows.iter().any(|l| l.contains("second line")),
             "the second line did not draw: {joined}"
         );
+    }
+
+    /* The box says what it is worth while it holds something: `^s` and a
+       typed password answer the same way, in bits and in a word. */
+    #[test]
+    fn the_form_prices_the_password_it_holds() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.open_edit_form();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!screen(&t).join("\n").contains("bits"), "priced an empty box");
+        app.form_generate();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("bits"), "{joined}");
+        assert!(joined.contains("strong"), "{joined}");
     }
 
     /* `^r` in the form reveals what `^s` just generated: a password masked

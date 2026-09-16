@@ -95,6 +95,13 @@ db = "~/vaults/main.kdbx"      # default database
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
+
+[generator]                    # what ^s makes in the entry form
+length = 20                    # 4–256
+upper = true                   # A–Z
+digits = true                  # 0–9
+symbols = false                # !@#$… — on for sites that demand one
+ambiguous = false              # true allows l 1 I O 0, which read alike
 ```
 
 ## Building
