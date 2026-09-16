@@ -73,6 +73,11 @@ fn main() -> Result<()> {
     app.set_lock_timeout(cfg.lock_timeout);
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
+    /* Said once, on the first frame, and then it is the user's screen: an
+       override that measures badly is worth naming, not worth refusing. */
+    for note in &cfg.theme_warnings {
+        app.warn(format!("theme: {note}"));
+    }
     app.set_generator(cfg.generator);
     /* The clipboard with its auto-clear timer, armed once like the lock:
        copies before this point cannot happen, since nothing is unlocked. */
@@ -143,6 +148,9 @@ fn check(cfg: &Config) -> Result<()> {
         None => println!("vault     (none)"),
     }
     println!("theme     {}", cfg.theme.name());
+    for note in &cfg.theme_warnings {
+        println!("          ! {note}");
+    }
     println!("sort      {}", cfg.sort.short());
     println!(
         "generate  {} chars · {}",

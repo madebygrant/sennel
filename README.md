@@ -133,6 +133,22 @@ picks a theme — and writes the one you stop on back to the config, so the next
 | `cool`  | slate and steel — warm's structure with the warmth taken out           |
 | `neon`  | magenta and cyan over violet-to-black                                   |
 
+Any slot can be repainted on top of whichever theme is named, so changing one colour does not mean
+restating nine:
+
+```toml
+theme = "neon"
+
+[colors]
+cursor = "#00ff88"             # text · accent · cursor · warn · error · muted · rule · surface
+```
+
+`text` is titles and anything the eye lands on first; `accent` is chrome — borders, bars, key names;
+`cursor` marks where you are; `warn` and `error` carry the flashes; `muted` is usernames, urls and
+hints; `rule` is the lines between panes; `surface` is the flat tone popups are raised with. A value
+that is not `#rrggbb`, or a slot nobody has, stops startup naming what it should have been. A colour
+that merely measures badly starts anyway and says so once — it is your screen.
+
 Every palette is measured, not eyeballed: each readable colour clears WCAG 4.5:1 against both ends of
 its own gradient and against the tone popups are raised with, still clears 3:1 after a 256-colour
 terminal has quantised it, and collapses to nothing under `NO_COLOR` — where the pane marker (`▌` vs

@@ -84,9 +84,6 @@ impl Palette {
     /* Every slot with its name, so a check that must cover the palette cannot
        quietly miss one: adding a field to the struct without adding it here
        is the mistake this exists to make hard. */
-    /* Test-only until the contrast harness lands beside it (wave 2 of
-       docs/theme-selection-plan.md), which is its real caller. */
-    #[cfg(test)]
     pub fn slots(&self) -> [(&'static str, Color); 10] {
         [
             ("text", self.text),
@@ -175,9 +172,6 @@ pub const BUILT_INS: [(&str, Palette); 4] = [
 /* WCAG 2.1 relative luminance and contrast ratio. A palette is a claim about
    legibility — theme.rs has carried one in a comment since the first commit —
    and a claim nothing measures is a claim that quietly stops being true. */
-/* Test-only until the user-defined colours of wave 6 warn on a bad override,
-   which is its second caller. */
-#[cfg(test)]
 pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     let luminance = |c: (u8, u8, u8)| {
         let channel = |v: u8| {
@@ -230,6 +224,68 @@ impl Palette {
             .map(|(name, _)| *name)
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+impl Palette {
+    /* One slot by name, for a config that overrides a colour or two on top of
+       a built-in. Returning the field to write into keeps the name list in
+       one place — `slots()` and this have to agree, and a mismatch is a key
+       that parses and paints nothing. */
+    pub fn slot_mut(&mut self, slot: &str) -> Option<&mut Color> {
+        Some(match slot {
+            "text" => &mut self.text,
+            "accent" => &mut self.accent,
+            "cursor" => &mut self.cursor,
+            "warn" => &mut self.warn,
+            "error" => &mut self.error,
+            "muted" => &mut self.muted,
+            "rule" => &mut self.rule,
+            "surface" => &mut self.surface,
+            "masked" => &mut self.masked,
+            "ink" => &mut self.ink,
+            _ => return None,
+        })
+    }
+
+    /// Every slot name a config may override, for the error that lists them.
+    pub fn slot_names() -> String {
+        WARM.slots()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /* Which overridden colours are hard to read on this palette's own ground.
+       A warning, never a refusal: it is the user's screen and their eyes, and
+       a warning that blocks is one people learn to route around. */
+    pub fn unreadable(&self) -> Vec<String> {
+        let grounds = [("the gradient", self.near), ("the gradient", self.far), (
+            "popups",
+            match self.surface {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => return Vec::new(),
+            },
+        )];
+        let mut out = Vec::new();
+        for (slot, color) in self.slots() {
+            // Not text: structure, a background, and a band's ink.
+            if matches!(slot, "rule" | "surface" | "ink" | "masked") {
+                continue;
+            }
+            let Color::Rgb(r, g, b) = color else {
+                continue;
+            };
+            for (where_, ground) in grounds {
+                let ratio = contrast((r, g, b), ground);
+                if ratio < 4.5 {
+                    out.push(format!("{slot} on {where_} is {ratio:.1}:1, wants 4.5:1"));
+                    break;
+                }
+            }
+        }
+        out
     }
 }
 

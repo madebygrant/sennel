@@ -58,6 +58,8 @@ pub struct FileConfig {
     pub sort: Option<String>,
     /// warm · light · cool · neon
     pub theme: Option<String>,
+    /// `#rrggbb` per slot, on top of whichever theme is named.
+    pub colors: Option<std::collections::HashMap<String, String>>,
     pub generator: Option<FileGenerator>,
     /// Wheel and click. On by default; off gives the terminal its own
     /// selection back.
@@ -160,6 +162,9 @@ pub struct Config {
     pub mouse: bool,
     /// The colours this session draws in.
     pub theme: crate::theme::Palette,
+    /// Overridden colours that are hard to read on their own ground. Said
+    /// once at startup rather than enforced: it is the user's screen.
+    pub theme_warnings: Vec<String>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -187,6 +192,10 @@ impl Config {
             .db
             .map(|d| expand(&d))
             .or_else(|| file.db.as_deref().map(expand));
+        let (palette, warnings) = theme(
+            cli.theme.as_deref().or(file.theme.as_deref()),
+            file.colors.as_ref(),
+        )?;
 
         Ok(Config {
             db,
@@ -199,7 +208,8 @@ impl Config {
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
-            theme: theme(cli.theme.as_deref().or(file.theme.as_deref()))?,
+            theme: palette,
+            theme_warnings: warnings,
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,
@@ -239,16 +249,46 @@ fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
 /* A name nobody ships is a startup error naming the ones that exist, not a
    silent fallback: a theme that quietly does not apply reads as a theme that
    does not work. */
-fn theme(name: Option<&str>) -> Result<crate::theme::Palette> {
-    let Some(name) = name else {
-        return Ok(crate::theme::Palette::default());
+fn theme(
+    name: Option<&str>,
+    colors: Option<&std::collections::HashMap<String, String>>,
+) -> Result<(crate::theme::Palette, Vec<String>)> {
+    let mut palette = match name {
+        Some(name) => crate::theme::Palette::named(name).ok_or_else(|| {
+            anyhow::anyhow!("unknown theme {name:?} · {}", crate::theme::Palette::names())
+        })?,
+        None => crate::theme::Palette::default(),
     };
-    crate::theme::Palette::named(name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown theme {name:?} · {}",
-            crate::theme::Palette::names()
-        )
-    })
+    let Some(colors) = colors else {
+        return Ok((palette, Vec::new()));
+    };
+    /* Applied on top of a named base, so an override is a diff rather than a
+       whole palette: nobody should have to restate nine colours to change
+       one. A key or a value that cannot work stops startup — a colour that
+       silently does not apply reads as a theme that does not work. */
+    for (slot, value) in colors {
+        let color = hex(value)
+            .with_context(|| format!("theme colour {slot} = {value:?}"))?;
+        let field = palette.slot_mut(slot).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown theme colour {slot:?} · {}",
+                crate::theme::Palette::slot_names()
+            )
+        })?;
+        *field = color;
+    }
+    Ok((palette, palette.unreadable()))
+}
+
+/// `#rrggbb`, the only spelling worth supporting: it is what every palette,
+/// picker and stylesheet in the world hands you.
+fn hex(value: &str) -> Result<ratatui::style::Color> {
+    let digits = value.strip_prefix('#').unwrap_or(value);
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("not a #rrggbb colour");
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16);
+    Ok(ratatui::style::Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
 }
 
 /* Every field optional, and a length that could never produce a password is
@@ -624,6 +664,76 @@ mod tests {
         for name in ["warm", "light", "cool", "neon"] {
             assert!(err.contains(name), "{err} does not name {name}");
         }
+    }
+
+    /* An override is a diff on top of a named theme, not a whole palette:
+       changing one colour must not mean restating nine. */
+    #[test]
+    fn colours_override_one_slot_at_a_time() {
+        let cfg = build(
+            "theme = \"neon\"\n[colors]\ncursor = \"#00ff00\"\n",
+            &[],
+        );
+        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 0));
+        // Everything else is still the theme it was built on.
+        assert_eq!(cfg.theme.accent, crate::theme::NEON.accent);
+        assert_eq!(cfg.theme.near, crate::theme::NEON.near);
+        // And it stops being a built-in, which is what --check reports.
+        assert_eq!(cfg.theme.name(), "custom");
+
+        // Without a theme named, overrides land on the default.
+        let cfg = build("[colors]\ntext = \"#ffffff\"\n", &[]);
+        assert_eq!(cfg.theme.text, ratatui::style::Color::Rgb(255, 255, 255));
+        assert_eq!(cfg.theme.accent, crate::theme::WARM.accent);
+    }
+
+    /* A colour that cannot work stops startup; one that merely measures badly
+       warns and renders, because it is the user's screen. */
+    #[test]
+    fn bad_colours_stop_startup_and_dim_ones_only_warn() {
+        for bad in ["\"#12345\"", "\"blue\"", "\"#gggggg\""] {
+            let mut file = temp("badcolour");
+            writeln!(file.handle, "[colors]\ntext = {bad}").unwrap();
+            let cli = Cli::try_parse_from(vec![
+                "sennel".to_string(),
+                "--config".into(),
+                file.path.clone(),
+            ])
+            .unwrap();
+            let err = match Config::build(cli) {
+                Err(e) => format!("{e:#}"),
+                Ok(_) => panic!("{bad} started the session"),
+            };
+            assert!(err.contains("theme colour text"), "{err}");
+        }
+
+        // A slot nobody has is named, with the ones that exist.
+        let mut file = temp("badslot");
+        writeln!(file.handle, "[colors]\nbackground = \"#ffffff\"").unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ])
+        .unwrap();
+        let err = match Config::build(cli) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("an unknown slot started the session"),
+        };
+        assert!(err.contains("unknown theme colour"), "{err}");
+        assert!(err.contains("muted"), "the message does not list the slots: {err}");
+
+        /* Legible-but-barely is a warning, not a refusal: the session starts,
+           and the note names the slot and what it measured. */
+        let cfg = build("[colors]\nmuted = \"#3a3a3a\"\n", &[]);
+        assert_eq!(cfg.theme.muted, ratatui::style::Color::Rgb(58, 58, 58));
+        assert!(
+            cfg.theme_warnings.iter().any(|w| w.contains("muted")),
+            "{:?}",
+            cfg.theme_warnings
+        );
+        // And a palette nobody touched warns about nothing.
+        assert!(build("theme = \"cool\"\n", &[]).theme_warnings.is_empty());
     }
 
     #[test]
