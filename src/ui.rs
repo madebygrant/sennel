@@ -124,11 +124,34 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Level::Warn => AMBER,
         Level::Error => RED,
     };
-    let room = (area.width as usize).saturating_sub(cols(" Sennel  ·  "));
+    /* Colour is not the only channel: under NO_COLOR every shade collapses to
+       the terminal's own, and a failure then read exactly like a success. */
+    let badge = match app.level {
+        Level::Info => "",
+        Level::Warn => "! ",
+        Level::Error => "× ",
+    };
+    /* The vault keeps the right-hand end, so a flash no longer costs the one
+       line that says which vault is open. */
+    let name = app.vault_name();
+    let width = area.width as usize;
+    let lead = cols(" Sennel  ·  ");
+    let tail = if name.is_empty() || width < lead + cols(&name) + 12 {
+        String::new()
+    } else {
+        name
+    };
+    let room = width.saturating_sub(lead + cols(&tail) + 2);
+    let stage = truncate(&format!("{badge}{}", app.stage), room);
+    let gap = width
+        .saturating_sub(lead + cols(&stage) + cols(&tail) + 1)
+        .max(1);
     let spans = vec![
         Span::styled(" Sennel", Style::new().fg(GOLD)),
         dim("  ·  "),
-        Span::styled(truncate(&app.stage, room), Style::new().fg(ink)),
+        Span::styled(stage, Style::new().fg(ink)),
+        Span::raw(" ".repeat(gap)),
+        dim(tail),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -153,6 +176,12 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(dim(" no vault open"))), area);
         return;
     }
+    /* Headers cost a row and answer the question three unlabelled columns
+       could not: which pane is this, which folder am I in, and how the
+       entries are ordered. Skipped on a short window, where a row of chrome
+       is a row of list. */
+    let heads = area.height > 6;
+    app.heads = heads;
     if area.width >= PREVIEW_FROM {
         /* u32: the product overflows u16 past 32767 columns. */
         let detail = (u32::from(area.width) * 2 / 5).min(46) as u16;
@@ -162,6 +191,11 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(detail),
         ])
         .areas(area);
+        let (groups, entries, detail) = (
+            head(frame, app, groups, Head::Groups, heads),
+            head(frame, app, entries, Head::Entries, heads),
+            head(frame, app, detail, Head::Detail, heads),
+        );
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
         draw_detail(frame, app, detail);
@@ -170,6 +204,8 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         let [groups, entries] =
             Layout::horizontal([Constraint::Percentage(35), Constraint::Min(1)]).areas(area);
+        let groups = head(frame, app, groups, Head::Groups, heads);
+        let entries = head(frame, app, entries, Head::Entries, heads);
         /* What a page key moves by, which only the layout knows. The lower
            of the two, so a page never overshoots whichever pane is live. */
         app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
@@ -177,6 +213,87 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_groups(frame, app, groups);
         draw_entries(frame, app, entries);
     }
+}
+
+/// Joins as many leading segments as fit, so a narrow header drops the tail
+/// rather than cutting every part of itself down to an ellipsis.
+fn segments(width: usize, parts: &[String]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        let candidate = if out.is_empty() {
+            format!(" {part}")
+        } else {
+            format!("{out} · {part}")
+        };
+        if cols(&candidate) > width {
+            break;
+        }
+        out = candidate;
+    }
+    if out.is_empty() {
+        out = truncate(&format!(" {}", parts[0]), width);
+    }
+    out
+}
+
+/// Which pane a header belongs to. `Detail` is not a focusable pane — it is
+/// here so the third column gets a name like the other two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Head {
+    Groups,
+    Entries,
+    Detail,
+}
+
+/* Draws the pane's header row and hands back what is left for the list. The
+   live pane's header is CREAM, the others DIM: focus then has a word as well
+   as a marker, which is the only channel left when colour is off. */
+fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> Rect {
+    if !on || area.height < 2 {
+        return area;
+    }
+    let [row, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let live = match which {
+        Head::Groups => app.active_pane == Pane::Groups,
+        Head::Entries => app.active_pane == Pane::Entries,
+        Head::Detail => false,
+    };
+    let text = match which {
+        Head::Groups => " groups".to_string(),
+        Head::Detail => " detail".to_string(),
+        /* The breadcrumb the panes could not answer: a tree that truncates
+           names to `Clients and contrac…` cannot say where you are, and the
+           order is invisible the moment `o`'s flash expires. */
+        Head::Entries => {
+            let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
+            if searching {
+                let (shown, total) = (app.entry_matches(), app.entry_total());
+                format!(" whole vault · {shown} of {total}")
+            } else {
+                let n = app.entry_rows().len();
+                let plural = if n == 1 { "entry" } else { "entries" };
+                /* Most to least useful, and the narrow pane keeps the front
+                   of the list: a header truncated to "…stored…" has told
+                   nobody anything. */
+                segments(
+                    area.width as usize,
+                    &[
+                        app.here(),
+                        format!("{n} {plural}"),
+                        format!("sort: {}", app.order.short()),
+                    ],
+                )
+            }
+        }
+    };
+    let style = if live {
+        Style::new().fg(CREAM).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(DIM)
+    };
+    let text = truncate(&text, area.width as usize);
+    frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), row);
+    rest
 }
 
 /* Columns, not characters, and never straddling the edge: a width of one
@@ -292,7 +409,10 @@ fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, Strin
 fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
     let tree = app.group_tree();
     if tree.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(dim(" no groups"))), area);
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(" no groups  ·  A adds one"))),
+            area,
+        );
         return;
     }
     let at = tree
@@ -324,11 +444,23 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "▸ "
             };
-            let shown = truncate(&format!("{}{}{name}", "  ".repeat(*depth), branch), width);
+            /* A count turns the tree into a map: every folder otherwise looks
+               equally full, and the status bar only counts the whole vault. */
+            let held = app.entries_in(id);
+            let count = if held == 0 {
+                String::new()
+            } else {
+                format!("  {held}")
+            };
+            let shown = truncate(
+                &format!("{}{}{name}", "  ".repeat(*depth), branch),
+                width.saturating_sub(cols(&count)),
+            );
             let mark = mark(selected, live);
             ListItem::new(Line::from(vec![
                 mark,
                 Span::styled(format!(" {shown}"), row_style(selected)),
+                dim(count),
             ]))
         })
         .collect();
@@ -353,7 +485,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.search.as_deref().unwrap_or("")
             ))
         } else {
-            dim(" no entries here")
+            dim(" no entries here  ·  a adds one")
         };
         frame.render_widget(Paragraph::new(Line::from(text)), area);
         return;
@@ -428,7 +560,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     }
     let width = inner.width as usize;
     let Some(entry) = app.selected_entry() else {
-        frame.render_widget(Paragraph::new(Line::from(dim(" no entry"))), inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(" no entry  ·  a adds one"))),
+            inner,
+        );
         return;
     };
     let row = |label: &str, value: String, style: Style| {
@@ -719,9 +854,16 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     /* The copy keys are the bar: they name what the whole app is for, so they
        are what everything else has to fit around. */
+    /* Dim when there is nothing under the cursor to copy: three keys offered
+       in gold that all answer "no entry here" is a bar making promises the
+       selection cannot keep. */
+    let armed = app.selected_entry().is_some();
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled("y user", Style::new().fg(GOLD)),
+        Span::styled(
+            "y user",
+            Style::new().fg(if armed { GOLD } else { DIM }),
+        ),
         dim("   p pass   U url"),
     ];
     let mut used = cols(" y user   p pass   U url");
@@ -731,7 +873,9 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.working() {
         optional.push(Span::styled("  unsaved", Style::new().fg(AMBER)));
     }
-    if app.search.is_some() {
+    /* The entries header counts the matches where it is drawn; on a window
+       too short for headers the bar is the only place left to say it. */
+    if app.search.is_some() && !app.heads {
         let (shown, total) = (app.entry_matches(), app.entry_total());
         optional.push(Span::styled(
             format!("  {shown} of {total} shown"),
@@ -989,11 +1133,13 @@ fn draw_form(frame: &mut Frame, app: &App) {
         lines.push(Line::from(dim(" alt+enter starts a new line")));
     }
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    /* Entries land in the cursor group, which may be scrolled out of sight;
+       the title is the only place that can say so before Enter. */
     let title = match form.kind {
-        FormKind::Add => "new entry",
-        FormKind::Edit(_) => "edit entry",
+        FormKind::Add => format!("new entry in {}", app.here()),
+        FormKind::Edit(_) => format!("edit entry · {}", app.here()),
     };
-    popup(frame, title, lines, width);
+    popup(frame, &truncate(&title, width.saturating_sub(4) as usize), lines, width);
 }
 
 /* One entry per line in three aligned columns. Only live keys: a row naming
@@ -1555,7 +1701,9 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("/check"), "{joined}");
-        assert!(joined.contains("1 of 2 shown"), "{joined}");
+        // The entries header owns the count while it is drawn.
+        assert!(joined.contains("1 of 2"), "{joined}");
+        assert!(joined.contains("whole vault"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
     }
 
@@ -1738,6 +1886,78 @@ mod tests {
         assert!(screen(&t).join("\n").contains("hunter2"), "^r did not reveal");
     }
 
+    /* Three unlabelled columns could not say which pane you were in, which
+       folder you were looking at, or how it was sorted. The headers answer
+       all three, and the live one is the bold, cream one. */
+    #[test]
+    fn the_pane_headers_name_the_place_and_the_order() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(130, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banking").unwrap();
+        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
+        vault.create_entry(&banks, "savings", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("groups"), "{joined}");
+        assert!(joined.contains("Root/Banking · 2 entries"), "{joined}");
+        assert!(joined.contains("sort: stored"), "{joined}");
+        assert!(joined.contains("detail"), "{joined}");
+        // Counts turn the tree into a map.
+        assert!(joined.contains("Banking  2"), "{joined}");
+        /* A narrow header keeps the front of the list and drops the tail,
+           rather than truncating every part of itself into an ellipsis. */
+        let narrow = TestBackend::new(100, 24);
+        let mut t2 = Terminal::new(narrow).unwrap();
+        t2.draw(|f| draw(f, &mut app)).unwrap();
+        let tight = screen(&t2).join("\n");
+        assert!(tight.contains("Root/Banking · 2 entries"), "{tight}");
+        assert!(!tight.contains("sort:"), "the tail did not drop: {tight}");
+
+        // And `o` shows up where the order lives, not only in a flash.
+        app.cycle_order();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("sort: name"), "order not shown");
+    }
+
+    /* The vault keeps the right-hand end of the header, so a flash no longer
+       costs the line that says which vault is open — and a failure carries a
+       glyph, since NO_COLOR takes the red away. */
+    #[test]
+    fn the_header_keeps_the_vault_beside_the_flash() {
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let (mut app, tmp) = crate::app::tests::locked_app_with_db("pw");
+        let name = tmp.0.file_name().unwrap().to_string_lossy().into_owned();
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        app.error("save failed  ·  disk is full");
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let header = screen(&t).first().cloned().unwrap_or_default();
+        assert!(header.contains("save failed"), "{header:?}");
+        assert!(header.contains(&name), "the vault fell off the header: {header:?}");
+        assert!(header.contains('×'), "no severity glyph: {header:?}");
+    }
+
+    /* The empty states name the key that fills them: this is the first screen
+       after a vault is created. */
+    #[test]
+    fn empty_panes_name_the_way_out() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(100, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("no entries here  ·  a adds one"), "{joined}");
+    }
+
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
        somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]
@@ -1886,5 +2106,6 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 }

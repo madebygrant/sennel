@@ -182,6 +182,17 @@ impl SortOrder {
         }
     }
 
+    /// One word for the pane header, where "by name" would read as part of
+    /// the breadcrumb beside it.
+    pub fn short(self) -> &'static str {
+        match self {
+            SortOrder::Stored => "stored",
+            SortOrder::Name => "name",
+            SortOrder::Recent => "recent",
+            SortOrder::Updated => "updated",
+        }
+    }
+
     /// What the status flash calls it.
     pub fn label(self) -> &'static str {
         match self {
@@ -294,6 +305,9 @@ pub struct App {
     /// Whether the last frame had room for the side pane, set by the draw
     /// that knows (as `viewport` is): `*` must refuse where nothing shows.
     pub wide: bool,
+    /// Whether that frame had room for the pane headers, which own the
+    /// breadcrumb and the match count when they are drawn.
+    pub heads: bool,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
        a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
@@ -379,6 +393,7 @@ impl App {
             show_password: false,
             detail: false,
             wide: false,
+            heads: false,
             order: SortOrder::default(),
             db_path: None,
             unlock_new: false,
@@ -697,6 +712,15 @@ impl App {
         self.view = View::Unlock;
         self.resting = "locked".into();
         self.refresh_db_state();
+    }
+
+    /// The open vault's file name, or empty while locked. The header's
+    /// right-hand end, so identity survives a flash.
+    pub fn vault_name(&self) -> String {
+        match (&self.vault, &self.db_path) {
+            (Some(_), Some(path)) => vault_name(path),
+            _ => String::new(),
+        }
     }
 
     /// What the terminal window is called. The vault while one is open, so a
@@ -1084,6 +1108,23 @@ impl App {
 
     /// How many entries the vault holds in total, for the "N of M shown"
     /// search count. Reads the raw map, not any view.
+    /// The folder the cursor is in, as a path. What the tree cannot say once
+    /// it starts truncating names.
+    pub fn here(&self) -> String {
+        let (Some(vault), Some(id)) = (&self.vault, self.group_cursor) else {
+            return "no group".to_string();
+        };
+        vault
+            .get_group(&id)
+            .map(|_| vault.group_path(&id).join("/"))
+            .unwrap_or_else(|| "no group".to_string())
+    }
+
+    /// How many entries a group holds, for the counts in the tree.
+    pub fn entries_in(&self, id: &GroupId) -> usize {
+        self.vault.as_ref().map_or(0, |v| v.entries_in(id).len())
+    }
+
     pub fn entry_total(&self) -> usize {
         self.vault.as_ref().map_or(0, Vault::entry_count)
     }
@@ -2327,7 +2368,7 @@ fn form_field_value_ref(form: &Form, field: FormField) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /* Carried across frames, or ratatui recomputes the least scroll that
@@ -2604,7 +2645,7 @@ mod tests {
 
     /* Unique per call, not just per process: the harness runs tests in
        parallel, and two sharing a path would delete each other's file. */
-    fn temp_path(tag: &str) -> TempPath {
+    pub(crate) fn temp_path(tag: &str) -> TempPath {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         TempPath(std::env::temp_dir().join(format!(
@@ -2613,7 +2654,7 @@ mod tests {
         )))
     }
 
-    struct TempPath(std::path::PathBuf);
+    pub(crate) struct TempPath(pub std::path::PathBuf);
 
     impl Drop for TempPath {
         fn drop(&mut self) {
@@ -2622,7 +2663,7 @@ mod tests {
     }
 
     /// A real KDBX file on disk behind a locked app, as main.rs builds it.
-    fn locked_app_with_db(password: &str) -> (App, TempPath) {
+    pub(crate) fn locked_app_with_db(password: &str) -> (App, TempPath) {
         let tmp = temp_path("unlock");
         let mut seed = Vault::new();
         seed.save_as(&tmp.0, password, None).unwrap();
