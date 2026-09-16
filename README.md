@@ -1,57 +1,86 @@
 # Sennel
 
-A KeePass password manager that lives in your terminal. Real KDBX4 files, one key per secret,
-fuzzy search over the whole vault, and a clipboard that wipes itself.
+<div align="center">
+  <img src="docs/images/sennel.gif" alt="Sennel: open a vault, search, copy, generate" width="720">
+</div>
+
+Your vault, in your terminal. Real KeePass files. A clipboard that cleans up after itself.
+
+## Why you'll like it
+
+- **Real KDBX4 files.** KeePassXC opens what Sennel writes, Sennel opens what KeePassXC writes. No plugins, no lock-in.
+- **One key per secret.** `y p U t` copy the username, password, url or one-time code. Press one key, done.
+- **A clipboard with a timer.** Every copy wipes after 15 seconds, and the status bar counts the seconds down.
+- **Fuzzy search that shows its work.** The characters that matched light up in each row, so you know why it's there.
+- **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group.
+- **A generator on call.** `P` shows a password, what it's worth in bits, and one key per class for whatever rule the site has this week.
+- **It audits itself.** `!` lists every reused, weak, expired or empty password, worst first, and puts the cursor two keys from the fix.
+- **Deletes are never losses.** `D` moves to the same recycle bin KeePassXC uses. One `u` brings it back.
+- **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped.
 
 macOS and Linux.
 
+## Install
+
 ```sh
-cargo install --path .
-sennel --db vault.kdbx      # created on first unlock
-sennel get github -p        # or copy one secret and exit
-sennel gen --stdout         # or just a password, stored nowhere
+cargo install --git https://github.com/madebygrant/sennel.git
 ```
 
-Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
-and `^v` keeps them both.
+Then open a vault, created on first unlock:
+
+```sh
+sennel --db vault.kdbx
+```
+
+Or never open the TUI at all:
+
+```sh
+sennel get github -p        # copy one secret and exit
+sennel gen --stdout         # a password, stored nowhere
+```
+
+Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second and `^v` keeps them both.
+
+## The keys you need on day one
+
+| Key         | Action                                          |
+| ----------- | ----------------------------------------------- |
+| `j k` `Tab` | move in a pane, switch panes                    |
+| `enter`     | open the entry                                  |
+| `y p U t`   | copy username, password, url, one-time code     |
+| `^v`        | the vaults you have opened (unlock screen)      |
+| `/`         | search                                          |
+| `a e D`     | add, edit, delete an entry (to the bin)         |
+| `P`         | generate a password, no entry needed            |
+| `!`         | passwords worth changing                        |
+| `F`         | custom fields and attachments                   |
+| `u`         | undo, as many steps as you made                 |
+| `h`         | every other key                                 |
+
+[The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering
+keys.
 
 ## What it does
-
-**Comes with a way in.** `sennel import export.csv` reads what KeePassXC, Bitwarden and 1Password
-hand you, into a group of its own so a regretted import is one delete. `--dry-run` shows what would
-land without asking for your password. [More](docs/import.md).
 
 **Scriptable.** `sennel get github -p` copies a password without opening the TUI, wipes it on the
 same timer, and exits with a code a script can branch on. `--stdout` pipes it instead, and refuses
 to print into a terminal where it would sit in your scrollback. [More](docs/get.md).
-
-**Real KeePass files.** KDBX4 in, KDBX4 out. KeePassXC opens what Sennel writes and Sennel opens
-what KeePassXC writes. No plugins, no homebrew format, no lock-in. Older KDBX 3.1 vaults open
-read-only; `sennel convert` writes a verified KDBX 4 copy beside the original.
-[More](docs/kdbx3.md).
-
-**One key per secret, or one click.** `y` copies the username, `p` the password, `U` the url, `t`
-the one-time code — and clicking that row in the detail view does the same, lighting up `✓ copied`
-so you can see it worked. Every copy wipes after 15 seconds, and the status bar counts it down, so you always know
-when a password is still sitting on the pasteboard. Quitting wipes it immediately.
 
 **A vault library, not one favourite.** Work and personal are two vaults, and `db` in a config file
 only ever held one of them. `^v` lists every vault this machine has opened, newest first, marks the
 one that is open and the ones that have moved, and `enter` points the session at another without a
 restart. [More](docs/keys.md).
 
-**A generator you can reach without an entry.** `P` opens it on its own: the password on screen,
-what it is worth in bits, and one key per class so you can meet whatever rule the site has this
-week. `y` copies it, `esc` closes it, and nothing is stored. Outside the TUI, `sennel gen` does the
-same in one line. [More](docs/generate.md).
+**Older vaults are welcome.** KDBX 3.1 opens read-only; `sennel convert` writes a verified KDBX 4
+copy beside the original. [More](docs/kdbx3.md).
 
 **It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
 have it open, the next autosave refuses rather than quietly winning. `^s` keeps yours, `^r` takes
 theirs.
 
-**Fuzzy search that shows its work.** `/` searches titles, usernames, urls and group paths. Never
-notes. The characters that matched light up in each row, so you can see why a row is there. A needle
-starting with `#` filters by tag instead, and lists the tags you have while you type it.
+**A search that never opens the notes.** `/` covers titles, usernames, urls and group paths, and
+never the notes. A needle starting with `#` filters by tag instead, and lists the tags you have
+while you type it.
 
 **Expiry dates it actually reads.** KDBX has carried an expiry on every entry all along. Expired
 rows are marked `⌛` in the list and named in the pane, `--list` says `(expired)`, and `!` puts them
@@ -73,41 +102,9 @@ copies a field, `s` writes an attachment out, `a` and `f` add them.
 behind your back. Entries that arrive from KeePassXC often carry one anyway, and `H` shows every old
 version it holds and clears them for good.
 
-**It tells you which passwords to change.** `!` lists every reused, weak, expired or empty password
-in the vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
-finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
-`sennel audit --pwned` adds a breach check that never sends your password anywhere.
-[More](docs/audit.md).
-
-**Deletes are recoverable.** `D` moves an entry or a whole group into the same recycle bin
-KeePassXC uses, so a mistake costs one `u` rather than a restore from backup. Binned rows stay out
-of counts, search and `--list`. Inside the bin, `D` means it.
-
 **Change the master password without leaving.** `^p` re-keys the vault in place, writing the file
 under the new password before the session swaps to it. A failed write leaves the old password
 working rather than a vault nobody can open.
-
-**It locks itself.** Five idle minutes and the vault closes, with every secret in memory
-overwritten rather than dropped. `^l` does it now.
-
-## The keys you need on day one
-
-| Key         | Action                                          |
-| ----------- | ----------------------------------------------- |
-| `j k` `Tab` | move in a pane, switch panes                    |
-| `enter`     | open the entry                                  |
-| `y p U t`   | copy username, password, url, one-time code     |
-| `^v`        | the vaults you have opened (unlock screen)      |
-| `/`         | search                                          |
-| `a e D`     | add, edit, delete an entry (to the bin)         |
-| `P`         | generate a password, no entry needed            |
-| `!`         | passwords worth changing                        |
-| `F`         | custom fields and attachments                   |
-| `u`         | undo, as many steps as you made                 |
-| `h`         | every other key                                 |
-
-[The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering
-keys.
 
 ## More
 
