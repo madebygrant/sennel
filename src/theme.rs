@@ -50,10 +50,7 @@ pub struct Palette {
    everything secondary is a muted sand rather than a grey. Text and ground
    are both warm, so the one cool colour is what the eye lands on. Every
    colour clears 4.5:1 over the lightest corner of the gradient except `rule`,
-   which is meant to be barely there, and `error`, which sits at 3.73:1 and is
-   pinned there by the contrast test until it is decided whether to lighten
-   it — the red on a failure flash is the last thing that should be hard to
-   read. */
+   which is meant to be barely there. */
 /* Measured, not asserted: `every_palette_is_legible_on_its_own_ground` runs
    the numbers over every built-in, against both ends of the gradient and the
    tone popups raise themselves with.
@@ -69,7 +66,10 @@ pub const WARM: Palette = Palette {
     // Cool against the warm ground, so it separates from warn by hue.
     cursor: Color::Rgb(96, 178, 158),
     warn: Color::Rgb(214, 154, 78),
-    error: Color::Rgb(196, 106, 92),
+    /* Lifted from (196,106,92), which measured 3.73:1 over `near` — under the
+       4.5:1 this file has always claimed, on the one colour a failed save is
+       read in. The same red, two shades up: 4.74:1. */
+    error: Color::Rgb(214, 126, 112),
     muted: Color::Rgb(158, 148, 128),
     rule: Color::Rgb(92, 84, 66),
     surface: Color::Rgb(46, 41, 33),
@@ -103,12 +103,82 @@ impl Palette {
     }
 }
 
+/* Ink on parchment, for a terminal with a light background — where every
+   other palette here is unreadable. The inversion is the whole palette, not
+   the text: the gradient's ends go light too, and `surface` is lighter than
+   the page rather than darker, so a popup still reads as raised. */
+/* Reachable by name from wave 4, when the config resolves one. */
+#[allow(dead_code)]
+pub const LIGHT: Palette = Palette {
+    text: Color::Rgb(38, 34, 30),
+    accent: Color::Rgb(124, 84, 14),
+    cursor: Color::Rgb(17, 110, 98),
+    warn: Color::Rgb(132, 82, 6),
+    error: Color::Rgb(170, 40, 40),
+    muted: Color::Rgb(105, 98, 88),
+    rule: Color::Rgb(172, 164, 150),
+    surface: Color::Rgb(253, 251, 247),
+    masked: Color::Rgb(130, 122, 110),
+    // A filled band on a light theme is dark, so its text is light.
+    ink: Color::Rgb(250, 248, 244),
+    near: (247, 243, 236),
+    far: (231, 225, 214),
+    stop: 0.76,
+};
+
+/* Slate and steel: the same structure as warm with the warmth taken out, for
+   anyone who finds a gold-and-cream terminal too much furniture. */
+/* Reachable by name from wave 4, when the config resolves one. */
+#[allow(dead_code)]
+pub const COOL: Palette = Palette {
+    text: Color::Rgb(226, 232, 240),
+    accent: Color::Rgb(126, 176, 222),
+    cursor: Color::Rgb(94, 206, 196),
+    warn: Color::Rgb(222, 170, 90),
+    error: Color::Rgb(236, 132, 128),
+    muted: Color::Rgb(150, 162, 176),
+    rule: Color::Rgb(84, 98, 114),
+    surface: Color::Rgb(34, 42, 52),
+    masked: Color::Rgb(160, 170, 184),
+    ink: Color::Rgb(16, 20, 26),
+    near: (44, 52, 62),
+    far: (14, 18, 24),
+    stop: 0.76,
+};
+
+/* Magenta and cyan over a violet-to-black ground. The hazard in a neon
+   palette is always `muted` — usernames, urls and every hint draw in it, and
+   the temptation is a dim purple that measures 2:1. This one is light enough
+   to read and cool enough to stay behind the text. */
+/* Reachable by name from wave 4, when the config resolves one. */
+#[allow(dead_code)]
+pub const NEON: Palette = Palette {
+    text: Color::Rgb(226, 232, 255),
+    accent: Color::Rgb(255, 92, 213),
+    cursor: Color::Rgb(86, 240, 255),
+    warn: Color::Rgb(246, 226, 90),
+    error: Color::Rgb(255, 94, 120),
+    muted: Color::Rgb(166, 150, 205),
+    rule: Color::Rgb(86, 48, 120),
+    surface: Color::Rgb(24, 14, 38),
+    masked: Color::Rgb(180, 168, 215),
+    ink: Color::Rgb(10, 6, 16),
+    near: (26, 10, 44),
+    far: (8, 4, 14),
+    stop: 0.76,
+};
+
 /* Every palette Sennel ships. The list is what the contrast, quantise and
    NO_COLOR checks iterate, so a new theme is covered the moment it is added
    here and cannot be shipped unmeasured. */
 /* Test-only until the config lookup of wave 4 resolves a name through it. */
 #[cfg(test)]
-pub const BUILT_INS: [(&str, Palette); 1] = [("warm", WARM)];
+pub const BUILT_INS: [(&str, Palette); 4] = [
+    ("warm", WARM),
+    ("light", LIGHT),
+    ("cool", COOL),
+    ("neon", NEON),
+];
 
 /* WCAG 2.1 relative luminance and contrast ratio. A palette is a claim about
    legibility — theme.rs has carried one in a comment since the first commit —
@@ -369,17 +439,12 @@ mod tests {
     /* Slots that carry meaning as text, and the ratio each has to clear.
        4.5:1 is WCAG's bar for body text, which is what all of these are.
 
-       Two are named rather than silently skipped:
-       - `rule` is structure and is meant to be barely there.
-       - `error` is the palette's one shortfall today at 3.73:1 over the warm
-         theme's lightest corner. It is pinned at its measured value rather
-         than exempted, so it cannot get worse while a decision is pending on
-         whether to lighten it — the red on the failure flash is the last
-         thing that should be hard to read. */
+       One is named rather than silently skipped: `rule` is structure, not
+       text, and is meant to be barely there. Everything else — including the
+       red that a failed save is read in — clears the bar. */
     fn required(slot: &str) -> f64 {
         match slot {
             "rule" => 1.8,
-            "error" => 3.7,
             _ => 4.5,
         }
     }
@@ -441,7 +506,9 @@ mod tests {
         assert_eq!(WARM.accent, Color::Rgb(214, 180, 96));
         assert_eq!(WARM.cursor, Color::Rgb(96, 178, 158));
         assert_eq!(WARM.warn, Color::Rgb(214, 154, 78));
-        assert_eq!(WARM.error, Color::Rgb(196, 106, 92));
+        /* The one slot that moved, and the reason: 3.73:1 over `near` failed
+           the bar this file claims, on the colour a failed save is read in. */
+        assert_eq!(WARM.error, Color::Rgb(214, 126, 112));
         assert_eq!(WARM.muted, Color::Rgb(158, 148, 128));
         assert_eq!(WARM.rule, Color::Rgb(92, 84, 66));
         assert_eq!(WARM.surface, Color::Rgb(46, 41, 33));
