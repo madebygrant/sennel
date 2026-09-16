@@ -68,6 +68,45 @@ fn main() -> Result<()> {
         let (needle, stdout, force) = (needle.clone(), *stdout, *force);
         return get(&cfg, &needle, field, stdout, force);
     }
+    /* Also before the terminal checks, and the one subcommand that opens no
+       vault at all: a password you are not storing needs no database. */
+    if let Some(Command::Gen {
+        length,
+        symbols,
+        no_symbols,
+        no_digits,
+        no_upper,
+        ambiguous,
+        count,
+        stdout,
+        force,
+    }) = &cfg.command
+    {
+        let mut settings = cfg.generator;
+        if let Some(len) = *length {
+            let (min, max) = config::LENGTH_RANGE;
+            if !(min..=max).contains(&len) {
+                anyhow::bail!("length {len} is outside {min}–{max}");
+            }
+            settings.length = len;
+        }
+        if *symbols {
+            settings.classes.symbols = true;
+        }
+        if *no_symbols {
+            settings.classes.symbols = false;
+        }
+        if *no_digits {
+            settings.classes.digits = false;
+        }
+        if *no_upper {
+            settings.classes.upper = false;
+        }
+        if *ambiguous {
+            settings.exclude_ambiguous = false;
+        }
+        return make_password(&cfg, settings, *count, *stdout, *force);
+    }
     /* Before the config is even consulted: printing a completion script is
        not a session, and it must work on a machine with no vault. */
     if let Some(Command::Completions { shell }) = &cfg.command {
@@ -614,6 +653,68 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     Ok(())
 }
 
+/* `sennel gen`: the generator on its own, with no entry to write it into and
+   no vault to unlock. Copies by default, like `get`, so the password is one
+   paste away and gone on the same timer. */
+fn make_password(
+    cfg: &Config,
+    settings: config::Generator,
+    count: usize,
+    to_stdout: bool,
+    force: bool,
+) -> Result<()> {
+    if to_stdout && std::io::stdout().is_terminal() && !force {
+        anyhow::bail!(
+            "--stdout into a terminal would leave the password in your scrollback · pipe it, or --force"
+        );
+    }
+    if count == 0 {
+        anyhow::bail!("--count 0 would generate nothing");
+    }
+    let make = || {
+        generator::generate(settings.length, settings.classes, settings.exclude_ambiguous)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    };
+    let bits = generator::entropy_bits(
+        settings.length,
+        settings.classes.alphabet_len(settings.exclude_ambiguous),
+    );
+    if to_stdout {
+        for _ in 0..count {
+            let mut password = make()?;
+            say!("{password}");
+            password.zeroize();
+        }
+        return Ok(());
+    }
+
+    let mut password = make()?;
+    let board = Board::new(cfg.clipboard_timeout);
+    /* Wiped before the error is raised, not after: `?` on the copy would
+       return with the plaintext still in this frame's String. */
+    let copied = board.copy(&password).map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    copied?;
+    match board.timeout_secs() {
+        // The wipe is a thread in this process, so exiting now abandons it.
+        Some(secs) => {
+            eprintln!(
+                "copied {} chars · {} · ~{bits:.0} bits · clears in {secs}s",
+                settings.length,
+                settings.describe()
+            );
+            std::thread::sleep(Duration::from_secs(secs));
+            board.clear_now();
+        }
+        None => eprintln!(
+            "copied {} chars · {} · ~{bits:.0} bits",
+            settings.length,
+            settings.describe()
+        ),
+    }
+    Ok(())
+}
+
 fn walk_groups(vault: &Vault) -> Vec<(GroupId, usize)> {
     let mut out = Vec::new();
     let mut stack = vec![(vault.root_id(), 0)];
@@ -775,6 +876,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_library_key(app, code, mods);
         return;
     }
+    /* So does the generator: `y` copies what is on screen, and it must not
+       also copy the username of whatever the browser's cursor is on. */
+    if app.mint.is_some() {
+        handle_mint_key(app, code, mods);
+        return;
+    }
     /* The lock screen owns every printable key, so the overlay needs one no
        password can contain: `h` there types an h, which left the bar's "h
        keys" promising a key that does not exist on the first screen anybody
@@ -842,6 +949,11 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `^t` walks the palettes: a theme is picked by looking at it, not by
            reading its name in a config file. */
         KeyCode::Char('t') if ctrl => app.cycle_theme(),
+        /* `P`: a password with no entry to put it in. Shifted, beside the
+           other structural verbs, and not `^g` — that already narrows the
+           search to a group, and one key with two meanings in one keymap is
+           a key nobody trusts. */
+        KeyCode::Char('P') => app.open_mint(),
         KeyCode::Char('g') | KeyCode::Home => app.jump_pane(false),
         KeyCode::Char('G') | KeyCode::End => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
@@ -1157,6 +1269,28 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Backspace => app.library_backspace(),
         KeyCode::Char(c) if !ctrl => app.library_filter(c),
         _ => {}
+    }
+}
+
+/* One key per knob, and every one of them rolls a new password: the screen
+   must never describe settings the password on it was not drawn from. */
+fn handle_mint_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
+        // The one key that must work with a secret on screen.
+        KeyCode::Char('l') if ctrl => app.lock_now(),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => app.close_mint(),
+        KeyCode::Char('r') | KeyCode::Char(' ') => app.mint_reroll(),
+        // `y` copies here as it does everywhere else in the browser.
+        KeyCode::Char('y') | KeyCode::Enter => app.mint_copy(),
+        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => app.mint_resize(true),
+        KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left => app.mint_resize(false),
+        KeyCode::Char('s') => app.mint_toggle(app::Knob::Symbols),
+        KeyCode::Char('d') => app.mint_toggle(app::Knob::Digits),
+        KeyCode::Char('u') => app.mint_toggle(app::Knob::Upper),
+        KeyCode::Char('a') => app.mint_toggle(app::Knob::Ambiguous),
+        _ => app.say("esc closes the generator"),
     }
 }
 

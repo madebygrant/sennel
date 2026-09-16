@@ -366,3 +366,82 @@ fn a_reader_that_stops_early_is_not_an_error() {
         );
     }
 }
+
+/* `sennel gen` is the one subcommand that opens no vault: it must work with
+   no database configured, no password on stdin and nothing on disk. Stdout
+   is the password and only the password, so `pw=$(sennel gen --stdout)` is
+   the whole usage. */
+#[test]
+fn gen_prints_a_password_and_needs_no_vault() {
+    let (out, err, code) = run(&["--no-config", "gen", "--stdout", "-n", "32"]);
+    assert_eq!(code, 0, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout carried more than the password: {out:?}");
+    assert_eq!(lines[0].chars().count(), 32);
+    // The default excludes the lookalikes, so none may appear.
+    assert!(
+        !lines[0].chars().any(|c| "l1IO0".contains(c)),
+        "ambiguous characters leaked: {out}"
+    );
+    // And nothing about the run goes to stdout, where the password is.
+    assert!(err.is_empty(), "stderr had something to say: {err}");
+
+    /* Two runs differ, or `gen` is a fancy way to print a constant. */
+    let (again, _, _) = run(&["--no-config", "gen", "--stdout", "-n", "32"]);
+    assert_ne!(out, again);
+}
+
+/* The flags override the config for one run, which is the point of having
+   them: a site that forbids punctuation should not need a file edit. */
+#[test]
+fn gen_flags_override_the_configured_classes() {
+    let (out, err, code) = run(&[
+        "--no-config",
+        "gen",
+        "--stdout",
+        "--count",
+        "5",
+        "--symbols",
+        "--no-digits",
+        "--no-upper",
+        "-n",
+        "16",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 5, "--count made the wrong number: {out:?}");
+    for line in lines {
+        assert_eq!(line.chars().count(), 16);
+        assert!(line.chars().any(|c| c.is_ascii_punctuation()), "{line}");
+        assert!(!line.chars().any(|c| c.is_ascii_digit()), "{line}");
+        assert!(!line.chars().any(|c| c.is_ascii_uppercase()), "{line}");
+    }
+
+    /* The pair is a switch, not a toggle each way: whichever came last is
+       what you get, so a wrapper script can append `--no-symbols` to a
+       command that already had `--symbols` in it. */
+    let (out, err, code) = run(&[
+        "--no-config",
+        "gen",
+        "--stdout",
+        "--symbols",
+        "--no-symbols",
+        "-n",
+        "24",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !out.trim().chars().any(|c| c.is_ascii_punctuation()),
+        "--no-symbols came last and lost: {out}"
+    );
+}
+
+/* A length the generator could never honour is refused before anything is
+   printed, rather than produced short. */
+#[test]
+fn gen_refuses_a_length_outside_the_bounds() {
+    let (out, err, code) = run(&["--no-config", "gen", "--stdout", "-n", "3"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty(), "a refused length still printed: {out:?}");
+    assert!(err.contains("outside"), "{err}");
+}

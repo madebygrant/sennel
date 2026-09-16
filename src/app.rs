@@ -544,6 +544,49 @@ impl Library {
     }
 }
 
+/* The standalone generator behind `^g`: a password with no entry to hang it
+   on — a router, a disk, a site Sennel is not storing. Touches no vault. */
+pub struct Mint {
+    pub password: String,
+    /// Seeded from the config and never written back, so the toggles here
+    /// last the session and the file stays the one place the default is set.
+    pub settings: crate::config::Generator,
+}
+
+/// Which of the popup's toggles a key pressed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Knob {
+    Upper,
+    Digits,
+    Symbols,
+    /// Inverted on purpose: the key offers the lookalikes, the setting
+    /// excludes them.
+    Ambiguous,
+}
+
+impl Mint {
+    /// What `Drop` does, observable on a live value. See `Form::wipe`.
+    pub fn wipe(&mut self) {
+        self.password.zeroize();
+    }
+
+    /// Priced against the pool actually drawn from, the same way `^s` is.
+    pub fn bits(&self) -> f64 {
+        crate::generator::entropy_bits(
+            self.settings.length,
+            self.settings
+                .classes
+                .alphabet_len(self.settings.exclude_ambiguous),
+        )
+    }
+}
+
+impl Drop for Mint {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
 /// Everything `entry_rows` reads. Two equal keys must mean two equal answers,
 /// so anything that reorders or refilters the pane belongs in here.
 #[derive(PartialEq, Eq)]
@@ -647,6 +690,8 @@ pub struct App {
     pub browse: Option<Browse>,
     /// The vault library, while it is open. `^v` on the unlock screen.
     pub library: Option<Library>,
+    /// The standalone generator, while it is open. `^g` in the browser.
+    pub mint: Option<Mint>,
     /// Every vault opened before, newest first, from the config.
     pub recent: Vec<PathBuf>,
     /* Where a chosen vault is remembered, and what is already written there.
@@ -768,6 +813,7 @@ impl App {
             config_file: None,
             configured_db: None,
             library: None,
+            mint: None,
             recent: Vec::new(),
             board: None,
             unlock_confirm: String::new(),
@@ -1148,6 +1194,8 @@ impl App {
         self.fields = None;
         // Holds old passwords, which is the whole reason it is worth showing.
         self.history = None;
+        // A generated password on screen is a secret on screen. Dropping wipes it.
+        self.mint = None;
         self.confirm = None;
         self.cut = None;
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
@@ -1617,6 +1665,122 @@ impl App {
         }
         if self.recent.is_empty() {
             self.library = None;
+        }
+    }
+
+    pub fn open_mint(&mut self) {
+        self.mint = Some(Mint {
+            password: String::new(),
+            settings: self.generator,
+        });
+        self.mint_roll(false);
+    }
+
+    pub fn close_mint(&mut self) {
+        self.mint = None;
+    }
+
+    /* `announce` is off for the toggles: the popup already shows the password
+       and its bits, so a flash per keystroke tells the user nothing new. */
+    fn mint_roll(&mut self, announce: bool) {
+        let Some(mint) = &mut self.mint else {
+            return;
+        };
+        let settings = mint.settings;
+        match crate::generator::generate(
+            settings.length,
+            settings.classes,
+            settings.exclude_ambiguous,
+        ) {
+            Ok(password) => {
+                /* Wiped rather than dropped: the old password's bytes would
+                   otherwise be freed intact behind the new one. */
+                mint.password.zeroize();
+                mint.password = password;
+            }
+            Err(e) => {
+                mint.password.zeroize();
+                mint.password = String::new();
+                self.error(format!("cannot generate  ·  {e}"));
+                return;
+            }
+        }
+        if announce {
+            let bits = self.mint.as_ref().map(Mint::bits).unwrap_or_default();
+            self.say(format!(
+                "a new one  ·  {} chars  ·  ~{bits:.0} bits  ·  y copies it",
+                settings.length
+            ));
+        }
+    }
+
+    pub fn mint_reroll(&mut self) {
+        self.mint_roll(true);
+    }
+
+    /// Longer or shorter by one, inside the same bounds the config file is
+    /// held to, then redrawn so the number on screen is the one you get.
+    pub fn mint_resize(&mut self, longer: bool) {
+        let Some(mint) = &mut self.mint else {
+            return;
+        };
+        let (min, max) = crate::config::LENGTH_RANGE;
+        let want = if longer {
+            mint.settings.length + 1
+        } else {
+            mint.settings.length.saturating_sub(1)
+        };
+        if want < min || want > max {
+            self.say(format!("length stays between {min} and {max}"));
+            return;
+        }
+        mint.settings.length = want;
+        self.mint_roll(false);
+    }
+
+    pub fn mint_toggle(&mut self, knob: Knob) {
+        let Some(mint) = &mut self.mint else {
+            return;
+        };
+        let classes = &mut mint.settings.classes;
+        match knob {
+            Knob::Upper => classes.upper = !classes.upper,
+            Knob::Digits => classes.digits = !classes.digits,
+            Knob::Symbols => classes.symbols = !classes.symbols,
+            Knob::Ambiguous => {
+                mint.settings.exclude_ambiguous = !mint.settings.exclude_ambiguous
+            }
+        }
+        self.mint_roll(false);
+    }
+
+    /* The whole point of the popup: the password leaves on the clipboard,
+       under the same auto-clear timer every other copy gets. */
+    pub fn mint_copy(&mut self) {
+        let Some(mint) = &self.mint else {
+            return;
+        };
+        if mint.password.is_empty() {
+            self.say("nothing generated yet  ·  r rolls one");
+            return;
+        }
+        let password = mint.password.clone();
+        let Some(board) = &self.board else {
+            self.say("clipboard is not ready  ·  report this as a bug");
+            return;
+        };
+        let copied = board.copy(&password);
+        match copied {
+            Ok(()) => {
+                let left = self
+                    .board
+                    .as_ref()
+                    .and_then(Board::clears_in)
+                    .map(|secs| format!("  ·  clears in {secs}s"))
+                    .unwrap_or_default();
+                self.say(format!("copied the generated password{left}"));
+            }
+            Err(e) => self.error(e),
         }
     }
 
@@ -6658,5 +6822,120 @@ pub mod tests {
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
         assert!(app.stage.contains("a adds your first entry"), "{}", app.stage);
+    }
+    /* The popup arrives with a password already in it. An empty box with a
+       "press r" hint is one keystroke of ceremony in front of the only thing
+       the screen is for. */
+    #[test]
+    fn the_generator_opens_with_a_password_ready() {
+        let mut app = open_app();
+        app.open_mint();
+        let mint = app.mint.as_ref().expect("^P opened nothing");
+        assert_eq!(mint.password.chars().count(), app.generator.length);
+        assert!(mint.bits() > 0.0);
+    }
+
+    /* Every roll is a new draw. Two identical passwords in a row would mean
+       `r` redrew the screen and not the secret. */
+    #[test]
+    fn rolling_again_gives_a_different_password() {
+        let mut app = open_app();
+        app.open_mint();
+        let first = app.mint.as_ref().unwrap().password.clone();
+        app.mint_reroll();
+        assert_ne!(first, app.mint.as_ref().unwrap().password);
+    }
+
+    /* A toggle must change the password, not only the label under it: the
+       generator forces one character per requested class, so symbols on
+       means a symbol is there to find. */
+    #[test]
+    fn a_toggle_changes_what_the_password_is_made_of() {
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_toggle(Knob::Symbols);
+        let mint = app.mint.as_ref().unwrap();
+        assert!(mint.settings.classes.symbols);
+        assert!(
+            mint.password.chars().any(|c| c.is_ascii_punctuation()),
+            "symbols on produced {}",
+            mint.password
+        );
+
+        app.mint_toggle(Knob::Digits);
+        let mint = app.mint.as_ref().unwrap();
+        assert!(!mint.settings.classes.digits);
+        assert!(
+            !mint.password.chars().any(|c| c.is_ascii_digit()),
+            "digits off produced {}",
+            mint.password
+        );
+    }
+
+    /* The lookalike key reads the other way round from the setting behind
+       it: pressing `a` asks for `l 1 I O 0`, which turns the exclusion off. */
+    #[test]
+    fn the_lookalike_key_asks_for_them_rather_than_excluding_them() {
+        let mut app = open_app();
+        app.open_mint();
+        assert!(app.mint.as_ref().unwrap().settings.exclude_ambiguous);
+        app.mint_toggle(Knob::Ambiguous);
+        assert!(!app.mint.as_ref().unwrap().settings.exclude_ambiguous);
+    }
+
+    /* `-` past the floor stops and says so rather than generating something
+       shorter than the classes asked for, which is an error, not a password. */
+    #[test]
+    fn the_length_keys_stop_at_the_bounds() {
+        let mut app = open_app();
+        app.open_mint();
+        let (min, max) = crate::config::LENGTH_RANGE;
+        for _ in 0..app.generator.length {
+            app.mint_resize(false);
+        }
+        assert_eq!(app.mint.as_ref().unwrap().settings.length, min);
+        app.mint_resize(false);
+        assert_eq!(app.mint.as_ref().unwrap().settings.length, min);
+        assert!(app.stage.contains(&format!("between {min} and {max}")), "{}", app.stage);
+        /* And the password on screen is the length the popup claims, or the
+           number under it is describing a different secret. */
+        app.mint_resize(true);
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.password.chars().count(), mint.settings.length);
+    }
+
+    /* The popup's toggles are the session's, not the file's: `^P` twice must
+       not come back holding whatever the last visit turned on. */
+    #[test]
+    fn the_popup_never_edits_the_configured_default() {
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_toggle(Knob::Symbols);
+        app.close_mint();
+        assert!(!app.generator.classes.symbols, "the popup rewrote the session default");
+        app.open_mint();
+        assert!(!app.mint.as_ref().unwrap().settings.classes.symbols);
+    }
+
+    /* Generating writes nothing. A password nobody asked to store must not
+       leave the vault dirty, or quitting would prompt to save a change that
+       was never made. */
+    #[test]
+    fn generating_leaves_the_vault_alone() {
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_reroll();
+        app.mint_toggle(Knob::Symbols);
+        assert!(!app.dirty, "the generator dirtied the vault");
+    }
+
+    /* A generated password is a secret on screen, so the lock takes it with
+       everything else. */
+    #[test]
+    fn locking_closes_the_generator() {
+        let mut app = open_app();
+        app.open_mint();
+        app.lock_now();
+        assert!(app.mint.is_none(), "a password survived the lock");
     }
 }

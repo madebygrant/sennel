@@ -9,6 +9,7 @@ macOS and Linux.
 cargo install --path .
 sennel --db vault.kdbx      # created on first unlock
 sennel get github -p        # or copy one secret and exit
+sennel gen --stdout         # or just a password, stored nowhere
 ```
 
 Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
@@ -38,6 +39,11 @@ when a password is still sitting on the pasteboard. Quitting wipes it immediatel
 only ever held one of them. `^v` lists every vault this machine has opened, newest first, marks the
 one that is open and the ones that have moved, and `enter` points the session at another without a
 restart. [More](docs/keys.md).
+
+**A generator you can reach without an entry.** `P` opens it on its own: the password on screen,
+what it is worth in bits, and one key per class so you can meet whatever rule the site has this
+week. `y` copies it, `esc` closes it, and nothing is stored. Outside the TUI, `sennel gen` does the
+same in one line. [More](docs/generate.md).
 
 **It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
 have it open, the next autosave refuses rather than quietly winning. `^s` keeps yours, `^r` takes
@@ -94,6 +100,7 @@ overwritten rather than dropped. `^l` does it now.
 | `^v`        | the vaults you have opened (unlock screen)      |
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
+| `P`         | generate a password, no entry needed            |
 | `!`         | passwords worth changing                        |
 | `F`         | custom fields and attachments                   |
 | `u`         | undo, as many steps as you made                 |
@@ -105,6 +112,7 @@ keys.
 ## More
 
 - [`sennel get`](docs/get.md), the non-interactive path
+- [Generating passwords](docs/generate.md), in the TUI and from a script
 - [Importing](docs/import.md) from KeePassXC, Bitwarden or 1Password
 - [Auditing](docs/audit.md), including the breach check
 - [Older KDBX files](docs/kdbx3.md) and `sennel convert`

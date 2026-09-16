@@ -133,6 +133,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.library.is_some() {
         draw_library(frame, app);
     }
+    if app.mint.is_some() {
+        draw_mint(frame, app);
+    }
     recolour(frame);
 }
 
@@ -1467,6 +1470,95 @@ fn draw_library(frame: &mut Frame, app: &App) {
     popup(frame, &format!("{MARK} vaults"), lines, width, &p);
 }
 
+/* The standalone generator. The password is shown plainly and never masked:
+   a secret you cannot read is one you cannot check, and it is not going into
+   the vault where `*` could reveal it later. */
+fn draw_mint(frame: &mut Frame, app: &App) {
+    let p = app.theme;
+    let Some(mint) = &app.mint else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(28, 72);
+    let inner = width.saturating_sub(4) as usize;
+    let settings = mint.settings;
+    let bits = mint.bits();
+
+    let mut lines: Vec<Line> = vec![Line::default()];
+    /* Wrapped, not truncated: at 128 characters an ellipsis would hide most
+       of what the popup exists to show. */
+    if mint.password.is_empty() {
+        lines.push(Line::from(p.faint("  nothing to show  ·  r rolls one")));
+    } else {
+        for chunk in wrap(&mint.password, inner.saturating_sub(2)) {
+            lines.push(Line::from(Span::styled(
+                format!("  {chunk}"),
+                Style::new().fg(p.accent),
+            )));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(p.faint(truncate(
+        &format!(
+            "  {} chars  ·  ~{bits:.0} bits  ·  {}",
+            settings.length,
+            crate::generator::strength(bits)
+        ),
+        inner,
+    ))));
+    lines.push(Line::default());
+
+    /* Each knob coloured by its own state, so the line doubles as the answer
+       to "what is in this password". */
+    let knob = |on: bool, key: &str, name: &str| {
+        let style = if on {
+            Style::new().fg(p.text)
+        } else {
+            Style::new().fg(p.muted)
+        };
+        vec![
+            Span::styled(format!(" {key}"), Style::new().fg(p.accent)),
+            Span::styled(format!(" {name} "), style),
+        ]
+    };
+    let mut knobs = vec![Span::raw(" ")];
+    knobs.extend(knob(settings.classes.upper, "u", "A–Z"));
+    knobs.extend(knob(settings.classes.digits, "d", "0–9"));
+    knobs.extend(knob(settings.classes.symbols, "s", "!@#"));
+    knobs.extend(knob(!settings.exclude_ambiguous, "a", "l1IO0"));
+    lines.push(Line::from(knobs));
+    lines.push(Line::from(p.faint(truncate(
+        "  - +  shorter, longer",
+        inner,
+    ))));
+    lines.push(Line::default());
+    lines.push(Line::from(p.faint(truncate(
+        "  y copy · r again · esc close",
+        inner,
+    ))));
+    popup(frame, &format!("{MARK} generate"), lines, width, &p);
+}
+
+/// Break text into rows of at most `room` columns, for the one place a value
+/// is too long to truncate and too important to hide.
+fn wrap(text: &str, room: usize) -> Vec<String> {
+    if room == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for c in text.chars() {
+        if cols(&row) + UnicodeWidthStr::width(c.to_string().as_str()) > room {
+            out.push(std::mem::take(&mut row));
+        }
+        row.push(c);
+    }
+    if !row.is_empty() {
+        out.push(row);
+    }
+    out
+}
+
 /* `~/vaults` rather than `/Users/someone/vaults`: the home prefix is the same
    on every row, so it is the part worth spending no columns on. */
 fn home_relative(dir: &std::path::Path) -> String {
@@ -1748,6 +1840,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("copy", "y p U t", "username, password, url, one-time code"),
             ("reveal", "*", "show the password"),
             ("edit", "a e D", "add, edit, delete entry"),
+            ("make", "P", "generate a password, no entry needed"),
             ("groups", "A E D", "add, rename, delete group"),
             ("cut", "X V", "cut, paste"),
             ("fold", "← →", "collapse, expand · ← hops from entries"),
@@ -2403,9 +2496,10 @@ mod tests {
         for key in ["enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/", "^s", "esc"] {
             assert!(joined.contains(key), "the overlay forgot {key}: {joined}");
         }
-        // ^s here is save-now; the form's generate is advertised by the form.
+        /* ^s here is save-now. `P` generates, and the row has to say so
+           without reading as the form's ^s. */
         assert!(joined.contains("save now"), "{joined}");
-        assert!(!joined.contains("generate"), "the overlay claimed a form-only key");
+        assert!(joined.contains("generate a password"), "{joined}");
     }
 
     /* Enter means three things on the lock screen, and the hint names the one
@@ -3557,6 +3651,65 @@ mod tests {
             "an empty library still advertised a key"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* The popup shows the password itself, the price of it, and which
+       classes it was drawn from: a generator you have to trust is one you
+       cannot check against the site's rules. */
+    #[test]
+    fn the_generator_shows_the_password_and_what_it_is_made_of() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.open_mint();
+        let password = app.mint.as_ref().unwrap().password.clone();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains(&password), "the password is not on screen: {joined}");
+        assert!(joined.contains("20 chars"), "{joined}");
+        assert!(joined.contains("bits"), "{joined}");
+        assert!(joined.contains("y copy"), "the copy key is unadvertised: {joined}");
+        // The knobs are the state, so every class has a key beside it.
+        for knob in ["u A–Z", "d 0–9", "s !@#", "a l1IO0"] {
+            assert!(joined.contains(knob), "the overlay forgot {knob}: {joined}");
+        }
+    }
+
+    /* A long password wraps instead of truncating. Shortened to an ellipsis
+       it would be a password nobody can read back, which is the one thing
+       this screen exists to let them do. */
+    #[test]
+    fn a_long_password_wraps_rather_than_being_cut() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(60, 30);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.open_mint();
+        for _ in 0..100 {
+            app.mint_resize(true);
+        }
+        let password = app.mint.as_ref().unwrap().password.clone();
+        assert_eq!(password.chars().count(), 120);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen(&t);
+        /* The rows that are part of the password are the rows that are part
+           of the password: nothing else the popup draws is a substring of
+           one, so gluing them back together must give it back whole. */
+        let rebuilt: String = rows
+            .iter()
+            .map(|row| row.replace('│', ""))
+            .map(|row| row.trim().to_string())
+            .filter(|row| !row.is_empty() && password.contains(row.as_str()))
+            .collect();
+        assert!(rows.len() > 1);
+        assert_eq!(rebuilt, password, "the password was cut: {}", rows.join("\n"));
+        assert!(
+            !rows.join("").contains('…'),
+            "it truncated instead of wrapping"
+        );
     }
 
     /* The marker outlives the name when the popup is narrow. It used to be

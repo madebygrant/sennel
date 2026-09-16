@@ -64,12 +64,19 @@ not the browser's `*`.
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |
+| `P`                 | generate a password with no entry to put it in                |
 | `^s` (in a form)    | generate a password into the edit form                        |
 | `^r` (in a form)    | show what is in the password box                              |
 | `alt+enter`         | new line in the notes box (`enter` saves)                     |
 | `h` `?` `F1`        | keys overlay (`F1` on the lock screen, where letters are text)|
 | `esc`               | unwind: drop cut, clear filter, then report                   |
 | `q` `^c`            | quit (asks when there are unsaved changes; `qq` answers)      |
+
+## The generator (`P`)
+
+A password with no entry to store it in. `r` rolls another, `y` copies it, `-` and `+` change the
+length, and `u` `d` `s` `a` turn capitals, digits, punctuation and the `l 1 I O 0` lookalikes on and
+off. The toggles last the session only. [More](generate.md).
 
 ## The fields screen (`F`)
 

@@ -100,6 +100,48 @@ pub enum Command {
         to: Option<String>,
     },
 
+    /* No vault, no needle, no unlock: the only subcommand that never opens a
+       database. The flags override the `[generator]` table for this one run,
+       so a site that forbids symbols is `--no-symbols` and not an edit. */
+    /// Generate a password without storing it anywhere
+    Gen {
+        /// How many characters. Defaults to the configured length.
+        #[arg(short = 'n', long, value_name = "CHARS")]
+        length: Option<usize>,
+
+        /// Include punctuation
+        #[arg(long, overrides_with = "no_symbols")]
+        symbols: bool,
+
+        /// Leave punctuation out
+        #[arg(long, overrides_with = "symbols")]
+        no_symbols: bool,
+
+        /// Leave digits out
+        #[arg(long)]
+        no_digits: bool,
+
+        /// Leave capitals out
+        #[arg(long)]
+        no_upper: bool,
+
+        /// Allow `l 1 I O 0`, which are excluded by default
+        #[arg(long)]
+        ambiguous: bool,
+
+        /// How many to make. Only with --stdout; a clipboard holds one.
+        #[arg(long, value_name = "N", default_value_t = 1, requires = "stdout")]
+        count: usize,
+
+        /// Print it instead of copying it. Refused into a terminal.
+        #[arg(long)]
+        stdout: bool,
+
+        /// Print to a terminal anyway, scrollback and all
+        #[arg(long, requires = "stdout")]
+        force: bool,
+    },
+
     /// Print a shell completion script: bash, zsh, fish or elvish
     Completions {
         /// The shell to generate for
@@ -212,6 +254,11 @@ pub struct FileGenerator {
     /// Exclude `l 1 I O 0`, which read alike in most fonts.
     pub ambiguous: Option<bool>,
 }
+
+/* One bound for the config file, `sennel gen --length` and the `^g` popup,
+   so it cannot drift between them. Four is the floor because all four
+   classes have to fit. */
+pub const LENGTH_RANGE: (usize, usize) = (4, 256);
 
 /// The generator settings a session runs with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,8 +508,9 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
         return Ok(out);
     };
     if let Some(length) = file.length {
-        if !(4..=256).contains(&length) {
-            anyhow::bail!("generator length {length} is outside 4–256");
+        let (min, max) = LENGTH_RANGE;
+        if !(min..=max).contains(&length) {
+            anyhow::bail!("generator length {length} is outside {min}–{max}");
         }
         out.length = length;
     }

@@ -16,12 +16,15 @@ theme = "warm"                 # warm (default), light, cool, neon · rewritten 
 mouse = true                   # wheel scrolls, click selects; false gives the
                                # terminal its own text selection back
 
-[generator]                    # what ^s makes in the entry form
+[generator]                    # the default for ^s in a form, P on its own,
+                               # and sennel gen
 length = 20                    # 4–256
 upper = true                   # A–Z
 digits = true                  # 0–9
 symbols = false                # !@#$… · on for sites that demand one
 ambiguous = false              # true allows l 1 I O 0, which read alike
+                               # P and sennel gen override these per run and
+                               # never write back · see docs/generate.md
 
 [colors]                       # see docs/themes.md
 cursor = "#00ff88"
