@@ -15,12 +15,17 @@ pub struct Board {
        being wiped early by the first one's thread. */
     epoch: Arc<Mutex<u64>>,
     timeout: Option<Duration>,
+    /* When the secret on the clipboard stops being there. The status bar
+       counts this down: "clears in 15s" is a promise shown for three seconds
+       and then gone, while the secret is still sitting there. */
+    until: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl Board {
     pub fn new(timeout_secs: u64) -> Self {
         Board {
             epoch: Arc::new(Mutex::new(0)),
+            until: Arc::new(Mutex::new(None)),
             // Zero is "leave it there", matching lock_timeout's reading of 0
             // as off rather than as immediate.
             timeout: (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs)),
@@ -46,6 +51,15 @@ impl Board {
         self.timeout.map(|d| d.as_secs())
     }
 
+    /// Whole seconds left before the clipboard is wiped, or `None` when
+    /// nothing of ours is on it (or the wipe is switched off).
+    pub fn clears_in(&self) -> Option<u64> {
+        let until = (*self.until.lock().unwrap_or_else(|e| e.into_inner()))?;
+        let left = until.checked_duration_since(std::time::Instant::now())?;
+        // Round up, so the last fraction of a second is not shown as zero.
+        Some(left.as_secs() + u64::from(left.subsec_millis() > 0))
+    }
+
     /// Copies text and re-arms the auto-clear. The failure message names the
     /// fix and never echoes the text back: it is usually a password.
     pub fn copy(&self, text: &str) -> Result<(), String> {
@@ -59,6 +73,8 @@ impl Board {
             .map_err(|e| format!("clipboard refused the copy · {e}"))?;
         let generation = self.claim();
         if let Some(wait) = self.timeout {
+            *self.until.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(std::time::Instant::now() + wait);
             let board = self.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(wait);
@@ -67,6 +83,7 @@ impl Board {
                    destroy their data to protect ours. */
                 if !board.stale(generation) {
                     let _ = Clipboard::new().and_then(|mut c| c.clear());
+                    *board.until.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 }
             });
         }
@@ -95,6 +112,18 @@ mod tests {
         let second = board.claim();
         assert!(board.stale(first), "the first copy still reads as current");
         assert!(!board.stale(second));
+    }
+
+    /* The countdown the status bar reads: armed by a copy, and never a stale
+       number once the wipe has landed. */
+    #[test]
+    fn the_countdown_is_armed_and_runs_out() {
+        let board = Board::new(15);
+        assert_eq!(board.clears_in(), None, "nothing copied yet");
+        *board.until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(9));
+        assert_eq!(board.clears_in(), Some(9));
+        *board.until.lock().unwrap() = Some(std::time::Instant::now() - Duration::from_secs(1));
+        assert_eq!(board.clears_in(), None, "a past deadline still counted");
     }
 
     #[test]

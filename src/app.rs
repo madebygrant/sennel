@@ -560,6 +560,19 @@ impl App {
         }
     }
 
+    /* Walking entries with the popup open. The reveal drops on the way, the
+       same rule as closing it: a password shown for one entry is not consent
+       for the next. */
+    pub fn step_detail(&mut self, down: bool) {
+        self.active_pane = Pane::Entries;
+        self.show_password = false;
+        self.step_entry(down);
+        if self.selected_entry().is_none() {
+            self.close_detail();
+            self.say("no entry here");
+        }
+    }
+
     pub fn open_detail(&mut self) {
         if self.selected_entry().is_none() {
             self.say("no entry here to open");
@@ -712,6 +725,11 @@ impl App {
         self.view = View::Unlock;
         self.resting = "locked".into();
         self.refresh_db_state();
+    }
+
+    /// Seconds until the clipboard wipes what was copied, for the status bar.
+    pub fn clipboard_left(&self) -> Option<u64> {
+        self.board.as_ref().and_then(Board::clears_in)
     }
 
     /// The open vault's file name, or empty while locked. The header's

@@ -332,6 +332,12 @@ fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.close_detail();
             app.open_edit_form();
         }
+        /* The popup is the detail view below 100 columns, so reading the next
+           entry must not mean closing it, moving, and opening it again. */
+        KeyCode::Char('j') | KeyCode::Down => app.step_detail(true),
+        KeyCode::Char('k') | KeyCode::Up => app.step_detail(false),
+        KeyCode::Char('n') => app.jump_match(true),
+        KeyCode::Char('N') => app.jump_match(false),
         _ => app.say("esc closes the entry"),
     }
 }

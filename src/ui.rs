@@ -612,18 +612,22 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             faint,
         ));
     }
+    lines.push(row("group", truncate(&app.here(), width.saturating_sub(LABEL + 1)), faint));
     for (label, value) in stamps(&entry) {
         lines.push(row(label, value, faint));
     }
-    /* The pane has room to spare, and a key nobody knows about is a key that
-       does not exist: the hint sits at the foot of the empty half. */
-    let hint = Line::from(dim(" y copy · p pass · * reveal"));
-    let height = inner.height as usize;
-    if height > lines.len() + 1 {
-        lines.resize(height - 1, Line::default());
-        lines.push(hint);
-    }
-    lines.truncate(height);
+    /* Under the fields, not at the foot of twenty blank rows: a hint the eye
+       never travels to is a hint nobody reads. */
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!(" {}", "─".repeat(width.saturating_sub(2))),
+        Style::new().fg(RULE),
+    )));
+    lines.push(Line::from(dim(truncate(
+        " y p U copy · * reveal · e edit · enter opens",
+        width,
+    ))));
+    lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -696,12 +700,17 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     for (label, stamp) in stamps(&entry) {
         lines.push(row(label, stamp, faint));
     }
+    lines.push(row("group", truncate(&app.here(), value), faint));
     lines.push(Line::default());
     lines.push(Line::from(vec![
         Span::styled(" y p U", Style::new().fg(GOLD)),
         dim(" copy   "),
         Span::styled("*", Style::new().fg(GOLD)),
         dim(" reveal   "),
+        Span::styled("e", Style::new().fg(GOLD)),
+        dim(" edit   "),
+        Span::styled("j k", Style::new().fg(GOLD)),
+        dim(" next entry   "),
         Span::styled("esc", Style::new().fg(GOLD)),
         dim(" close"),
     ]));
@@ -872,6 +881,14 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut optional: Vec<Span> = Vec::new();
     if app.working() {
         optional.push(Span::styled("  unsaved", Style::new().fg(AMBER)));
+    }
+    /* A secret is on the clipboard until this reaches zero. The flash says so
+       once; the chip says so for as long as it is true. */
+    if let Some(left) = app.clipboard_left() {
+        optional.push(Span::styled(
+            format!("  clipboard {left}s"),
+            Style::new().fg(TEAL),
+        ));
     }
     /* The entries header counts the matches where it is drawn; on a window
        too short for headers the bar is the only place left to say it. */
@@ -2045,6 +2062,37 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let shown = screen(&t).join("\n");
         assert!(shown.contains("s3cret-pw"), "{shown}");
+    }
+
+    /* The popup is the detail view below 100 columns, so the next entry must
+       be one key away — and the reveal must not ride along to it. */
+    #[test]
+    fn the_detail_popup_walks_to_the_next_entry() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "octo", "aaa-pw", "", "").unwrap();
+        vault.create_entry(&root, "savings", "gecko", "bbb-pw", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.open_detail();
+        app.toggle_password();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t).join("\n").contains("aaa-pw"));
+
+        app.step_detail(true);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(app.detail, "walking closed the popup");
+        assert!(joined.contains("savings"), "{joined}");
+        assert!(!joined.contains("bbb-pw"), "the reveal followed the cursor");
+        // And the popup says which keys it has.
+        assert!(joined.contains("e"), "{joined}");
+        assert!(joined.contains("j k"), "{joined}");
+        assert!(joined.contains("group"), "{joined}");
     }
 
     /* Enter keeps the filter and hands the keys back, so the band stops being

@@ -39,6 +39,7 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `g` `G`         | top / bottom of the pane                      |
 | `Tab`           | groups pane ↔ entries pane                    |
 | `enter`         | open group / open entry (detail popup)        |
+| `j k` (in the popup) | read the next / previous entry without closing it |
 | `y` `p` `U`     | copy username / password / URL                |
 | `*`             | show/hide the password (needs the detail pane or popup) |
 | `/`             | fuzzy search (`enter` keeps, `esc` clears)    |
@@ -71,7 +72,8 @@ has a visible home in the `h` overlay.
 - **Owner-only files.** Saves are atomic (write to a sibling temp file, then rename) and
   `chmod 0600`, so the vault is readable only by your user.
 - **Clipboard auto-clear.** Copies are wiped after a configurable interval (default 15s). A second
-  copy re-arms the timer instead of being wiped early; overwriting happens even if Sennel exits.
+  copy re-arms the timer instead of being wiped early; overwriting happens even if Sennel exits. The
+  status bar counts the wipe down, so the screen says when a secret is still sitting on the clipboard.
 - **Idle auto-lock.** After the idle timeout (default 300s, `0` disables) the vault is locked and
   the in-memory secrets are zeroized. `^l` does the same thing on demand.
 - **Zeroized in memory.** Password fields, retained database keys, and undo snapshots all wipe on
