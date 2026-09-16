@@ -285,21 +285,30 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
    comments, ordering, keys Sennel does not know — comes through untouched. A
    serialize-the-struct round trip would eat all of it. */
 pub fn remember_db(config_file: Option<&std::path::Path>, db: &std::path::Path) -> Result<()> {
+    remember(config_file, "db", &db.display().to_string())
+}
+
+/// The same, for the palette a `^t` landed on.
+pub fn remember_theme(config_file: Option<&std::path::Path>, theme: &str) -> Result<()> {
+    remember(config_file, "theme", theme)
+}
+
+fn remember(config_file: Option<&std::path::Path>, key: &str, value: &str) -> Result<()> {
     let Some(path) = config_file else {
         anyhow::bail!("no config file in this session");
     };
-    let line = format!("db = {}", quote(&db.display().to_string()));
+    let line = format!("{key} = {}", quote(value));
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
     for text in existing.lines() {
         /* Only a top-level `db` key, and only before any [table] header: a
            `db` inside [generator] is a different key with the same name. */
-        let is_db = !replaced
+        let is_key = !replaced
             && text
                 .split_once('=')
-                .is_some_and(|(key, _)| key.trim() == "db");
-        if is_db && !out.iter().any(|l: &String| l.trim_start().starts_with('[')) {
+                .is_some_and(|(found, _)| found.trim() == key);
+        if is_key && !out.iter().any(|l: &String| l.trim_start().starts_with('[')) {
             out.push(line.clone());
             replaced = true;
         } else {

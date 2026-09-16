@@ -376,6 +376,9 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            and it is the retry when a save failed or was refused. */
         KeyCode::Char('s') if ctrl => app.save_now(),
         KeyCode::Char('r') if ctrl => app.reload_vault(),
+        /* `^t` walks the palettes: a theme is picked by looking at it, not by
+           reading its name in a config file. */
+        KeyCode::Char('t') if ctrl => app.cycle_theme(),
         KeyCode::Char('g') | KeyCode::Home => app.jump_pane(false),
         KeyCode::Char('G') | KeyCode::End => app.jump_pane(true),
         KeyCode::Tab => app.switch_pane(),
@@ -602,6 +605,8 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         /* `^o`: pick the vault from a list instead of typing its path. */
         KeyCode::Char('o') if ctrl => app.open_browse(),
+        // The first screen anybody sees is the first one worth recolouring.
+        KeyCode::Char('t') if ctrl => app.cycle_theme(),
         KeyCode::Left if !ctrl => app.unlock_move(false),
         KeyCode::Right if !ctrl => app.unlock_move(true),
         KeyCode::Home if !ctrl => app.unlock_end(false),

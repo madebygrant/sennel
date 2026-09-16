@@ -942,6 +942,24 @@ impl App {
         }
     }
 
+    /* `^t`: walk the shipped palettes with the screen in front of you, which
+       is the only way anyone picks a theme. The choice is written back the
+       way an opened vault is, so the next launch keeps it. */
+    pub fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        let name = self.theme.name();
+        match self.config_file.clone() {
+            Some(file) => match crate::config::remember_theme(Some(&file), name) {
+                Ok(()) => self.say(format!("theme: {name}  ·  remembered")),
+                /* Not fatal: the theme applied, and only the remembering
+                   failed — but the next launch will not do what was asked. */
+                Err(e) => self.warn(format!("theme: {name}  ·  cannot save your choice · {e}")),
+            },
+            // --no-config asked for the file to be left out of the run.
+            None => self.say(format!("theme: {name}")),
+        }
+    }
+
     /// What `^s` makes, from the config.
     pub fn set_generator(&mut self, settings: crate::config::Generator) {
         self.generator = settings;
@@ -3874,6 +3892,52 @@ pub mod tests {
             !bytes.windows(6).any(|w| w == b"secret"),
             "a cancelled form left its password in memory"
         );
+    }
+
+    /* `^t` walks the shipped palettes and writes the landing spot back, so a
+       theme picked by looking at it survives the session that picked it. */
+    #[test]
+    fn cycling_the_theme_remembers_where_it_landed() {
+        let mut app = open_app();
+        let config = temp_path("theme");
+        std::fs::write(&config.0, "lock_timeout = 90\n").unwrap();
+        app.config_file = Some(config.0.clone());
+
+        assert_eq!(app.theme, crate::theme::WARM);
+        app.cycle_theme();
+        assert_ne!(app.theme, crate::theme::WARM, "^t did not move");
+        let landed = app.theme.name();
+        assert!(app.stage.contains(landed), "{}", app.stage);
+
+        let text = std::fs::read_to_string(&config.0).unwrap();
+        assert!(text.contains(&format!("theme = \"{landed}\"")), "{text}");
+        assert!(text.contains("lock_timeout = 90"), "the file was rewritten: {text}");
+
+        /* Round the houses and back: the walk covers every shipped palette
+           and returns, so no theme is reachable only by editing a file. */
+        let mut seen = vec![app.theme.name()];
+        // One press per remaining palette lands back where it started.
+        for _ in 1..crate::theme::BUILT_INS.len() {
+            app.cycle_theme();
+            seen.push(app.theme.name());
+        }
+        assert_eq!(app.theme, crate::theme::WARM, "the cycle did not wrap");
+        for (name, _) in crate::theme::BUILT_INS {
+            if name != "warm" {
+                assert!(seen.contains(&name), "{name} is not reachable by ^t");
+            }
+        }
+    }
+
+    /* --no-config asked for the file to be left out of the run, so the theme
+       still switches and nothing is written. */
+    #[test]
+    fn cycling_without_a_config_switches_and_says_nothing_about_saving() {
+        let mut app = open_app();
+        app.config_file = None;
+        app.cycle_theme();
+        assert_ne!(app.theme, crate::theme::WARM);
+        assert!(!app.stage.contains("remembered"), "{}", app.stage);
     }
 
     /* ---- Wave 5.1: entry form ---- */

@@ -1418,6 +1418,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("move", "tab  ↑ ↓", "between boxes"),
             ("edit", "^u  ^w", "clear box, kill word"),
             ("reveal", "^r", "show the password plainly"),
+            ("theme", "^t", "next palette · remembered"),
             ("find", "^o", "pick a vault file from a list"),
             ("go", "enter", "unlock · apply path from the file box"),
             ("close", "any key", "dismisses this table"),
@@ -1442,6 +1443,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("undo", "u", "one level"),
             ("save", "^s  ^r", "save now · reload the file on disk"),
             ("lock", "^l", "lock now"),
+            ("theme", "^t", "next palette · remembered"),
             ("back", "esc", "drop cut, clear filter, then report"),
             ("quit", "q  ^c", ""),
         ]

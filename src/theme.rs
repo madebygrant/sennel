@@ -214,6 +214,15 @@ impl Palette {
             .map_or("custom", |(name, _)| *name)
     }
 
+    /// The next palette in the shipped order, wrapping. What `^t` walks.
+    pub fn next(&self) -> Palette {
+        let at = BUILT_INS
+            .iter()
+            .position(|(_, known)| known == self)
+            .unwrap_or(0);
+        BUILT_INS[(at + 1) % BUILT_INS.len()].1
+    }
+
     /// Every name Sennel knows, for the message that lists them.
     pub fn names() -> String {
         BUILT_INS

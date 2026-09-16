@@ -62,6 +62,7 @@ the browser's `*`.
 | `o`             | entries order: stored, name, recent, updated  |
 | `u`             | undo the last change (one level)              |
 | `^l`            | lock now (same wipe as the idle auto-lock)    |
+| `^t`            | next palette, remembered for next launch      |
 | `^s`            | save now (every change already autosaves)     |
 | `^r`            | reload from disk (offered when the file changed under you) |
 | `^s` (in a form) | generate a password into the edit form       |
@@ -121,7 +122,9 @@ has a visible home in the `h` overlay.
 
 ## Themes
 
-Four palettes ship, chosen with `theme` in the config or `--theme` on the command line:
+Four palettes ship. `^t` walks them with the screen in front of you — which is how anyone actually
+picks a theme — and writes the one you stop on back to the config, so the next launch keeps it.
+`theme` in the config and `--theme` on the command line name one directly:
 
 | Theme   | For                                                                    |
 | ------- | ---------------------------------------------------------------------- |
@@ -145,7 +148,7 @@ db = "~/vaults/main.kdbx"      # default database · rewritten when you open ano
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
-theme = "warm"                 # warm (default), light, cool, neon
+theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
 
 [generator]                    # what ^s makes in the entry form
 length = 20                    # 4–256
