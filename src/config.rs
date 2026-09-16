@@ -1,16 +1,29 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 /// KeePass-style terminal password manager.
 #[derive(Parser, Debug)]
 #[command(name = "sennel", version, about, long_about = None)]
 pub struct Cli {
+    /* Optional, so bare `sennel` still opens the TUI. Everything a
+       subcommand needs from the flags above is marked global, or `sennel get
+       x --db v.kdbx` would have to put the flag before the verb. */
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to the .kdbx database. Omit it and Sennel asks for one.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub db: Option<String>,
+
+    /* Every subcommand opens a vault, and a vault with a key file could not
+       be opened by any of them — they all passed `None`. Global, so `get`,
+       `audit`, `import`, `convert` and `--list` all take it. */
+    /// Key file the database also needs, if it has one
+    #[arg(long, value_name = "PATH", global = true)]
+    pub key_file: Option<String>,
 
     /// Seconds a copied secret stays on the clipboard before it is cleared
     #[arg(long, value_name = "SECS")]
@@ -37,12 +50,126 @@ pub struct Cli {
     pub list: bool,
 
     /// Read this config file instead of the one in ~/.config/sennel
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<String>,
 
     /// Ignore the config file entirely
-    #[arg(long, conflicts_with = "config")]
+    #[arg(long, conflicts_with = "config", global = true)]
     pub no_config: bool,
+}
+
+/* One verb so far. A subcommand rather than a flag because it takes a
+   positional needle and changes what the whole run is for: `sennel` opens a
+   TUI, `sennel get` answers a question and exits. */
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Copy one field of the entry a needle finds, without opening the TUI
+    Get {
+        /// What to look for: fuzzy over titles, usernames, urls and groups
+        needle: String,
+
+        /// Copy the username
+        #[arg(short = 'u', long)]
+        user: bool,
+
+        /// Copy the password (the default when nothing else is named)
+        #[arg(short = 'p', long)]
+        password: bool,
+
+        /// Copy the url
+        #[arg(long)]
+        url: bool,
+
+        /// Copy the current one-time code, never the seed behind it
+        #[arg(long)]
+        otp: bool,
+
+        /// Print the value instead of copying it. Refused into a terminal.
+        #[arg(long)]
+        stdout: bool,
+
+        /// Print to a terminal anyway, scrollback and all
+        #[arg(long, requires = "stdout")]
+        force: bool,
+    },
+
+        /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
+    Convert {
+        /// Where to write it. Defaults to `<name>-kdbx4.kdbx` beside the original
+        #[arg(long, value_name = "PATH")]
+        to: Option<String>,
+    },
+
+    /// Print a shell completion script: bash, zsh, fish or elvish
+    Completions {
+        /// The shell to generate for
+        shell: clap_complete::Shell,
+    },
+
+    /// Print the man page, for `sennel man | man -l -`
+    Man,
+
+    /// Print every reused, weak or empty password, without opening the TUI
+    Audit {
+        /// Also ask Have I Been Pwned whether each password is in a breach.
+        /// Only the first five characters of each SHA-1 ever leave the machine.
+        #[arg(long)]
+        pwned: bool,
+    },
+
+    /// Read a CSV export from another password manager into the vault
+    Import {
+        /// The .csv file another tool exported
+        file: String,
+
+        /// Put everything under this group instead of `Imported <date>`
+        #[arg(long, value_name = "NAME")]
+        group: Option<String>,
+
+        /// Say what would be imported and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Which field `get` was asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    User,
+    Password,
+    Url,
+    Otp,
+}
+
+impl Field {
+    /// The one flag that was passed, or the password when none was.
+    pub fn of(user: bool, password: bool, url: bool, otp: bool) -> Result<Field> {
+        let asked: Vec<Field> = [
+            (user, Field::User),
+            (password, Field::Password),
+            (url, Field::Url),
+            (otp, Field::Otp),
+        ]
+        .into_iter()
+        .filter_map(|(on, field)| on.then_some(field))
+        .collect();
+        match asked.len() {
+            0 => Ok(Field::Password),
+            1 => Ok(asked[0]),
+            /* Refused rather than ranked: two fields means one clipboard
+               would silently win, and the user cannot tell which. */
+            _ => anyhow::bail!("name one field · -u, -p, --url or --otp"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::User => "username",
+            Field::Password => "password",
+            Field::Url => "url",
+            Field::Otp => "one-time code",
+        }
+    }
 }
 
 /// Every field optional, so an absent key means "no opinion" and falls through
@@ -51,6 +178,10 @@ pub struct Cli {
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub db: Option<String>,
+    /* Written by the app rather than by hand, which is why it is one line of
+       paths and not a table: `^v` on the unlock screen picks from it. */
+    /// Vaults opened before, newest first.
+    pub recent: Option<Vec<String>>,
     pub clipboard_timeout: Option<u64>,
     pub lock_timeout: Option<u64>,
     /// stored · name · recent · updated. `o` cycles from here rather than
@@ -142,6 +273,9 @@ pub const DEFAULT_CLIPBOARD_TIMEOUT: u64 = 15;
 /// Idle seconds before the vault locks and its secrets are wiped. Zero
 /// disables the lock, which is only sensible on a machine nobody else touches.
 pub const DEFAULT_LOCK_TIMEOUT: u64 = 300;
+/// How many vaults the library remembers. Long enough for every vault anyone
+/// juggles, short enough that the list is still a list and not a search.
+pub const RECENT_MAX: usize = 10;
 
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -155,6 +289,9 @@ pub struct Config {
     /// The database to open. `None` means ask, since a password manager
     /// without a vault is a question, not an error.
     pub db: Option<PathBuf>,
+    /// Every vault opened before, newest first. One `db` was the whole
+    /// memory until now, so a second vault meant retyping its path forever.
+    pub recent: Vec<PathBuf>,
     pub clipboard_timeout: u64,
     pub lock_timeout: u64,
     /// Where the entries pane starts. Session-only before this: pressing `o`
@@ -170,6 +307,10 @@ pub struct Config {
     /// Whether a `[colors]` table is repainting the named theme. `^t` says so
     /// when it switches: the overrides stay in the file and outlive the walk.
     pub theme_overridden: bool,
+    /// The subcommand, when one was given. `None` opens the TUI.
+    pub command: Option<Command>,
+    /// The key file every path opens with, when the vault has one.
+    pub key_file: Option<PathBuf>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -205,6 +346,13 @@ impl Config {
 
         Ok(Config {
             db,
+            recent: file
+                .recent
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| expand(p))
+                .collect(),
             clipboard_timeout: cli
                 .clipboard_timeout
                 .or(file.clipboard_timeout)
@@ -217,6 +365,8 @@ impl Config {
             theme: palette,
             theme_warnings: warnings,
             theme_overridden: overridden,
+            command: cli.command,
+            key_file: cli.key_file.map(|k| expand(&k)),
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
             config_file,
@@ -337,48 +487,133 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
    comments, ordering, keys Sennel does not know — comes through untouched. A
    serialize-the-struct round trip would eat all of it. */
 pub fn remember_db(config_file: Option<&std::path::Path>, db: &std::path::Path) -> Result<()> {
-    remember(config_file, "db", &db.display().to_string())
+    remember(config_file, "db", &quote(&db.display().to_string()))
 }
 
 /// The same, for the palette a `^t` landed on.
 pub fn remember_theme(config_file: Option<&std::path::Path>, theme: &str) -> Result<()> {
-    remember(config_file, "theme", theme)
+    remember(config_file, "theme", &quote(theme))
 }
 
+/// The vault library, newest first. Rewritten whole on every open: the order
+/// is most of what the list is for, and it changes each time.
+pub fn remember_recent(config_file: Option<&std::path::Path>, paths: &[PathBuf]) -> Result<()> {
+    let list: Vec<String> = paths
+        .iter()
+        .map(|p| quote(&p.display().to_string()))
+        .collect();
+    remember(config_file, "recent", &format!("[{}]", list.join(", ")))
+}
+
+/// Drop a key entirely, value and all. `^d` on the startup vault has nothing
+/// to write in its place: the next launch should ask, not reopen what was
+/// just forgotten.
+pub fn forget_db(config_file: Option<&std::path::Path>) -> Result<()> {
+    rewrite(config_file, "db", None)
+}
+
+/// `value` arrives already spelled as TOML, so a caller can write an array as
+/// easily as a string. `None` removes the key.
 fn remember(config_file: Option<&std::path::Path>, key: &str, value: &str) -> Result<()> {
+    rewrite(config_file, key, Some(value))
+}
+
+fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>) -> Result<()> {
     let Some(path) = config_file else {
         anyhow::bail!("no config file in this session");
     };
-    let line = format!("{key} = {}", quote(value));
+    let line = value.map(|v| format!("{key} = {v}"));
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
+    let mut first_table: Option<usize> = None;
+    /* Brackets still open from an earlier line, and whether those lines
+       belong to the value being replaced. An array can span lines — every
+       formatter writes ten paths that way — and swapping only its first line
+       leaves the rest orphaned, which is a config file that no longer
+       parses and an app that will not start until someone edits it by
+       hand. */
+    let mut depth = 0i32;
+    let mut dropping = false;
     for text in existing.lines() {
-        /* Only a top-level `db` key, and only before any [table] header: a
-           `db` inside [generator] is a different key with the same name. */
+        if depth > 0 {
+            depth = scan(text, depth);
+            if !dropping {
+                out.push(text.to_string());
+            }
+            continue;
+        }
+        dropping = false;
+        /* Only a top-level key, and only before any [table] header: a `db`
+           inside [generator] is a different key with the same name. A `#`
+           before it makes the whole line a comment, and `split_once` leaves
+           the `#` on the name, so a commented-out key is never the match. */
         let is_key = !replaced
+            && first_table.is_none()
             && text
                 .split_once('=')
                 .is_some_and(|(found, _)| found.trim() == key);
-        if is_key && !out.iter().any(|l: &String| l.trim_start().starts_with('[')) {
-            out.push(line.clone());
+        if is_key {
+            if let Some(line) = &line {
+                out.push(line.clone());
+            }
             replaced = true;
-        } else {
-            out.push(text.to_string());
+            depth = scan(text, 0);
+            dropping = depth > 0;
+            continue;
         }
+        if text.trim_start().starts_with('[') {
+            first_table.get_or_insert(out.len());
+        }
+        depth = scan(text, 0);
+        out.push(text.to_string());
     }
-    if !replaced {
+    if !replaced && let Some(line) = line {
         /* Above any table header, or the key would be read as belonging to
            the last table in the file. */
-        let at = out
-            .iter()
-            .position(|l| l.trim_start().starts_with('['))
-            .unwrap_or(out.len());
+        let at = first_table.unwrap_or(out.len());
         out.insert(at, line);
     }
     let mut text = out.join("\n");
     text.push('\n');
     write_atomic(path, &text)
+}
+
+/* Bracket depth after this line, counting from `depth`. Quoted text and
+   comments are skipped, so a vault in a folder named `a]b` does not throw the
+   count off. A `"""` multi-line string would, but nothing Sennel reads or
+   writes uses one. */
+fn scan(line: &str, depth: i32) -> i32 {
+    let mut depth = depth;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '#' => break,
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            // Literal strings take no escapes, so the first quote ends it.
+            '\'' => {
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth.max(0)
 }
 
 /// A TOML basic string. Paths can hold quotes and backslashes, and a path
@@ -420,6 +655,36 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
     drop(out);
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
+}
+
+/// A path that still names the same file tomorrow, from another directory.
+/// `--db vault.kdbx` is relative to wherever it was typed, so remembering it
+/// verbatim puts a row in the library that names a different file from
+/// anywhere else — or no file at all.
+pub fn absolute(path: &std::path::Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(path),
+            // Nothing better to say than what was asked for.
+            Err(_) => return path.to_path_buf(),
+        }
+    };
+    /* Resolved through the parent, never the file: the directory has to
+       exist for a vault to be opened or created there, while the vault
+       itself may not yet. It also leaves a vault file that is itself a
+       symlink — into a synced folder, say — as the symlink, so saves still
+       go through it. `..` and a symlinked folder both collapse here, which
+       is what stops one vault holding two rows in the library. */
+    let (Some(dir), Some(name)) = (joined.parent(), joined.file_name()) else {
+        return joined;
+    };
+    match dir.canonicalize() {
+        Ok(dir) => dir.join(name),
+        // A folder that is not there yet cannot be resolved, only spelled out.
+        Err(_) => joined,
+    }
 }
 
 pub fn expand(path: &str) -> PathBuf {
@@ -771,6 +1036,163 @@ mod tests {
         assert!(build("[colors]\ncursor = \"#00ff88\"\n", &[]).theme_overridden);
         assert!(!build("theme = \"neon\"\n", &[]).theme_overridden);
         assert!(!build("[colors]\n", &[]).theme_overridden, "an empty table repaints nothing");
+    }
+
+    /* The library is written by the app and read back by the parser, so the
+       one thing that can break it is a path TOML cannot spell: a quote or a
+       backslash in a folder name would otherwise make the next launch refuse
+       to start. */
+    #[test]
+    fn the_vault_library_survives_awkward_paths() {
+        let mut file = temp("recent");
+        writeln!(file.handle, "# mine\nlock_timeout = 90").unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        let vaults = vec![
+            PathBuf::from("/vaults/work.kdbx"),
+            PathBuf::from("/vaults/say \"hi\"/back\\slash.kdbx"),
+        ];
+        remember_recent(Some(&path), &vaults).unwrap();
+
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vaults);
+        assert_eq!(cfg.lock_timeout, 90, "the rest of the file was eaten");
+
+        // Rewritten whole on the next open, not appended to.
+        remember_recent(Some(&path), &vaults[..1]).unwrap();
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vaults[..1]);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# mine"));
+    }
+
+    /* `~` means home in the library the way it does in `db`: a config copied
+       between machines names the same vault on both. */
+    #[test]
+    fn the_library_expands_a_tilde() {
+        let cfg = build("recent = [\"~/vaults/x.kdbx\"]\n", &[]);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(cfg.recent, vec![PathBuf::from(home).join("vaults/x.kdbx")]);
+    }
+
+    /* A value that spans lines is replaced whole. Swapping only its first
+       line used to orphan the rest, which left a config file that no longer
+       parsed — and then nothing started, not even `--check`, until somebody
+       edited it by hand. Every TOML formatter writes ten paths this way. */
+    #[test]
+    fn a_value_that_spans_lines_is_replaced_whole() {
+        let mut file = temp("multiline");
+        write!(
+            file.handle,
+            "# mine\nlock_timeout = 90\nrecent = [\n  \"/vaults/a.kdbx\",\n  \"/vaults/b.kdbx\",\n]\ntheme = \"cool\"\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        remember_recent(Some(&path), &[PathBuf::from("/vaults/c.kdbx")]).unwrap();
+
+        // It still parses, which is the whole point.
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vec![PathBuf::from("/vaults/c.kdbx")]);
+        assert_eq!(cfg.lock_timeout, 90);
+        assert_eq!(cfg.theme, crate::theme::COOL, "a key after the array was lost");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(!text.contains("/vaults/a.kdbx"), "the old rows survived: {text}");
+    }
+
+    /* A bracket inside a path is text, not structure: counting it would make
+       the rewriter eat the wrong lines. */
+    #[test]
+    fn a_bracket_in_a_path_does_not_confuse_the_rewriter() {
+        let mut file = temp("bracket");
+        write!(
+            file.handle,
+            "recent = [\n  \"/vaults/a]b.kdbx\",\n]\nlock_timeout = 45\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        let awkward = vec![PathBuf::from("/vaults/x[1].kdbx"), PathBuf::from("/vaults/y.kdbx")];
+        remember_recent(Some(&path), &awkward).unwrap();
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, awkward);
+        assert_eq!(cfg.lock_timeout, 45, "the line after the array was eaten");
+    }
+
+    /* `^d` on the startup vault drops the key rather than writing something
+       in its place: left alone, the next launch would reopen the vault that
+       was just forgotten and put it back in the library. */
+    #[test]
+    fn forgetting_the_startup_vault_removes_the_key() {
+        let mut file = temp("forgetdb");
+        write!(
+            file.handle,
+            "# mine\ndb = \"/vaults/old.kdbx\"\nlock_timeout = 90\n\n[generator]\nlength = 24\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        forget_db(Some(&path)).unwrap();
+
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, None, "the startup vault came back");
+        assert_eq!(cfg.lock_timeout, 90, "the rest of the file went with it");
+        assert_eq!(cfg.generator.length, 24);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(!text.contains("/vaults/old.kdbx"), "{text}");
+    }
+
+    /* A commented-out key is a comment, not the key: rewriting it would
+       leave the live one below it untouched and the setting unchanged. */
+    #[test]
+    fn a_commented_out_key_is_left_alone() {
+        let mut file = temp("commented");
+        write!(file.handle, "# db = \"/vaults/note.kdbx\"\ndb = \"/vaults/live.kdbx\"\n").unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        remember_db(Some(&path), std::path::Path::new("/vaults/new.kdbx")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# db = \"/vaults/note.kdbx\""), "{text}");
+        assert!(!text.contains("/vaults/live.kdbx"), "the live key was skipped: {text}");
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, Some(PathBuf::from("/vaults/new.kdbx")));
+    }
+
+    /* A relative path names a different file from every other directory, so
+       the library cannot hold one. */
+    #[test]
+    fn a_relative_path_is_resolved_against_the_working_directory() {
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(absolute(std::path::Path::new("vault.kdbx")), here.join("vault.kdbx"));
+        /* `..` collapses too, or one vault would hold two rows in the
+           library. Through a folder that exists: one that does not cannot be
+           resolved, and guessing past it is how `..` lands somewhere else
+           entirely when a symlink is in the way. */
+        assert_eq!(absolute(&here.join("src/../vault.kdbx")), here.join("vault.kdbx"));
+        /* A folder that does not exist cannot be resolved, and saying so by
+           leaving the path alone beats inventing one. */
+        let absent = std::path::Path::new("/nowhere-at-all/x.kdbx");
+        assert_eq!(absolute(absent), absent);
     }
 
     #[test]

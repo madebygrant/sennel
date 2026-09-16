@@ -2,6 +2,8 @@ mod app;
 mod clipboard;
 mod config;
 mod generator;
+mod import;
+mod pwned;
 mod search;
 mod theme;
 mod ui;
@@ -10,7 +12,7 @@ mod vault;
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -22,11 +24,35 @@ use zeroize::Zeroize;
 
 use app::{App, Confirm};
 use crate::clipboard::Board;
-use config::{Cli, Config};
+use config::{Cli, Command, Config, Field};
 use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
+/* `sennel --check | head` is the reader having seen enough, not a failure.
+   Rust ignores SIGPIPE so the write comes back EPIPE instead, and `say!`
+   turns that into a panic — which on the paths that have a vault open would
+   also skip every zeroize on the way out. Dropped instead: the command runs
+   to its end, its destructors run, and what nobody is reading goes nowhere. */
+macro_rules! say {
+    () => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout());
+    }};
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 fn main() -> Result<()> {
+    /* First, before a config is read or a vault is opened. Every path below
+       this can end up holding secrets — `get` sleeps out the clipboard wipe
+       holding one, `audit --pwned` walks every password in the vault waiting
+       on the network, `import` holds the lot twice — and all three used to
+       reach that state with core dumps still enabled and, on Linux, still
+       attachable. It sat further down, on the TUI path only, so a subcommand
+       was one `return` away from missing it; up here a new one inherits it. */
+    harden();
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
     if cfg.check {
@@ -34,6 +60,44 @@ fn main() -> Result<()> {
     }
     if cfg.list {
         return list(&cfg);
+    }
+    /* Answers a question and exits, so it runs before the terminal checks
+       below: `sennel get` is the one path meant for a pipe. */
+    if let Some(Command::Get { needle, user, password, url, otp, stdout, force }) = &cfg.command {
+        let field = Field::of(*user, *password, *url, *otp)?;
+        let (needle, stdout, force) = (needle.clone(), *stdout, *force);
+        return get(&cfg, &needle, field, stdout, force);
+    }
+    /* Before the config is even consulted: printing a completion script is
+       not a session, and it must work on a machine with no vault. */
+    if let Some(Command::Completions { shell }) = &cfg.command {
+        let mut command = Cli::command();
+        /* Into a buffer first: clap_complete unwraps the write, so generating
+           straight into a closed pipe panics rather than returning. The
+           script is a few kilobytes, so holding it costs nothing. */
+        let mut script: Vec<u8> = Vec::new();
+        clap_complete::generate(*shell, &mut command, "sennel", &mut script);
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&script);
+        return Ok(());
+    }
+    if let Some(Command::Man) = &cfg.command {
+        match clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout()) {
+            // `sennel man | head` reported "Error: Broken pipe" and exited 1.
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+            _ => return Ok(()),
+        }
+    }
+    if let Some(Command::Convert { to }) = &cfg.command {
+        let to = to.clone();
+        return convert(&cfg, to.as_deref());
+    }
+    if let Some(Command::Audit { pwned }) = &cfg.command {
+        return audit(&cfg, *pwned);
+    }
+    if let Some(Command::Import { file, group, dry_run }) = &cfg.command {
+        let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
+        return import_csv(&cfg, &file, group.as_deref(), dry_run);
     }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
        or in CI, crossterm's raw mode fails with an OS error about a device
@@ -46,7 +110,6 @@ fn main() -> Result<()> {
        name in the title bar. `ratatui::init` restores raw mode and the
        alternate screen on panic; mouse capture and the title are ours, so
        they are chained onto the same hook. */
-    harden();
     let mut terminal = ratatui::init();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -67,6 +130,8 @@ fn main() -> Result<()> {
     /* Where a chosen vault gets remembered, so the next launch opens it. */
     app.config_file = cfg.config_file.clone();
     app.configured_db = cfg.db.clone();
+    /* And the vaults opened before this one, which `^v` picks from. */
+    app.set_recent(cfg.recent.clone());
     app.refresh_db_state();
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
@@ -103,6 +168,19 @@ fn main() -> Result<()> {
    user — which is the whole machine's worth of software the user has ever
    installed. Best effort: a platform that refuses either call is no worse
    off than before. */
+/// Whether core dumps are actually off, read back rather than assumed. Shown
+/// by `--check`, which is how the hardening becomes something a test outside
+/// this process can see — and `--check` is itself an early return, so seeing
+/// it there proves `harden` ran before any of them.
+fn core_dumps_off() -> bool {
+    let mut limit = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 1,
+    };
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
+    read == 0 && limit.rlim_cur == 0
+}
+
 fn harden() {
     unsafe {
         let no_core = libc::rlimit {
@@ -120,14 +198,14 @@ fn harden() {
    there. Exits non-zero when copying could never work, so a script can act
    on it. */
 fn check(cfg: &Config) -> Result<()> {
-    println!("Sennel {}", env!("CARGO_PKG_VERSION"));
-    println!(
+    say!("Sennel {}", env!("CARGO_PKG_VERSION"));
+    say!(
         "config    {}",
         cfg.config_file
             .as_deref()
             .map_or("(none · --no-config)".to_string(), |p| p.display().to_string())
     );
-    println!(
+    say!(
         "db        {}",
         cfg.db
             .as_deref()
@@ -140,34 +218,56 @@ fn check(cfg: &Config) -> Result<()> {
         Some(path) if path.is_file() => {
             let writable = std::fs::OpenOptions::new().write(true).open(path).is_ok();
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            println!(
+            say!(
                 "vault     found · {size} bytes · {}",
                 if writable { "writable" } else { "READ-ONLY" }
             );
         }
-        Some(_) => println!("vault     not there yet · unlocking creates it"),
-        None => println!("vault     (none)"),
+        Some(_) => say!("vault     not there yet · unlocking creates it"),
+        None => say!("vault     (none)"),
     }
-    println!("theme     {}", cfg.theme.name());
+    /* The library, since "which vaults does this machine know about" is a
+       question a bug report asks and the TUI answers only behind `^v`. */
+    if cfg.recent.is_empty() {
+        say!("library   (none yet)");
+    } else {
+        for (n, path) in cfg.recent.iter().enumerate() {
+            let label = if n == 0 { "library  " } else { "         " };
+            let state = if path.is_file() { "" } else { " · missing" };
+            say!("{label} {}{state}", path.display());
+        }
+    }
+    say!(
+        "hardened  {}",
+        match core_dumps_off() {
+            true => "core dumps off",
+            /* Named rather than hidden: a machine where the limit will not
+               take is one where a crash writes every secret to disk, and the
+               user should hear that from --check and not from a forensics
+               report. */
+            false => "core dumps STILL ON · this machine refused the limit",
+        }
+    );
+    say!("theme     {}", cfg.theme.name());
     for note in &cfg.theme_warnings {
-        println!("          ! {note}");
+        say!("          ! {note}");
     }
-    println!("sort      {}", cfg.sort.short());
-    println!(
+    say!("sort      {}", cfg.sort.short());
+    say!(
         "generate  {} chars · {}",
         cfg.generator.length,
         cfg.generator.describe()
     );
-    println!("mouse     {}", if cfg.mouse { "on" } else { "off" });
-    println!("clear in  {}s", cfg.clipboard_timeout);
-    println!("lock in   {}s (0 = off)", cfg.lock_timeout);
+    say!("mouse     {}", if cfg.mouse { "on" } else { "off" });
+    say!("clear in  {}s", cfg.clipboard_timeout);
+    say!("lock in   {}s (0 = off)", cfg.lock_timeout);
     match arboard::Clipboard::new() {
         Ok(_) => {
-            println!("clipboard ok");
+            say!("clipboard ok");
             Ok(())
         }
         Err(e) => {
-            println!("clipboard unavailable · {e}");
+            say!("clipboard unavailable · {e}");
             std::process::exit(1);
         }
     }
@@ -176,22 +276,340 @@ fn check(cfg: &Config) -> Result<()> {
 /* --list: the vault inventory without the secrets. Counts and entry titles
    only — the point is scripting and inventory, not display. */
 fn list(cfg: &Config) -> Result<()> {
-    let Some(path) = &cfg.db else {
-        anyhow::bail!("no database given · pass --db <file>");
-    };
-    let mut password = rpassword::prompt_password("password: ")?;
-    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
-    // Used once; the key inside the vault is the only copy that lives on.
-    password.zeroize();
-    let vault = opened?;
-    println!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
+    let vault = unlock(cfg)?;
+    say!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
         let indent = "  ".repeat(depth);
-        println!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
+        say!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
         for entry in vault.entries_in(&id) {
-            println!("{}  {}", indent, printable(entry.title()));
+            /* A script reading the inventory should see what the browser
+               sees, and "expired" is the one thing about an entry that can
+               make the rest of the line misleading. */
+            let stale = if vault::expired(&entry) { "  (expired)" } else { "" };
+            say!("{}  {}{stale}", indent, printable(entry.title()));
         }
+    }
+    Ok(())
+}
+
+/* `sennel convert`: an older KDBX read in, a KDBX 4 written out.
+
+   Never in place, and never over an existing file. A conversion is the one
+   operation where a bug costs the whole vault, so the original is opened and
+   never touched, the new file is created exclusively, and what was written is
+   read back and compared before this says it worked. If the comparison fails
+   the new file is removed, because a half-converted vault sitting next to a
+   good one is the worst of both. */
+fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
+    let Some(from) = cfg.db.clone() else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    /* `<name>-kdbx4.kdbx` beside the original: the same directory, because
+       that is where the user keeps vaults, and a name that says what it is. */
+    let out = match to {
+        Some(path) => config::expand(path),
+        None => {
+            let stem = from
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "vault".to_string());
+            from.with_file_name(format!("{stem}-kdbx4.kdbx"))
+        }
+    };
+    if out == from {
+        anyhow::bail!("that would write over the original · pick another --to");
+    }
+    if out.exists() {
+        anyhow::bail!("{} is already there · move it or pick another --to", out.display());
+    }
+
+    let mut vault = unlock(cfg)?;
+    let was = vault.format();
+    if vault.writable() {
+        anyhow::bail!("{} is already {was} · nothing to convert", from.display());
+    }
+    /* Read before the write, so the comparison below is against what came out
+       of the original rather than against the copy in memory. */
+    let before = vault::inventory(&vault);
+    vault.convert_to_kdbx4().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    /* No second password prompt: the key from the unlock is still held, so
+       the copy carries the original's password and key file exactly. Asking
+       again would be asking for the same secret twice, which is how people
+       end up typing a different one by accident. */
+    vault.save_copy(&out).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    /* Opened again from disk with the same key, and compared field by field.
+       A conversion that silently dropped an entry would otherwise be found
+       months later, by which time the original may be gone. */
+    let fresh = match vault.open_copy(&out) {
+        Ok(fresh) => fresh,
+        Err(e) => {
+            let _ = std::fs::remove_file(&out);
+            return Err(e).context("the converted file could not be reopened · it was removed");
+        }
+    };
+    let after = vault::inventory(&fresh);
+    if before != after {
+        let _ = std::fs::remove_file(&out);
+        anyhow::bail!(
+            "the converted file does not match the original ({} entries in, {} out) · it was removed",
+            before.len(),
+            after.len()
+        );
+    }
+
+    say!("{} → {}", from.display(), out.display());
+    say!("{was} → {} · {} entries, verified", fresh.format(), after.len());
+    say!("the original is untouched · open the new file in KeePassXC before you replace it");
+    Ok(())
+}
+
+/* `sennel audit`: the same findings the TUI's `!` shows, printed. The network
+   check lives out here rather than behind that key because a blocking http
+   request inside a frame loop is how a TUI stops redrawing, and because an
+   audit that reaches the internet should be something you typed. */
+fn audit(cfg: &Config, pwned: bool) -> Result<()> {
+    let vault = unlock(cfg)?;
+
+    let found = vault::audit(&vault);
+    for (id, issue) in &found {
+        let Some(entry) = vault.get_entry(id) else {
+            continue;
+        };
+        say!("{:<40}  {}", printable(entry.title()), issue.say());
+    }
+    if found.is_empty() {
+        say!("nothing reused, weak, expired or empty");
+    }
+    if !pwned {
+        return Ok(());
+    }
+
+    /* One request per prefix, not per entry. A vault where six entries
+       share a password should ask once, and passwords that merely share the
+       first five hex characters ride along in the same answer — which is the
+       same property that makes the k-anonymity worth anything. */
+    say!();
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut breached = 0usize;
+    for entry in vault.entry_refs() {
+        let secret = entry.password();
+        if secret.is_empty() {
+            continue;
+        }
+        let (prefix, suffix) = pwned::split_hash(secret);
+        if !seen.contains_key(&prefix) {
+            let body = pwned::fetch_range(&prefix).map_err(|e| anyhow::anyhow!("{e}"))?;
+            seen.insert(prefix.clone(), body);
+        }
+        let count = pwned::count_in(&seen[&prefix], &suffix);
+        if count > 0 {
+            breached += 1;
+            say!("{:<40}  in {count} known breaches", printable(entry.title()));
+        }
+    }
+    match breached {
+        0 => say!("no password in this vault is in a known breach"),
+        n => say!("\n{n} password(s) are in a known breach · change those first"),
+    }
+    Ok(())
+}
+
+/* `sennel import`: somebody else's export, into a group of its own.
+
+   Into a new group rather than merged into the tree the file describes:
+   an import is the one operation most likely to be regretted, and one
+   group is one thing to delete when it is. The file's own group column
+   becomes a subgroup, so the shape survives without colonising the vault. */
+fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> Result<()> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let mut text = std::fs::read_to_string(config::expand(file))
+        .with_context(|| format!("reading {file}"))?;
+    let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"));
+    /* The whole export, every password in it, in one buffer. Wiped as soon as
+       it has been parsed rather than left for the allocator — the rows that
+       came out of it wipe themselves on drop. */
+    text.zeroize();
+    let found = found?;
+    if found.rows.is_empty() {
+        anyhow::bail!("{file} has a header and no entries");
+    }
+    /* Said before the password prompt: a dry run should not need the vault's
+       password to tell you what is in somebody else's csv. */
+    if !found.ignored.is_empty() {
+        eprintln!(
+            "ignoring {} column(s): {}",
+            found.ignored.len(),
+            found
+                .ignored
+                .iter()
+                .map(|c| printable(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let into = group
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| format!("Imported {}", chrono::Local::now().format("%Y-%m-%d")));
+
+    if dry_run {
+        say!("{} entries would go into {into}:", found.rows.len());
+        for row in found.rows.iter().take(20) {
+            let where_ = match row.group.trim() {
+                "" => String::new(),
+                g => format!("  ({})", printable(g)),
+            };
+            say!("  {}{where_}", printable(&row.title));
+        }
+        if found.rows.len() > 20 {
+            say!("  … and {} more", found.rows.len() - 20);
+        }
+        return Ok(());
+    }
+
+    let mut vault = unlock(cfg)?;
+
+    if !vault.writable() {
+        anyhow::bail!(
+            "{} is {} · Sennel writes KDBX 4 only · save a copy as KDBX 4 from KeePassXC first",
+            path.display(),
+            vault.format()
+        );
+    }
+    let (added, skipped) = import::into_vault(&mut vault, &found.rows, &into)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for note in &skipped {
+        eprintln!("{}", printable(note));
+    }
+    vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+    say!("imported {added} entries into {into}");
+    /* The export is still sitting on disk in the clear, which is the part
+       people forget once the import worked. */
+    eprintln!("{file} is still plaintext on disk · delete it");
+    Ok(())
+}
+
+/* Every non-interactive path opens the vault the same way: prompt (or read a
+   piped line), read the key file if there is one, open, and wipe both. It was
+   copied into four commands, and all four passed `None` for the key file — so
+   a vault with one could not be reached from the command line at all. */
+fn unlock(cfg: &Config) -> Result<Vault> {
+    let Some(path) = &cfg.db else {
+        anyhow::bail!("no database given · pass --db <file>");
+    };
+    let mut key_bytes = match &cfg.key_file {
+        Some(at) => Some(
+            std::fs::read(at).with_context(|| format!("reading key file {}", at.display()))?,
+        ),
+        None => None,
+    };
+    let mut password = ask_password("password: ")?;
+    let opened = Vault::open(path, &password, key_bytes.as_deref())
+        .map_err(|e| anyhow::anyhow!("{e}"));
+    password.zeroize();
+    if let Some(bytes) = key_bytes.as_mut() {
+        // Key material too, and wiped whether or not the open worked.
+        bytes.zeroize();
+    }
+    opened
+}
+
+/* The master password, from a terminal or from a pipe. rpassword needs a tty
+   and fails with "Device not configured" without one, which makes `get`
+   unusable from the very scripts it exists for. A piped stdin is read as one
+   line instead — the way every other tool takes a passphrase from a pipe.
+
+   The buffer is the caller's to zeroize; this hands back the only copy. */
+fn ask_password(prompt: &str) -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    // The newline is the pipe's, not the password's.
+    let end = line.trim_end_matches(['\n', '\r']).len();
+    line.truncate(end);
+    Ok(line)
+}
+
+/* `sennel get`, the whole non-interactive path. Unlocks, resolves one entry,
+   and either copies (staying alive for the wipe) or prints.
+
+   Exit codes are the contract a script reads: 0 copied, 2 ambiguous, 3 not
+   found, 1 for everything else. Ambiguous and not-found are separated because
+   a script retrying with a longer needle wants to know which happened. */
+fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -> Result<()> {
+    /* Refused before the password prompt, not after: making somebody type a
+       master password and *then* telling them the output has nowhere safe to
+       go is the rude order to do this in. */
+    if to_stdout && std::io::stdout().is_terminal() && !force {
+        anyhow::bail!(
+            "--stdout into a terminal would leave the secret in your scrollback · pipe it, or --force"
+        );
+    }
+    let vault = unlock(cfg)?;
+
+    let mut searcher = search::Searcher::new();
+    let id = match vault::resolve(&vault, &mut searcher, needle) {
+        vault::Found::One(id) => id,
+        vault::Found::Many(ids) => {
+            eprintln!("{needle:?} matches {} entries:", ids.len());
+            /* Titles only, and sanitised: this is vault text going to a
+               terminal, and it may have been written by anyone. */
+            for id in ids.iter().take(10) {
+                if let Some(entry) = vault.get_entry(id) {
+                    eprintln!("  {}", printable(entry.title()));
+                }
+            }
+            if ids.len() > 10 {
+                eprintln!("  … and {} more", ids.len() - 10);
+            }
+            std::process::exit(2);
+        }
+        vault::Found::None => {
+            eprintln!("nothing matches {needle:?}");
+            std::process::exit(3);
+        }
+    };
+    let entry = vault.get_entry(&id).expect("resolve returned a live id");
+    let title = printable(entry.title());
+    let value = match field {
+        Field::User => entry.username().to_string(),
+        Field::Password => entry.password().to_string(),
+        Field::Url => entry.url().to_string(),
+        /* The code, never the seed: the same rule the TUI's `t` follows, and
+           the reason `get` has no flag that would hand over the seed. */
+        Field::Otp => match vault::totp_now(&entry) {
+            Some((code, _)) => code,
+            None => anyhow::bail!("{title} has no one-time code"),
+        },
+    };
+    if value.is_empty() {
+        anyhow::bail!("{title} has no {}", field.name());
+    }
+    if to_stdout {
+        say!("{value}");
+        return Ok(());
+    }
+
+    let board = Board::new(cfg.clipboard_timeout);
+    board.copy(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match board.timeout_secs() {
+        /* The wipe is a thread inside this process, so exiting now would
+           abandon the secret on the clipboard. Wait it out, say so, and wipe
+           before returning — a `get` that exits instantly is a `get` that
+           leaves a password sitting there. */
+        Some(secs) => {
+            eprintln!("copied the {} for {title} · clears in {secs}s", field.name());
+            std::thread::sleep(Duration::from_secs(secs));
+            board.clear_now();
+        }
+        // `clipboard_timeout = 0` asked for it to stay; nothing to wait for.
+        None => eprintln!("copied the {} for {title}", field.name()),
     }
     Ok(())
 }
@@ -252,11 +670,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
    is a convenience over a keyboard app, so it stays out of the popups, where
    a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    /* The popups that ask a question keep the mouse out, so a stray click
+       cannot answer one. The detail popup is not a question — it is the only
+       detail view a narrow terminal has, and its rows copy on click like the
+       pane's do — so it stays in, and `click` only acts on a copy row while
+       it is up. */
     if app.view != app::View::Browser
         || app.confirm.is_some()
         || app.form.is_some()
         || app.group_prompt.is_some()
-        || app.detail
+        || app.rekey.is_some()
+        || app.audit.is_some()
+        || app.fields.is_some()
+        || app.history.is_some()
         || app.show_help
     {
         return;
@@ -292,6 +718,29 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_group_prompt_key(app, code, mods);
         return;
     }
+    /* Old versions of an entry: a list you steer, like the audit. */
+    if app.history.is_some() {
+        handle_history_key(app, code, mods);
+        return;
+    }
+    /* The fields screen owns the keys, and its own add prompt owns them
+       harder: every printable key is part of a field name or value there. */
+    if app.fields.is_some() {
+        handle_fields_key(app, code, mods);
+        return;
+    }
+    /* The audit is a list you steer, so it owns the keys while it is up. */
+    if app.audit.is_some() {
+        handle_audit_key(app, code, mods);
+        return;
+    }
+    /* So is the change-password prompt, and more so than most: every
+       printable key is part of a master password, so `q` and `h` are text
+       here the way they are on the lock screen. */
+    if app.rekey.is_some() {
+        handle_rekey_key(app, code, mods);
+        return;
+    }
     /* The search band is modal the same way: `q` types a letter into the
        needle, `h` too. Enter and Esc hand the keys back to the browser —
        routing reads `band`, not `search.is_some()`, because a kept filter
@@ -319,6 +768,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        take a letter meant to narrow a list. */
     if app.browse.is_some() {
         handle_browse_key(app, code, mods);
+        return;
+    }
+    // The library owns the keys the same way, and for the same reason.
+    if app.library.is_some() {
+        handle_library_key(app, code, mods);
         return;
     }
     /* The lock screen owns every printable key, so the overlay needs one no
@@ -393,6 +847,10 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Tab => app.switch_pane(),
         KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') => app.copy_username(),
+        /* Before the bare `p`, which matches whatever modifiers are held:
+           changing the master password sits one key away from copying one,
+           so the ctrl arm has to be the one tested first. */
+        KeyCode::Char('p') if ctrl => app.open_rekey(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
         KeyCode::Char('t') => app.copy_totp(),
@@ -402,6 +860,19 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('e') => app.open_edit_form(),
         /* Group keys. A and E name groups from either pane; D follows the
            pane — the cursor decides what deleting means. */
+        /* `!`: what is wrong with this vault's passwords. Shift-1, so it is
+           never a slip away from a movement key. */
+        KeyCode::Char('!') => app.open_audit(),
+        /* `F`: custom fields and attachments. Upper case, beside the other
+           structural keys, and never a slip from `f`. */
+        KeyCode::Char('F') => app.open_fields(),
+        /* `H`: old versions, which only ever come from another client. */
+        KeyCode::Char('H') => app.open_history(),
+        /* `>` and `<` reorganise the tree without a cut-and-paste trip.
+           Groups pane only: on entries the cursor is on a row, not a folder,
+           and `X`/`V` is the move that means something there. */
+        KeyCode::Char('>') if app.active_pane == app::Pane::Groups => app.reparent_group(true),
+        KeyCode::Char('<') if app.active_pane == app::Pane::Groups => app.reparent_group(false),
         KeyCode::Char('A') => app.open_group_prompt_new(),
         KeyCode::Char('E') => app.open_group_prompt_rename(),
         KeyCode::Char('D') if app.active_pane == app::Pane::Groups => app.ask_delete_group(),
@@ -547,6 +1018,84 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
    Esc. Same shape as the entry form minus the field movement. */
+/* Old versions of an entry. `D` clears the lot, which is the only write this
+   screen has: there is no "restore this version", because that is an edit and
+   the form is where edits happen. */
+fn handle_history_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('H') => app.close_history(),
+        KeyCode::Char('j') | KeyCode::Down => app.history_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.history_move(false),
+        KeyCode::Char('*') => app.history_reveal(),
+        KeyCode::Char('D') => app.clear_history(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
+/* The fields screen. While the add prompt is up it takes every printable
+   key, because a field name or value can be any of them; otherwise this is a
+   list you steer, with one key per verb. */
+fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    if app.fields.as_ref().is_some_and(|f| f.adding.is_some()) {
+        match code {
+            KeyCode::Esc => app.fields_add_cancel(),
+            KeyCode::Tab | KeyCode::Down | KeyCode::Up => app.fields_add_next(),
+            KeyCode::Enter => app.fields_add_submit(),
+            KeyCode::Backspace => app.fields_add_backspace(),
+            KeyCode::Char(c) if !ctrl => app.fields_add_insert(c),
+            _ => {}
+        }
+        return;
+    }
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('F') => app.close_fields(),
+        KeyCode::Char('j') | KeyCode::Down => app.fields_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.fields_move(false),
+        KeyCode::Char('*') => app.fields_reveal(),
+        KeyCode::Char('y') => app.fields_copy(),
+        KeyCode::Char('s') => app.fields_save(),
+        KeyCode::Char('a') => app.fields_add(false),
+        KeyCode::Char('f') => app.fields_add(true),
+        KeyCode::Char('D') => app.fields_remove(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
+/* The audit list: move, open, leave. Enter is the whole point — a list of
+   problems you cannot act on from where you are standing is a list nobody
+   works through. */
+fn handle_audit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('!') => app.close_audit(),
+        KeyCode::Char('j') | KeyCode::Down => app.audit_move(true),
+        KeyCode::Char('k') | KeyCode::Up => app.audit_move(false),
+        KeyCode::Enter => app.audit_open_selected(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        _ => {}
+    }
+}
+
+/* Two masked boxes and nothing else. Every printable key is text, including
+   the ones that are verbs everywhere else, so the reveal is `^r` and the way
+   out is Esc. */
+fn handle_rekey_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc => app.close_rekey(),
+        KeyCode::Char('r') if ctrl => app.rekey_reveal(),
+        KeyCode::Tab | KeyCode::Down | KeyCode::Up => app.rekey_next_field(),
+        KeyCode::Enter => app.submit_rekey(),
+        KeyCode::Backspace => app.rekey_backspace(),
+        KeyCode::Char(c) if !ctrl => app.rekey_insert(c),
+        _ => {}
+    }
+}
+
 fn handle_group_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -590,6 +1139,27 @@ fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+/* The vault library. Same shape as the picker above, plus `^d`, which drops
+   a row from the list and never touches the file behind it. */
+fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Esc => app.close_library(),
+        KeyCode::Enter => app.library_choose(),
+        KeyCode::Up => app.library_step(false),
+        KeyCode::Down => app.library_step(true),
+        KeyCode::Char('p') if ctrl => app.library_step(false),
+        KeyCode::Char('n') if ctrl => app.library_step(true),
+        KeyCode::Char('d') if ctrl => app.library_forget(),
+        KeyCode::Home => app.library_end(false),
+        KeyCode::End => app.library_end(true),
+        KeyCode::Backspace => app.library_backspace(),
+        KeyCode::Char(c) if !ctrl => app.library_filter(c),
+        _ => {}
+    }
+}
+
 /* Every printable key is text while the lock owns the screen, so `q` types a
    letter instead of ending the session. The shape mirrors earworm's prompt
    keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
@@ -614,6 +1184,9 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         /* `^o`: pick the vault from a list instead of typing its path. */
         KeyCode::Char('o') if ctrl => app.open_browse(),
+        /* `^v`: the vaults this machine has opened before, which is a shorter
+           list than the disk and the one a second vault lives on. */
+        KeyCode::Char('v') if ctrl => app.open_library(),
         // The first screen anybody sees is the first one worth recolouring.
         KeyCode::Char('t') if ctrl => app.cycle_theme(),
         KeyCode::Left if !ctrl => app.unlock_move(false),
@@ -827,17 +1400,14 @@ mod tests {
     }
 
     /* The hardening is two syscalls whose only proof is the limit they set:
-       a core dump of this process would hold every secret at once. */
+       a core dump of this process would hold every secret at once. The
+       companion check — that every entry point reaches it, not only the TUI —
+       is `every_entry_point_disables_core_dumps` in tests/get.rs, which has
+       to be out of process to see a real `main`. */
     #[test]
     fn hardening_forbids_core_dumps() {
         harden();
-        let mut limit = libc::rlimit {
-            rlim_cur: 1,
-            rlim_max: 1,
-        };
-        let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
-        assert_eq!(read, 0, "getrlimit failed");
-        assert_eq!(limit.rlim_cur, 0, "core dumps are still allowed");
+        assert!(core_dumps_off(), "core dumps are still allowed");
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what

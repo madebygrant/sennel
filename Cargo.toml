@@ -13,6 +13,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Completions and the man page are printed by the binary from the same clap
+# definition it parses with, so they cannot drift from the flags that exist.
+# Both are thin layers over clap itself rather than new machinery.
+clap_complete = "4"
+clap_mangen = "0.2"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 toml = "1"

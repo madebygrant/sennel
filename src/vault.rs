@@ -13,6 +13,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroize;
+
 use keepass::{
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
@@ -29,6 +31,9 @@ pub const USERNAME: &str = "UserName";
 pub const PASSWORD: &str = "Password";
 pub const URL: &str = "URL";
 pub const NOTES: &str = "Notes";
+
+/// What KeePassXC calls the group it routes deletes to.
+pub const RECYCLE_BIN: &str = "Recycle Bin";
 
 /// Field reads as plain strings, defaulting to "" — KDBX entries may omit
 /// any field, and the UI and search want a printable &str, not Options.
@@ -181,16 +186,235 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
     Some((code.code, code.valid_for.as_secs()))
 }
 
+/* KDBX carries an expiry on every entry and Sennel read neither half of it,
+   so an entry KeePassXC shows as expired looked perfectly healthy here. Both
+   halves matter: `expires` is the switch and `expiry` is the date, and a date
+   with the switch off is a date somebody set and then turned off. */
+pub fn expires_at(entry: &EntryRef<'_>) -> Option<chrono::NaiveDateTime> {
+    entry.times.expires.unwrap_or(false).then(|| entry.times.expiry)?
+}
+
+/// Whether the expiry has passed. Compared in UTC, which is what KDBX stores.
+pub fn expired(entry: &EntryRef<'_>) -> bool {
+    expires_at(entry).is_some_and(|at| at <= chrono::Utc::now().naive_utc())
+}
+
+/* Set or clear the expiry. `None` turns it off and leaves the old date where
+   it was, the way KeePassXC does — unticking the box should not throw away
+   the date you would tick it back on with. */
+impl Vault {
+    pub fn set_expiry(
+        &mut self,
+        id: &EntryId,
+        at: Option<chrono::NaiveDateTime>,
+    ) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match at {
+            Some(at) => {
+                entry.times.expiry = Some(at);
+                entry.times.expires = Some(true);
+            }
+            None => entry.times.expires = Some(false),
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+}
+
+/// The five Sennel has a row for, plus the seed. Everything else on an entry
+/// is a custom field, which is a thing KeePassXC users really do use.
+pub const STANDARD: [&str; 6] = [TITLE, USERNAME, PASSWORD, URL, NOTES, "otp"];
+
+/// One line of the `F` screen: a custom string field, or a file.
+/* Carries the decrypted value, which for a custom field is a recovery code or
+   an api key as often as not — so it wipes on drop, the same rule the typed
+   boxes follow. Freeing a String without zeroizing it leaves the bytes in the
+   allocation, which is the distinction this codebase draws everywhere else. */
+#[derive(Clone, PartialEq, Debug)]
+pub enum Extra {
+    Field {
+        name: String,
+        value: String,
+        /// Protected fields mask until `*`, the same rule as the password.
+        secret: bool,
+    },
+    File {
+        name: String,
+        bytes: usize,
+    },
+}
+
+impl Extra {
+    /* What `Drop` does, split out so a test can watch it work on a value it
+       still owns. Reading a freed allocation to check a zeroize landed proves
+       nothing: the allocator writes its own bookkeeping into the block, so
+       the secret is usually gone from it whether or not anybody wiped it. */
+    pub fn wipe(&mut self) {
+        if let Extra::Field { value, .. } = self {
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for Extra {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl Extra {
+    pub fn name(&self) -> &str {
+        match self {
+            Extra::Field { name, .. } | Extra::File { name, .. } => name,
+        }
+    }
+}
+
+/* Everything on an entry that the five fixed rows cannot show. Fields first,
+   then files, each alphabetical: this list is read, and a list that reorders
+   itself between openings cannot be. */
+pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
+    let mut fields: Vec<Extra> = entry
+        .fields
+        .iter()
+        .filter(|(name, _)| !STANDARD.contains(&name.as_str()))
+        .map(|(name, value)| Extra::Field {
+            name: name.clone(),
+            value: value.get().clone(),
+            secret: value.is_protected(),
+        })
+        .collect();
+    fields.sort_by_key(|row| row.name().to_lowercase());
+    let mut files: Vec<Extra> = entry
+        .attachments_named()
+        .map(|(name, attachment)| Extra::File {
+            name: name.to_string(),
+            bytes: attachment.data.get().len(),
+        })
+        .collect();
+    files.sort_by_key(|row| row.name().to_lowercase());
+    fields.extend(files);
+    fields
+}
+
+/* A needle that starts with `#` is a tag filter, not a fuzzy search. Tags are
+   a KeePassXC feature Sennel could see (`extras` prints them) and not act on,
+   and fuzzing them alongside titles would make `#work` match "homework".
+
+   Prefix, case-insensitive: typing `#wo` narrows as you go, which is the
+   whole point of a filter in a live band. */
+pub fn tag_needle(needle: &str) -> Option<&str> {
+    needle.strip_prefix('#')
+}
+
+pub fn has_tag(entry: &EntryRef<'_>, prefix: &str) -> bool {
+    /* An empty prefix (`#` alone) means "anything tagged", which is the
+       useful answer while the user is still typing. */
+    entry
+        .tags
+        .iter()
+        .any(|tag| tag.to_lowercase().starts_with(&prefix.to_lowercase()))
+}
+
+/// Every tag in the vault, sorted, for the hint under an empty `#`.
+pub fn all_tags(vault: &Vault) -> Vec<String> {
+    let mut out: Vec<String> = vault
+        .entry_refs()
+        .iter()
+        .flat_map(|e| e.tags.clone())
+        .collect();
+    out.sort_by_key(|tag| tag.to_lowercase());
+    out.dedup();
+    out
+}
+
+/// One old version of an entry, as the history screen reads it.
+/* Every row is a password somebody used to have, which is the whole reason
+   the screen exists — so it wipes on drop like the boxes that type one. */
+#[derive(Clone, PartialEq, Debug)]
+pub struct Version {
+    /// Newest first, so 0 is the version just before the current one.
+    pub at: usize,
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    /// When that version was last modified, UTC as KDBX stores it.
+    pub modified: Option<chrono::NaiveDateTime>,
+}
+
+impl Version {
+    /// What `Drop` does, observable on a live value. See `Extra::wipe`.
+    pub fn wipe(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+impl Drop for Version {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/* Old versions of an entry, newest first. Sennel writes none of these — its
+   own edits deliberately leave no history record — but KeePassXC does, and an
+   entry imported from there arrives carrying every password it ever had.
+   Invisible is the wrong way to hold that: you cannot decide whether to keep
+   something you cannot see. */
+pub fn history(entry: &EntryRef<'_>) -> Vec<Version> {
+    let mut out = Vec::new();
+    let Some(count) = entry.history.as_ref().map(|h| h.get_entries().len()) else {
+        return out;
+    };
+    for at in 0..count {
+        let Some(old) = entry.historical(at) else {
+            continue;
+        };
+        out.push(Version {
+            at,
+            title: old.title().to_string(),
+            username: old.username().to_string(),
+            password: old.password().to_string(),
+            modified: old.times.last_modification,
+        });
+    }
+    /* Sorted by the stamp each version carries rather than trusting the
+       stored order: this crate prepends new history, a KDBX file written
+       elsewhere may hold the other order, and "newest first" has to mean the
+       same thing whichever client wrote the file. Versions with no stamp sink
+       to the bottom, where an undated old password belongs. */
+    out.sort_by_key(|v| std::cmp::Reverse(v.modified));
+    out
+}
+
 /// Fields Sennel has no row for — KeePassXC custom strings, and attachments.
 /// Named rather than shown: an entry whose extra fields are invisible reads
 /// as an entry that lost them.
+/* An attachment on its way out of the vault, written the way the vault
+   itself is: created exclusively so a symlink planted at the path cannot
+   redirect it, and 0600 from the first byte. The file loses every protection
+   the vault gave it the moment it lands, so the least this can do is not
+   hand it to the rest of the machine. */
+pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| VaultError::Io(format!("{e}")))?;
+    file.write_all(bytes).map_err(|e| VaultError::Io(e.to_string()))?;
+    Ok(())
+}
+
 pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
-    let known = ["Title", "UserName", "Password", "URL", "Notes", "otp"];
     let mut out = Vec::new();
     let fields: Vec<&String> = entry
         .fields
         .keys()
-        .filter(|k| !known.contains(&k.as_str()))
+        .filter(|k| !STANDARD.contains(&k.as_str()))
         .collect();
     if !fields.is_empty() {
         let plural = if fields.len() == 1 { "field" } else { "fields" };
@@ -215,7 +439,10 @@ pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
 pub enum VaultError {
     GroupNotFound,
     EntryNotFound,
-    GroupNotEmpty,
+    /// `D` on something already in the bin, where the next `D` is the real one.
+    AlreadyRecycled,
+    /// Opened fine, cannot be written: an older KDBX than this can save.
+    ReadOnlyFormat(String),
     CannotDeleteRoot,
     CannotMoveRoot,
     WouldCycle,
@@ -235,7 +462,11 @@ impl std::fmt::Display for VaultError {
         match self {
             VaultError::GroupNotFound => write!(f, "no such group"),
             VaultError::EntryNotFound => write!(f, "no such entry"),
-            VaultError::GroupNotEmpty => write!(f, "group is not empty"),
+            VaultError::AlreadyRecycled => write!(f, "already in the recycle bin"),
+            VaultError::ReadOnlyFormat(what) => write!(
+                f,
+                "{what} files can be read but not written · save a copy as KDBX 4 from KeePassXC"
+            ),
             VaultError::CannotDeleteRoot => write!(f, "cannot delete the root group"),
             VaultError::CannotMoveRoot => write!(f, "cannot move the root group"),
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
@@ -356,10 +587,33 @@ impl Vault {
         })
     }
 
+    /* KDBX 4 is the only format this can write: the keepass crate refuses
+       KDB, KDB2 and KDB3 on save. Sennel opens all of them happily, so
+       without this a user edits a 3.1 file for ten minutes and meets
+       "Unsupported database version" at the first autosave — with no hint
+       that the file was never writable and no way to get the work out. */
+    pub fn writable(&self) -> bool {
+        matches!(self.db.config.version, keepass::config::DatabaseVersion::KDB4(_))
+    }
+
+    /// What the file is, for the warning and for `--check`.
+    pub fn format(&self) -> String {
+        use keepass::config::DatabaseVersion;
+        match self.db.config.version {
+            DatabaseVersion::KDB4(minor) => format!("KDBX 4.{minor}"),
+            DatabaseVersion::KDB3(minor) => format!("KDBX 3.{minor}"),
+            DatabaseVersion::KDB2(minor) => format!("KDB 2.{minor}"),
+            DatabaseVersion::KDB(minor) => format!("KDB 1.{minor}"),
+        }
+    }
+
     /// Write to the path this vault was opened from or last saved to.
     /// Refuses with `ChangedOnDisk` when somebody else wrote the file since;
     /// `save_over` is the deliberate way past that.
     pub fn save(&mut self) -> Result<(), VaultError> {
+        if !self.writable() {
+            return Err(VaultError::ReadOnlyFormat(self.format()));
+        }
         if self.changed_on_disk() {
             return Err(VaultError::ChangedOnDisk);
         }
@@ -369,6 +623,9 @@ impl Vault {
     /// Save regardless of what is on disk now. The caller has told the user
     /// what they are about to lose and been told to go ahead.
     pub fn save_over(&mut self) -> Result<(), VaultError> {
+        if !self.writable() {
+            return Err(VaultError::ReadOnlyFormat(self.format()));
+        }
         self.write_and_stamp()
     }
 
@@ -402,6 +659,40 @@ impl Vault {
         Ok(())
     }
 
+    /* The same database written somewhere else under the key it was opened
+       with. No password argument, and none asked for: the key is already held
+       from the unlock, so a copy keeps the original's password and key file
+       without anybody typing either again — and without a second plaintext
+       copy of a master password existing to be typed wrongly.
+
+       `self` is left pointing at the original: this writes a file, it does
+       not move the session onto it. */
+    pub fn save_copy(&self, path: &Path) -> Result<(), VaultError> {
+        let Some(key) = self.key.as_ref() else {
+            return Err(VaultError::Unsaved);
+        };
+        Self::write_file(&self.db, key, path)
+    }
+
+    /* A file written by `save_copy`, opened again with the same key. The
+       password was wiped the moment the original opened, so this is the only
+       way to prove the copy decrypts with the credentials its owner will
+       actually use — which is the whole question a conversion has to answer
+       before it says it worked. */
+    pub fn open_copy(&self, path: &Path) -> Result<Vault, VaultError> {
+        let Some(key) = self.key.clone() else {
+            return Err(VaultError::Unsaved);
+        };
+        let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
+        let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
+        Ok(Vault {
+            db,
+            key: Some(key),
+            path: Some(path.to_path_buf()),
+            stamp: Stamp::of(path),
+        })
+    }
+
     /// First save of a new vault: records the path and key, so later `save`
     /// calls need neither.
     pub fn save_as(
@@ -415,6 +706,59 @@ impl Vault {
         self.key = Some(key);
         self.path = Some(path.to_path_buf());
         self.stamp = Stamp::of(path);
+        Ok(())
+    }
+
+    /* KDBX 3.1 and older open here and can never be written: the format's
+       writer does not exist in the keepass crate (its kdbx3 module is
+       parse-only, and `save` refuses anything below KDBX 4), and writing one
+       would mean a hashed-block-stream framer, a Salsa20 inner stream and a
+       second XML shape for attachments — crypto-adjacent work that belongs
+       upstream, with round-trip fixtures, not in this file.
+
+       So the way out is forward rather than back. KeePassXC has read and
+       written KDBX 4 since 2.0 in 2016, so converting costs no compatibility
+       with the client the file most likely came from.
+
+       Swaps the whole config, not just the version: a KDBX 4 file carrying
+       3.1's Salsa20 inner stream and AES-KDF header would claim a format it
+       is not written in. What comes out is what `Vault::new` would have
+       produced — the same cipher, KDF and compression as every vault Sennel
+       creates. */
+    pub fn convert_to_kdbx4(&mut self) -> Result<(), VaultError> {
+        if self.writable() {
+            return Err(VaultError::Db(format!("{} is already writable", self.format())));
+        }
+        self.db.config = keepass::config::DatabaseConfig::default();
+        Ok(())
+    }
+
+    /* Re-key: the same database, written again under a new password. The
+       file is written before the key is swapped, so a refused or failed write
+       leaves the vault openable with the password it already had — a rekey
+       that half-lands is a vault nobody can open.
+
+       Guarded like `save`, because it is a save: re-keying over somebody
+       else's write would lose their work *and* change the password they would
+       need to get it back. */
+    pub fn rekey(&mut self, password: &str, key_file: Option<&[u8]>) -> Result<(), VaultError> {
+        let Some(path) = self.path.clone() else {
+            return Err(VaultError::Unsaved);
+        };
+        if self.changed_on_disk() {
+            return Err(VaultError::ChangedOnDisk);
+        }
+        let key = Self::build_key(password, key_file)?;
+        // KeePassXC shows this, and a vault that never records it reads as one
+        // whose password has never been changed.
+        let was = self.db.meta.master_key_changed;
+        self.db.meta.master_key_changed = Some(Times::now());
+        if let Err(e) = Self::write_file(&self.db, &key, &path) {
+            self.db.meta.master_key_changed = was;
+            return Err(e);
+        }
+        self.key = Some(key);
+        self.stamp = Stamp::of(&path);
         Ok(())
     }
 
@@ -513,7 +857,7 @@ impl Vault {
        counts and the flattened global scope skip its subtree. A real
        KeePassXC vault parks deleted entries there, and an honest
        "unlocked N entries" or search hit must not include deleted things. */
-    fn recycled(&self) -> HashSet<EntryId> {
+    pub fn recycled(&self) -> HashSet<EntryId> {
         let mut out = HashSet::new();
         let Some(bin) = self.db.recycle_bin() else {
             return out;
@@ -640,18 +984,12 @@ impl Vault {
         })
     }
 
-    /* Refuses non-empty groups rather than deleting recursively: a recursive
-       delete is one keypress from losing a subtree. The guard runs before
-       GroupMut::remove, which recurses, so the recursion never fires here. */
-    pub fn delete_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
+    /* The recursive delete `delete_group` refuses to be. Only reachable on a
+       group already inside the bin, where the subtree has been deleted once
+       already and the confirm says it cannot be undone. */
+    pub fn delete_group_tree(&mut self, id: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotDeleteRoot);
-        }
-        let Some(group) = self.db.group(*id) else {
-            return Err(VaultError::GroupNotFound);
-        };
-        if group.entry_ids().next().is_some() || group.group_ids().next().is_some() {
-            return Err(VaultError::GroupNotEmpty);
         }
         let Some(group) = self.db.group_mut(*id) else {
             return Err(VaultError::GroupNotFound);
@@ -731,15 +1069,82 @@ impl Vault {
             .map_err(|_: DestinationGroupNotFoundError| VaultError::GroupNotFound)
     }
 
-    /* Direct delete, no recycle bin in v1: the vault keeps deleted objects in
-       the file's recycle bin only if KeePass itself routed them there, and
-       the confirm prompt is what guards it here. */
-    pub fn delete_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
-        let Some(entry) = self.db.entry_mut(*id) else {
-            return Err(VaultError::EntryNotFound);
+    /* The bin every other KeePass client routes deletes through, found by
+       the uuid in the file's own metadata or created on the first delete.
+       KeePassXC writes exactly this: a root-level group, its uuid in
+       `recyclebin_uuid`, and the enabled flag set. */
+    pub fn ensure_recycle_bin(&mut self) -> Result<GroupId, VaultError> {
+        if let Some(bin) = self.recycle_bin_id() {
+            return Ok(bin);
+        }
+        let root = self.root_id();
+        let bin = self.create_group(&root, RECYCLE_BIN)?;
+        self.db.meta.recyclebin_uuid = Some(bin.uuid());
+        self.db.meta.recyclebin_enabled = Some(true);
+        self.db.meta.recyclebin_changed = Some(Times::now());
+        Ok(bin)
+    }
+
+    /// The bin, if the file names one that still exists. A uuid pointing at a
+    /// group somebody deleted is stale metadata, not a bin.
+    pub fn recycle_bin_id(&self) -> Option<GroupId> {
+        self.db.recycle_bin().map(|g| g.id())
+    }
+
+    /// Whether this group is the bin or lives inside it. What the pane asks
+    /// before it offers `u`, and what `get` asks before it resolves a needle.
+    pub fn in_recycle_bin(&self, id: &GroupId) -> bool {
+        let Some(bin) = self.recycle_bin_id() else {
+            return false;
         };
-        entry.remove();
-        Ok(())
+        let mut at = *id;
+        loop {
+            if at == bin {
+                return true;
+            }
+            let Some(group) = self.db.group(at) else {
+                return false;
+            };
+            match group.parent() {
+                Some(parent) => at = parent.id(),
+                None => return false,
+            }
+        }
+    }
+
+    /// Whether an entry is in the bin, which is to say already deleted.
+    pub fn is_recycled(&self, id: &EntryId) -> bool {
+        self.parent_group_of_entry(id)
+            .is_some_and(|parent| self.in_recycle_bin(&parent))
+    }
+
+    /* `D` on a live entry. A move, not a removal: the entry keeps its id and
+       its history, KeePassXC shows it under Recycle Bin, and undo is a move
+       home rather than a resurrection from a snapshot. An entry already in
+       the bin is deleted for real by `expunge_entry`. */
+    pub fn recycle_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
+        if self.db.entry(*id).is_none() {
+            return Err(VaultError::EntryNotFound);
+        }
+        let bin = self.ensure_recycle_bin()?;
+        self.move_entry(id, &bin)
+    }
+
+    /* `D` on a group. The whole subtree rides along, which is why this no
+       longer refuses a non-empty group the way a recursive *removal* had to:
+       nothing is destroyed, and one keypress undoes it. */
+    pub fn recycle_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
+        if *id == self.root_id() {
+            return Err(VaultError::CannotDeleteRoot);
+        }
+        if self.in_recycle_bin(id) {
+            return Err(VaultError::AlreadyRecycled);
+        }
+        let bin = self.ensure_recycle_bin()?;
+        if *id == bin {
+            return Err(VaultError::CannotDeleteRoot);
+        }
+        self.move_group(id, &bin)
     }
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
@@ -793,10 +1198,155 @@ impl Vault {
         Ok(())
     }
 
-    /// Hard-remove an entry an undo needs to disappear again (an add that
-    /// `u` takes back). No tombstone — this rolls back, it does not delete.
+    /* The bytes of one attachment, for writing it out. Cloned rather than
+       borrowed: the caller writes it to a file and drops it, and threading a
+       borrow of the database through that is not worth the lifetime. */
+    pub fn attachment_bytes(&self, id: &EntryId, name: &str) -> Option<Vec<u8>> {
+        self.db
+            .entry(*id)?
+            .attachment_by_name(name)
+            .map(|a| a.data.get().clone())
+    }
+
+    /* A custom field, set or replaced. Protected by default for the same
+       reason notes are: a field somebody added by hand to a password manager
+       is more likely to be a secret than not, and protecting it only ever
+       hides more. */
+    pub fn set_field(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        value: &str,
+        secret: bool,
+    ) -> Result<(), VaultError> {
+        if name.trim().is_empty() {
+            return Err(VaultError::Db("a field needs a name".into()));
+        }
+        /* The five fixed rows have their own editor; letting this one write
+           them would mean two paths to the same field disagreeing. */
+        if STANDARD.contains(&name) {
+            return Err(VaultError::Db(format!("{name} has its own row in the form")));
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match secret {
+            true => entry.set_protected(name, value),
+            false => entry.set_unprotected(name, value),
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    /* Tags, which KeePassXC writes and `#` filters on. Whole list at a time:
+       a tag set is small and edited as a set, and per-tag add/remove would be
+       two more verbs for the same result. */
+    pub fn set_tags(&mut self, id: &EntryId, tags: &[String]) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.tags = tags
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    pub fn remove_field(&mut self, id: &EntryId, name: &str) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        if entry.fields.remove(name).is_none() {
+            return Err(VaultError::EntryNotFound);
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    /* A file into the vault, protected. KDBX stores attachments in a shared
+       pool keyed off the entry, which the crate handles; what matters here is
+       that it goes in protected, because an attachment is usually the most
+       sensitive thing on the entry. */
+    pub fn add_attachment(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        data: Vec<u8>,
+    ) -> Result<(), VaultError> {
+        if name.trim().is_empty() {
+            return Err(VaultError::Db("an attachment needs a name".into()));
+        }
+        // Checked through the read side, before taking the mutable borrow.
+        if self
+            .db
+            .entry(*id)
+            .is_some_and(|e| e.attachment_by_name(name).is_some())
+        {
+            return Err(VaultError::Db(format!("{name} is already attached")));
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.add_attachment(name, keepass::db::Value::protected(data));
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    pub fn remove_attachment(&mut self, id: &EntryId, name: &str) -> Result<(), VaultError> {
+        if self
+            .db
+            .entry(*id)
+            .is_none_or(|e| e.attachment_by_name(name).is_none())
+        {
+            return Err(VaultError::EntryNotFound);
+        }
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        /* Through the entry, not through the attachment. `AttachmentMut::
+           remove` clears the back-references it knows about, and a file
+           loaded from disk arrives with those back-references empty — so it
+           dropped the bytes and left the entry pointing at them, which is a
+           panic the next time anything reads the list. */
+        entry.remove_attachment_by_name(name);
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
+    /* Throw away every old version an entry carries. The one thing Sennel
+       could not do about history before: it preserved what KeePassXC wrote
+       and told the user to go there to clear it, which is a strange place
+       for a password manager to leave somebody. */
+    pub fn clear_history(&mut self, id: &EntryId) -> Result<usize, VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        let gone = entry.history.as_ref().map_or(0, |h| h.get_entries().len());
+        if gone == 0 {
+            return Ok(0);
+        }
+        /* Emptied rather than set to None: an entry with no History element
+           and an entry with an empty one read the same to KeePassXC, and
+           keeping the element is the smaller change to the file. */
+        entry.history = Some(keepass::db::History::default());
+        entry.times.last_modification = Some(Times::now());
+        Ok(gone)
+    }
+
+    /* Gone for good: an add that `u` takes back, and `D` on something
+       already in the bin. The one path in Sennel that destroys an entry, and
+       both callers have either just created it or already deleted it once. */
     pub fn expunge_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
-        self.delete_entry(id)
+        let Some(entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        entry.remove();
+        Ok(())
     }
 
     /// Title write for rename undo.
@@ -806,6 +1356,193 @@ impl Vault {
         };
         group.name = title.to_string();
         Ok(())
+    }
+}
+
+/// What is wrong with an entry's password, worst first when one entry has
+/// more than one problem.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Issue {
+    /// No password at all.
+    Empty,
+    /// The same password as this many other entries.
+    Reused(usize),
+    /* Past its own expiry date. Not a weakness in the password — it may be a
+       fine one — but a credential the owner already decided had a shelf life,
+       and the audit is the list of things to go and do. */
+    Expired,
+    /// Fewer bits than a password worth having, by the form's own estimate.
+    Weak(f64),
+}
+
+impl Issue {
+    /// Worst first, so a list sorted by this reads as a to-do list.
+    pub fn rank(self) -> u8 {
+        match self {
+            Issue::Empty => 0,
+            Issue::Reused(_) => 1,
+            /* Above `weak`: an expired credential is a decision somebody
+               already made, where weak is only an estimate disagreeing with
+               them. */
+            Issue::Expired => 2,
+            Issue::Weak(_) => 3,
+        }
+    }
+
+    pub fn say(self) -> String {
+        match self {
+            Issue::Empty => "no password".to_string(),
+            Issue::Reused(n) => format!("reused across {} entries", n + 1),
+            Issue::Expired => "expired".to_string(),
+            Issue::Weak(bits) => format!("~{bits:.0} bits · {}", crate::generator::strength(bits)),
+        }
+    }
+}
+
+/// Below this, the entry form already draws the estimate in `warn`. The audit
+/// uses the same line rather than inventing a second opinion.
+const WEAK_BITS: f64 = 60.0;
+
+/* Everything wrong with the vault's passwords, in one pass. Reuse first
+   because it is the finding that matters most and the one a person cannot
+   possibly spot themselves: a weak password costs one account, a reused one
+   costs every account that shares it.
+
+   Passwords are grouped by hash, not by keeping a map of the plaintext:
+   equality is all this needs, and a table of every password in the vault is
+   not a thing to build when a count will do. SipHash is not a security claim
+   here — a collision would mean one wrong "reused" line, not an exposure. */
+pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    let entries = vault.entry_refs();
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    let digest = |password: &str| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        password.hash(&mut hasher);
+        hasher.finish()
+    };
+    for entry in &entries {
+        let password = entry.password();
+        if !password.is_empty() {
+            *counts.entry(digest(password)).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(EntryId, Issue)> = Vec::new();
+    for entry in &entries {
+        let password = entry.password();
+        let issue = if password.is_empty() {
+            Issue::Empty
+        } else if let Some(others) = counts.get(&digest(password)).filter(|n| **n > 1) {
+            Issue::Reused(others - 1)
+        } else if expired(entry) {
+            Issue::Expired
+        } else {
+            let bits = crate::generator::typed_bits(password);
+            if bits >= WEAK_BITS {
+                continue;
+            }
+            Issue::Weak(bits)
+        };
+        out.push((entry.id(), issue));
+    }
+    /* Worst first, then by title, so the list is stable between openings —
+       a to-do list that reshuffles itself is one nobody works through. */
+    out.sort_by(|a, b| {
+        a.1.rank().cmp(&b.1.rank()).then_with(|| {
+            let name = |id: &EntryId| {
+                vault.get_entry(id).map(|e| e.title().to_lowercase()).unwrap_or_default()
+            };
+            name(&a.0).cmp(&name(&b.0))
+        })
+    });
+    out
+}
+
+/* Every entry as one comparable line. What `convert` checks a rewritten file
+   against, so a format change that silently dropped an entry is caught while
+   the original is still there rather than months later.
+
+   Secrets included, because the point is that they survived unchanged; this
+   never leaves the process. Sorted, because entry order is not something a
+   format change promises to keep. The separator is a control character no
+   field can contain, so two entries cannot collide by concatenation. */
+pub fn inventory(vault: &Vault) -> Vec<String> {
+    let mut out: Vec<String> = vault
+        .entry_refs()
+        .iter()
+        .map(|e| {
+            let group = vault
+                .parent_group_of_entry(&e.id())
+                .map(|g| vault.group_path(&g).join("/"))
+                .unwrap_or_default();
+            [
+                group.as_str(),
+                e.title(),
+                e.username(),
+                e.password(),
+                e.url(),
+                e.notes(),
+            ]
+            .join("\u{1}")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// What a needle found, for a caller with no screen to show a list on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Found {
+    One(EntryId),
+    /// More than one, best first, for a message that names the candidates.
+    Many(Vec<EntryId>),
+    None,
+}
+
+/* Resolving a needle with nobody to ask. The TUI can show a list and let the
+   cursor decide; `sennel get` has one shot, so the rules have to be ones a
+   user can predict:
+
+   an exact title match, case-insensitive, wins outright even when a dozen
+   entries fuzzy-match it — "mail" should find the entry called "mail" and not
+   the one called "mailchimp-api-key". Failing that, a single fuzzy match
+   wins. Anything else is ambiguous and gets listed rather than guessed at.
+
+   Binned entries are not candidates. Copying the password of something
+   deleted last week is the one outcome worth engineering against. */
+pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &str) -> Found {
+    let live: Vec<EntryId> = vault
+        .entry_refs()
+        .iter()
+        .map(|e| e.id())
+        .collect();
+    let exact: Vec<EntryId> = live
+        .iter()
+        .copied()
+        .filter(|id| {
+            vault
+                .get_entry(id)
+                .is_some_and(|e| e.title().eq_ignore_ascii_case(needle))
+        })
+        .collect();
+    if exact.len() == 1 {
+        return Found::One(exact[0]);
+    }
+    let mut hits: Vec<(u16, EntryId)> = live
+        .into_iter()
+        .filter_map(|id| searcher.rank_entry(needle, vault, &id).map(|score| (score, id)))
+        .collect();
+    // Best first, so an ambiguous answer lists the likeliest candidate first.
+    hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    match hits.len() {
+        0 => Found::None,
+        1 => Found::One(hits[0].1),
+        /* Two entries with the same title are ambiguous even when one scores
+           higher: the score is not something the user can see or reason
+           about, so it must not be what picks their password. */
+        _ => Found::Many(hits.into_iter().map(|(_, id)| id).collect()),
     }
 }
 
@@ -846,20 +1583,605 @@ mod tests {
         assert_eq!(kids, vec![banks]);
     }
 
+    /* A group goes to the bin whole. It used to be refused while it held
+       anything, on the grounds that a recursive delete is one keypress from
+       losing a subtree — which stops being true once the keypress is a move
+       that `u` takes back. */
     #[test]
-    fn deleting_a_non_empty_group_refuses_then_succeeds_once_emptied() {
+    fn deleting_a_group_moves_it_and_its_contents_to_the_bin() {
         let mut v = vault();
         let root = v.root_id();
         let g = v.create_group(&root, "Mail").unwrap();
-        v.create_entry(&g, "inbox", "u", "p", "", "").unwrap();
+        let e = v.create_entry(&g, "inbox", "u", "p", "", "").unwrap();
 
-        assert_eq!(v.delete_group(&g), Err(VaultError::GroupNotEmpty));
-        assert!(v.get_group(&g).is_some(), "refused delete still removed it");
+        v.recycle_group(&g).unwrap();
+        let bin = v.recycle_bin_id().expect("no bin was made");
+        assert_eq!(v.get_group(&g).unwrap().parent().unwrap().id(), bin);
+        assert!(v.in_recycle_bin(&g), "the group is not in the bin");
+        // The entry rode along, and counts stop seeing it.
+        assert!(v.is_recycled(&e), "the entry did not follow its group");
+        assert_eq!(v.entry_count(), 0);
 
-        let e = v.entries_in(&g)[0].id();
-        v.delete_entry(&e).unwrap();
-        v.delete_group(&g).unwrap();
+        // Inside the bin, the same key destroys the subtree for good.
+        v.delete_group_tree(&g).unwrap();
         assert!(v.get_group(&g).is_none());
+        assert!(v.get_entry(&e).is_none(), "the subtree survived");
+    }
+
+    /* The bin is the one KeePassXC looks for: a root-level group whose uuid
+       is in the file's own metadata, created on the first delete. */
+    #[test]
+    fn the_first_delete_makes_the_bin_the_format_describes() {
+        let mut v = vault();
+        let root = v.root_id();
+        assert_eq!(v.recycle_bin_id(), None, "a fresh vault has a bin already");
+        let e = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+
+        v.recycle_entry(&e).unwrap();
+        let bin = v.recycle_bin_id().expect("no bin was made");
+        assert_eq!(v.get_group(&bin).unwrap().name, RECYCLE_BIN);
+        assert_eq!(v.get_group(&bin).unwrap().parent().unwrap().id(), root);
+        assert!(v.is_recycled(&e));
+        // Live counts and the global search scope skip it.
+        assert_eq!(v.entry_count(), 0);
+        assert!(v.entry_refs().is_empty());
+
+        // A second delete reuses the bin rather than making another.
+        let f = v.create_entry(&root, "chat", "u", "p", "", "").unwrap();
+        v.recycle_entry(&f).unwrap();
+        assert_eq!(v.recycle_bin_id(), Some(bin));
+        assert_eq!(v.groups_in(&root).len(), 1);
+
+        // And undo is a move home, not a resurrection: the id survives.
+        v.move_entry(&e, &root).unwrap();
+        assert!(!v.is_recycled(&e));
+        assert_eq!(v.entry_count(), 1);
+    }
+
+    /* The bin survives a round trip, so KeePassXC opens the file and shows
+       the deleted entry under Recycle Bin rather than losing it. */
+    #[test]
+    fn the_bin_round_trips_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("sennel-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bin.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let e = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        v.recycle_entry(&e).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        let bin = back.recycle_bin_id().expect("the bin did not survive the save");
+        assert_eq!(back.get_group(&bin).unwrap().name, RECYCLE_BIN);
+        assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
+        assert_eq!(back.entry_count(), 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* The fixture is a KeePassXC-written 3.1 file, which opens and can never
+       be written. Sennel used to find that out at the first autosave, ten
+       minutes into editing, with nowhere for the work to go. */
+    #[test]
+    fn an_older_kdbx_opens_and_says_it_cannot_be_written() {
+        let path = std::path::Path::new("tests/fixtures/keepassxc3.kdbx");
+        let mut v = Vault::open(path, "sennel-fixture", None).expect("the fixture did not open");
+        assert!(!v.writable(), "the fixture is writable now, so this test is wrong");
+        assert_eq!(v.format(), "KDBX 3.1");
+
+        /* Refused by name rather than by the crate's "Unsupported database
+           version", and refused before the file is touched. */
+        let before = std::fs::metadata(path).unwrap().len();
+        let err = v.save().unwrap_err();
+        assert_eq!(err, VaultError::ReadOnlyFormat("KDBX 3.1".into()));
+        assert!(err.to_string().contains("KDBX 4"), "{err}");
+        // `^s`, the deliberate overwrite, is refused for the same reason.
+        assert_eq!(v.save_over().unwrap_err(), VaultError::ReadOnlyFormat("KDBX 3.1".into()));
+        assert_eq!(std::fs::metadata(path).unwrap().len(), before, "the fixture was written");
+
+        // A vault Sennel made is KDBX 4, and writable.
+        let dir = std::env::temp_dir().join(format!("sennel-fmt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("mine.kdbx");
+        let mut fresh = Vault::new();
+        fresh.save_as(&mine, "pw", None).unwrap();
+        let fresh = Vault::open(&mine, "pw", None).unwrap();
+        assert!(fresh.writable());
+        assert!(fresh.format().starts_with("KDBX 4"), "{}", fresh.format());
+        std::fs::remove_file(&mine).ok();
+    }
+
+    /* Not a test: a way to get a real KDBX 4 file to point the binary at,
+       since the only vault in the repo is a 3.1 fixture that cannot be
+       written. `cargo test -- --ignored make_a_vault_to_smoke_test_against`
+       then `sennel import ... --db /tmp/sennel-smoke.kdbx`, password
+       `smoke-pw`. Ignored, so it never runs in a normal pass. */
+    #[test]
+    #[ignore]
+    fn make_a_vault_to_smoke_test_against() {
+        let mut v = Vault::new();
+        let root = v.root_id();
+        /* One of each thing that only shows up on a real screen: an expired
+           entry, a live one, and a code. */
+        let stale = v.create_entry(&root, "old-cert", "octo", "Xq7!vm2Zt4pLr9Wd6Ks1", "", "").unwrap();
+        v.set_expiry(&stale, Some((chrono::Utc::now() - chrono::Duration::days(3)).naive_utc()))
+            .unwrap();
+        let soon = v.create_entry(&root, "renews-soon", "octo", "Zt4pLr9Wd6Ks1Xq7vm2A", "", "").unwrap();
+        v.set_expiry(&soon, Some((chrono::Utc::now() + chrono::Duration::days(30)).naive_utc()))
+            .unwrap();
+        v.save_as(std::path::Path::new("/tmp/sennel-smoke.kdbx"), "smoke-pw", None).unwrap();
+    }
+
+    /* The two pieces `convert` leans on. A conversion is the one operation
+       where a bug costs the whole vault, so "it worked" has to mean the file
+       was read back and matched — and both halves of that are tested here,
+       where a mismatch can actually be constructed. */
+    #[test]
+    fn a_copy_opens_with_the_original_key_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("sennel-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (home, copy) = (dir.join("home.kdbx"), dir.join("copy.kdbx"));
+        for at in [&home, &copy] {
+            std::fs::remove_file(at).ok();
+        }
+        let mut v = vault();
+        let root = v.root_id();
+        v.create_entry(&root, "mail", "octo", "pw", "", "").unwrap();
+        v.save_as(&home, "master", None).unwrap();
+
+        /* No password argument: the copy carries the key the original was
+           opened with, which is what lets `convert` avoid asking twice. */
+        v.save_copy(&copy).unwrap();
+        let back = v.open_copy(&copy).expect("the copy did not open");
+        assert_eq!(inventory(&back), inventory(&v));
+        // And it really is that password, not merely "some file that parses".
+        assert!(Vault::open(&copy, "master", None).is_ok());
+        assert!(Vault::open(&copy, "wrong", None).is_err());
+
+        /* `open_copy` is a real decrypt, so a file written under a different
+           key is refused rather than waved through. */
+        let other = dir.join("other.kdbx");
+        std::fs::remove_file(&other).ok();
+        let mut stranger = vault();
+        stranger.save_as(&other, "different", None).unwrap();
+        assert!(v.open_copy(&other).is_err(), "a foreign file verified");
+
+        // The original is still where it was, pointing at its own path.
+        assert_eq!(v.path(), Some(home.as_path()));
+        for at in [&home, &copy, &other] {
+            std::fs::remove_file(at).ok();
+        }
+    }
+
+    /* The comparison has to notice a difference, or "verified" means nothing.
+       Every field that goes into a line, one at a time, there and back. */
+    #[test]
+    fn the_inventory_notices_anything_that_changed() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "pw", "http://x", "note").unwrap();
+        let base = inventory(&v);
+        assert_eq!(base.len(), 1);
+        // The same vault twice is the same answer, or a good convert would fail.
+        assert_eq!(inventory(&v), base);
+
+        // (title, user, password, url, notes) — one field off in each.
+        let variants = [
+            ("MAIL", "octo", "pw", "http://x", "note"),
+            ("mail", "other", "pw", "http://x", "note"),
+            ("mail", "octo", "new", "http://x", "note"),
+            ("mail", "octo", "pw", "http://y", "note"),
+            ("mail", "octo", "pw", "http://x", "other"),
+        ];
+        for (title, user, password, url, notes) in variants {
+            v.update_entry(&id, title, user, Some(password), url, notes).unwrap();
+            assert_ne!(inventory(&v), base, "a changed {title}/{user}/{url} went unnoticed");
+            v.update_entry(&id, "mail", "octo", Some("pw"), "http://x", "note").unwrap();
+            assert_eq!(inventory(&v), base, "the revert did not land");
+        }
+
+        // A moved entry counts: the group path is part of the line.
+        let elsewhere = v.create_group(&root, "Elsewhere").unwrap();
+        v.move_entry(&id, &elsewhere).unwrap();
+        assert_ne!(inventory(&v), base, "a moved entry read as unchanged");
+        v.move_entry(&id, &root).unwrap();
+        assert_eq!(inventory(&v), base);
+
+        // And a dropped entry, which is the failure this exists to catch.
+        v.expunge_entry(&id).unwrap();
+        assert!(inventory(&v).is_empty());
+    }
+
+    /* Sennel writes no history, so the only way to get one in a test is the
+       way KeePassXC gets one: edit through the crate's tracking API, which
+       pushes the pre-edit state into the entry's history. */
+    fn with_history(v: &mut Vault, id: &EntryId, passwords: &[&str]) {
+        for pw in passwords {
+            let mut entry = v.db.entry_mut(*id).expect("no entry");
+            let mut tracked = entry.track_changes();
+            tracked.set_protected(PASSWORD, *pw);
+        }
+    }
+
+    /* An entry imported from KeePassXC arrives holding every password it ever
+       had. Invisible is the wrong way to hold that: you cannot decide whether
+       to keep something you cannot see. */
+    #[test]
+    fn history_reads_newest_first_and_clears_in_one_go() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "first-pw", "", "").unwrap();
+        with_history(&mut v, &id, &["second-pw", "third-pw"]);
+
+        let versions = crate::vault::history(&v.get_entry(&id).unwrap());
+        assert_eq!(versions.len(), 2, "{versions:?}");
+        // Newest first: index 0 is the version just before the current one.
+        assert_eq!(versions[0].password, "second-pw");
+        assert_eq!(versions[1].password, "first-pw");
+        assert_eq!(versions[0].username, "octo");
+        // The live entry is not one of them.
+        assert_eq!(v.get_entry(&id).unwrap().password(), "third-pw");
+
+        /* And Sennel's own edits add none: that is the promise the security
+           page makes, so it is the one worth a test. */
+        v.update_entry(&id, "mail", "octo", Some("fourth-pw"), "", "").unwrap();
+        assert_eq!(crate::vault::history(&v.get_entry(&id).unwrap()).len(), 2);
+
+        let gone = v.clear_history(&id).unwrap();
+        assert_eq!(gone, 2);
+        assert!(crate::vault::history(&v.get_entry(&id).unwrap()).is_empty());
+        assert_eq!(v.get_entry(&id).unwrap().password(), "fourth-pw", "the live entry changed");
+        // Clearing an entry with nothing to clear is not an error.
+        assert_eq!(v.clear_history(&id), Ok(0));
+    }
+
+    /* Cleared has to mean cleared in the file, or the old passwords are still
+       there for anyone who opens it with another client. */
+    #[test]
+    fn cleared_history_stays_cleared_through_a_save() {
+        let dir = std::env::temp_dir().join(format!("sennel-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hist.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "mail", "octo", "old-pw", "", "").unwrap();
+        with_history(&mut v, &id, &["new-pw"]);
+        v.save_as(&path, "pw", None).unwrap();
+
+        // It survives a round trip while it is there...
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(crate::vault::history(&back.get_entry(&id).unwrap()).len(), 1);
+
+        let mut back = back;
+        back.clear_history(&id).unwrap();
+        back.save().unwrap();
+        let after = Vault::open(&path, "pw", None).unwrap();
+        assert!(
+            crate::vault::history(&after.get_entry(&id).unwrap()).is_empty(),
+            "the old password is still in the file"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* These two carry decrypted secrets out of the vault — a custom field's
+       value and an old password — so they wipe like the typed boxes do.
+
+       Checked on a live value, not a freed one. Reading a freed allocation
+       proves nothing either way: the allocator writes its own bookkeeping
+       into the block, so the secret is usually gone from it whether or not
+       anybody wiped it. (The older zeroize tests in app.rs do read freed
+       memory, and pass with `zeroize` swapped for `clear` — they are not
+       measuring what they claim to.) */
+    #[test]
+    fn the_screens_that_hold_secrets_wipe_them() {
+        let mut field = Extra::Field {
+            name: "recovery".into(),
+            value: "recovery-8888-4444".repeat(8),
+            secret: true,
+        };
+        let (ptr, cap) = match &field {
+            Extra::Field { value, .. } => (value.as_ptr(), value.capacity()),
+            Extra::File { .. } => unreachable!(),
+        };
+        field.wipe();
+        // SAFETY: still owned and still allocated; `wipe` empties the String
+        // but leaves the capacity, which is what makes this readable at all.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(8).any(|w| w == b"recovery"),
+            "a custom field value survived the wipe"
+        );
+        assert!(bytes.iter().all(|b| *b == 0), "the buffer was not zeroed");
+
+        let mut version = Version {
+            at: 0,
+            title: "mail".into(),
+            username: "octo".into(),
+            password: "old-password-nobody-should-keep".repeat(8),
+            modified: None,
+        };
+        let (ptr, cap) = (version.password.as_ptr(), version.password.capacity());
+        version.wipe();
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(8).any(|w| w == b"password"),
+            "an old password survived the wipe"
+        );
+        assert!(bytes.iter().all(|b| *b == 0), "the buffer was not zeroed");
+    }
+
+    /* Both halves of the expiry matter: `expires` is the switch and `expiry`
+       is the date, and a date with the switch off is one somebody set and
+       then turned off. Reading only the date would mark those expired. */
+    #[test]
+    fn an_expiry_needs_both_the_switch_and_the_date() {
+        use chrono::{Duration, Utc};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
+        /* A fn, not a closure: an inferred closure return ties the borrow of
+           `v` to the closure itself, and each call here wants its own. */
+        fn entry<'a>(v: &'a Vault, id: &EntryId) -> EntryRef<'a> {
+            v.get_entry(id).expect("the entry went missing")
+        }
+
+        // A fresh entry has no expiry at all.
+        assert_eq!(expires_at(&entry(&v, &id)), None);
+        assert!(!expired(&entry(&v, &id)));
+
+        let yesterday = (Utc::now() - Duration::days(1)).naive_utc();
+        v.set_expiry(&id, Some(yesterday)).unwrap();
+        assert_eq!(expires_at(&entry(&v, &id)), Some(yesterday));
+        assert!(expired(&entry(&v, &id)), "a past date did not read as expired");
+
+        let tomorrow = (Utc::now() + Duration::days(1)).naive_utc();
+        v.set_expiry(&id, Some(tomorrow)).unwrap();
+        assert!(!expired(&entry(&v, &id)), "a future date read as expired");
+
+        /* Turning it off keeps the date, the way KeePassXC does: unticking
+           the box should not throw away what you would tick it back on with. */
+        v.set_expiry(&id, None).unwrap();
+        assert_eq!(expires_at(&entry(&v, &id)), None, "the switch was ignored");
+        assert!(!expired(&entry(&v, &id)));
+        assert_eq!(entry(&v, &id).times.expiry, Some(tomorrow), "the date was thrown away");
+
+        // A date with the switch never set is not an expiry either.
+        let mut bare = vault();
+        let root = bare.root_id();
+        let id = bare.create_entry(&root, "x", "u", "p", "", "").unwrap();
+        if let Some(mut e) = bare.db.entry_mut(id) {
+            e.times.expiry = Some(yesterday);
+            e.times.expires = None;
+        }
+        assert!(!expired(&bare.get_entry(&id).unwrap()));
+    }
+
+    /* The whole point is that KeePassXC and Sennel agree about which entries
+       have gone stale, so it has to survive the file. */
+    #[test]
+    fn an_expiry_round_trips_through_the_file() {
+        use chrono::{Duration, Utc};
+        let dir = std::env::temp_dir().join(format!("sennel-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exp.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
+        /* Whole seconds: KDBX stores a second-resolution timestamp, so a
+           sub-second value would not survive and the test would be asserting
+           something the format cannot do. */
+        use chrono::Timelike;
+        let when = (Utc::now() - Duration::days(2))
+            .naive_utc()
+            .with_nanosecond(0)
+            .expect("zero is a valid nanosecond");
+        v.set_expiry(&id, Some(when)).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(expires_at(&back.get_entry(&id).unwrap()), Some(when));
+        assert!(expired(&back.get_entry(&id).unwrap()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* Custom fields and attachments used to be a count and nothing else.
+       These are the reads the `F` screen is built on. */
+    #[test]
+    fn the_extras_list_holds_fields_and_files_with_their_values() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "vpn", "u", "p", "", "notes").unwrap();
+        v.set_field(&id, "recovery", "8888-4444", true).unwrap();
+        v.set_field(&id, "account", "AC-9", false).unwrap();
+        v.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+
+        let rows = crate::vault::extra_rows(&v.get_entry(&id).unwrap());
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        /* Fields first, then files, each alphabetical: a list that is read
+           cannot reorder itself between openings. */
+        assert_eq!(rows[0].name(), "account");
+        assert_eq!(rows[1].name(), "recovery");
+        assert_eq!(rows[2].name(), "key.pem");
+        assert_eq!(
+            rows[1],
+            crate::vault::Extra::Field {
+                name: "recovery".into(),
+                value: "8888-4444".into(),
+                secret: true,
+            }
+        );
+        // A field added by hand goes in protected; one asked for plainly does not.
+        assert!(matches!(&rows[0], crate::vault::Extra::Field { secret: false, .. }));
+        assert_eq!(rows[2], crate::vault::Extra::File { name: "key.pem".into(), bytes: 15 });
+
+        // The five fixed rows keep their own editor and never appear here.
+        for standard in crate::vault::STANDARD {
+            assert!(rows.iter().all(|r| r.name() != standard), "{standard} leaked in");
+            assert!(v.set_field(&id, standard, "x", false).is_err(), "{standard} was writable");
+        }
+    }
+
+    /* The bytes have to survive the file, or "attachment" is a label on
+       something nobody can get back. */
+    #[test]
+    fn attachments_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("sennel-att-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("att.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "vpn", "u", "p", "", "").unwrap();
+        let data: Vec<u8> = (0u8..=255).collect();
+        v.add_attachment(&id, "blob.bin", data.clone()).unwrap();
+        v.set_field(&id, "recovery", "8888", true).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(back.attachment_bytes(&id, "blob.bin"), Some(data));
+        let rows = crate::vault::extra_rows(&back.get_entry(&id).unwrap());
+        assert!(rows.iter().any(|r| r.name() == "recovery"));
+        // Twice under one name would be two files nobody can tell apart.
+        let mut back = back;
+        assert!(back.add_attachment(&id, "blob.bin", vec![1]).is_err());
+        back.remove_attachment(&id, "blob.bin").unwrap();
+        assert_eq!(back.attachment_bytes(&id, "blob.bin"), None);
+        back.remove_field(&id, "recovery").unwrap();
+        assert!(crate::vault::extra_rows(&back.get_entry(&id).unwrap()).is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /* A file leaving the vault loses every protection the vault gave it, so
+       the least the write can do is not hand it to the rest of the machine. */
+    #[test]
+    fn an_extracted_attachment_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sennel-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("out.bin");
+        std::fs::remove_file(&at).ok();
+        crate::vault::write_owner_only(&at, b"secret").unwrap();
+        let mode = std::fs::metadata(&at).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        // Exclusive: a symlink planted at the path cannot redirect the write.
+        assert!(crate::vault::write_owner_only(&at, b"again").is_err());
+        std::fs::remove_file(&at).ok();
+    }
+
+    /* Reuse is the finding a person cannot possibly spot themselves, and the
+       one that costs more than one account when it bites. */
+    #[test]
+    fn the_audit_finds_reused_weak_and_empty_passwords() {
+        let mut v = vault();
+        let root = v.root_id();
+        let shared = "correct-horse";
+        let a = v.create_entry(&root, "aaa", "u", shared, "", "").unwrap();
+        let b = v.create_entry(&root, "bbb", "u", shared, "", "").unwrap();
+        let weak = v.create_entry(&root, "ccc", "u", "hunter2", "", "").unwrap();
+        let empty = v.create_entry(&root, "ddd", "u", "", "", "").unwrap();
+        // Long, mixed and unique: nothing to say about it.
+        let fine = v
+            .create_entry(&root, "eee", "u", "Xq7!vm2Zt4&pLr9Wd6*Ks1", "", "")
+            .unwrap();
+
+        let found = audit(&v);
+        let issue = |id: &EntryId| found.iter().find(|(e, _)| e == id).map(|(_, i)| *i);
+        // Both sides of a shared password are named, each counting the other.
+        assert_eq!(issue(&a), Some(Issue::Reused(1)));
+        assert_eq!(issue(&b), Some(Issue::Reused(1)));
+        assert!(matches!(issue(&weak), Some(Issue::Weak(_))));
+        assert_eq!(issue(&empty), Some(Issue::Empty));
+        assert_eq!(issue(&fine), None, "a good password was flagged");
+
+        /* Worst first, and stable: a to-do list that reshuffles itself
+           between openings is one nobody works through. */
+        let order: Vec<u8> = found.iter().map(|(_, i)| i.rank()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "the list is not worst-first");
+        assert_eq!(audit(&v), found, "two runs disagreed");
+
+        // An empty password is not "reused" with every other empty one.
+        v.create_entry(&root, "fff", "u", "", "", "").unwrap();
+        assert_eq!(
+            audit(&v).iter().filter(|(_, i)| matches!(i, Issue::Reused(_))).count(),
+            2,
+            "empty passwords were counted as reuse"
+        );
+    }
+
+    /* A deleted entry is not a password worth changing, and telling somebody
+       to go fix one is how an audit loses their trust. */
+    #[test]
+    fn the_audit_leaves_the_recycle_bin_out() {
+        let mut v = vault();
+        let root = v.root_id();
+        let live = v.create_entry(&root, "live", "u", "hunter2", "", "").unwrap();
+        let dead = v.create_entry(&root, "dead", "u", "hunter2", "", "").unwrap();
+        // Two entries share it, so both are reuse while both are live.
+        assert_eq!(audit(&v).len(), 2);
+
+        v.recycle_entry(&dead).unwrap();
+        let found = audit(&v);
+        assert_eq!(found.len(), 1, "the bin is still being audited");
+        assert_eq!(found[0].0, live);
+        /* And the survivor stops being "reused": the only other copy was the
+           one that was thrown away. */
+        assert!(matches!(found[0].1, Issue::Weak(_)), "{:?}", found[0].1);
+    }
+
+    /* `get` has one shot and nobody to ask, so the rules have to be ones a
+       user can predict before they type. */
+    #[test]
+    fn a_needle_resolves_to_one_entry_or_says_why_not() {
+        let mut v = vault();
+        let root = v.root_id();
+        let mail = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        let chimp = v.create_entry(&root, "mailchimp-api-key", "u", "p", "", "").unwrap();
+        let mut s = crate::search::Searcher::new();
+
+        /* An exact title wins outright, even though "mail" fuzzy-matches the
+           longer one too — otherwise the entry actually called "mail" would
+           be unreachable by its own name. */
+        assert_eq!(resolve(&v, &mut s, "mail"), Found::One(mail));
+        assert_eq!(resolve(&v, &mut s, "MAIL"), Found::One(mail), "case mattered");
+        // A single fuzzy hit is unambiguous even without an exact title.
+        assert_eq!(resolve(&v, &mut s, "chimp"), Found::One(chimp));
+        assert_eq!(resolve(&v, &mut s, "nothinglikethis"), Found::None);
+
+        // Two hits and no exact title: listed, never guessed at.
+        let Found::Many(ids) = resolve(&v, &mut s, "mai") else {
+            panic!("an ambiguous needle picked one");
+        };
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&mail) && ids.contains(&chimp));
+
+        /* Two entries with the same title stay ambiguous: the score that
+           separates them is not something the user can see. */
+        let twin = v.create_entry(&root, "mail", "other", "p", "", "").unwrap();
+        let Found::Many(ids) = resolve(&v, &mut s, "mail") else {
+            panic!("two entries named mail resolved to one");
+        };
+        assert!(ids.contains(&mail) && ids.contains(&twin));
+    }
+
+    /* Copying the password of something deleted last week is the outcome
+       worth engineering against, so the bin is not a candidate. */
+    #[test]
+    fn a_needle_never_resolves_into_the_recycle_bin() {
+        let mut v = vault();
+        let root = v.root_id();
+        let live = v.create_entry(&root, "mail", "u", "live-pw", "", "").unwrap();
+        let dead = v.create_entry(&root, "mail-old", "u", "dead-pw", "", "").unwrap();
+        v.recycle_entry(&dead).unwrap();
+        let mut s = crate::search::Searcher::new();
+
+        assert_eq!(resolve(&v, &mut s, "mail"), Found::One(live));
+        // Even asked for by its exact name, a binned entry is not there.
+        assert_eq!(resolve(&v, &mut s, "mail-old"), Found::None);
+
+        // And once it is out of the bin it answers again.
+        v.move_entry(&dead, &root).unwrap();
+        assert_eq!(resolve(&v, &mut s, "mail-old"), Found::One(dead));
     }
 
     #[test]
@@ -867,7 +2189,8 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         let other = v.create_group(&root, "Other").unwrap();
-        assert_eq!(v.delete_group(&root), Err(VaultError::CannotDeleteRoot));
+        assert_eq!(v.delete_group_tree(&root), Err(VaultError::CannotDeleteRoot));
+        assert_eq!(v.recycle_group(&root), Err(VaultError::CannotDeleteRoot));
         assert_eq!(
             v.move_group(&root, &other),
             Err(VaultError::CannotMoveRoot)
@@ -915,9 +2238,9 @@ mod tests {
         assert_eq!(v.parent_group_of_entry(&e), Some(root));
         assert!(v.entries_in(&g).is_empty());
 
-        v.delete_entry(&e).unwrap();
+        v.expunge_entry(&e).unwrap();
         assert!(v.get_entry(&e).is_none());
-        assert_eq!(v.delete_entry(&e), Err(VaultError::EntryNotFound));
+        assert_eq!(v.expunge_entry(&e), Err(VaultError::EntryNotFound));
     }
 
     #[test]
