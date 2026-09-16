@@ -71,11 +71,91 @@ impl_entry_ext!(Entry);
 impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
+/// The raw `otp` field, which is an `otpauth://` URL when there is one.
+pub fn raw_otp(entry: &EntryRef<'_>) -> Option<String> {
+    entry.get_raw_otp_value().map(str::to_string)
+}
+
+/* What a site gives you is either a long `otpauth://` URL (behind the QR
+   code) or a run of base32 with spaces in it ("JBSW Y3DP EHPK 3PXP"). Both
+   have to work: retyping the second into the first by hand is exactly the
+   kind of chore a password manager exists to absorb. The URL is what KDBX
+   stores, so a bare secret gets wrapped in one. */
+pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("nothing to read".into());
+    }
+    if input.starts_with("otpauth://") {
+        let url = with_digits(input);
+        return url
+            .parse::<keepass::db::TOTP>()
+            .map(|_| url)
+            .map_err(|e| format!("{e}"));
+    }
+    /* Groupings and hyphens are how the secret is printed, never part of it,
+       and base32 is case-insensitive. */
+    let secret: String = input
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect::<String>()
+        .to_uppercase();
+    if secret.is_empty() {
+        return Err("nothing to read".into());
+    }
+    let label = if username.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}:{username}")
+    };
+    /* Digits and period spelled out rather than left to a default: see
+       `with_digits` for why the default is the one thing here that cannot be
+       left unsaid. */
+    let url = format!(
+        "otpauth://totp/{}?secret={secret}&digits=6&period=30",
+        urlish(&label)
+    );
+    /* Parsed before it is stored: a seed that cannot produce a code must be
+       refused while the form is still open and the text still on screen. */
+    url.parse::<keepass::db::TOTP>()
+        .map(|_| url)
+        .map_err(|_| "not a base32 secret or an otpauth:// url".to_string())
+}
+
+/* RFC 6238 and every authenticator app treat six digits as the default when
+   an `otpauth://` url does not say — the keepass crate treats it as eight, so
+   a url written by a site that left `digits` out would produce codes that are
+   the right secret and the wrong length. Spelled out on the way in and on the
+   way to the screen, and never by rewriting what is stored. */
+fn with_digits(url: &str) -> String {
+    if url.contains("digits=") || !url.contains('?') {
+        return url.to_string();
+    }
+    format!("{url}&digits=6")
+}
+
+/// Percent-encodes what a label may hold. Small by hand: the only characters
+/// a title realistically brings are spaces, slashes and the odd accent.
+fn urlish(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// The one-time code an entry carries, if it carries one. KeePassXC writes
 /// `otp` as a field; without this an entry that has one looks like an entry
 /// that does not, and the user goes back to their phone.
 pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
-    let code = entry.get_otp().ok()?.value_now().ok()?;
+    let raw = entry.get_raw_otp_value()?;
+    let totp: keepass::db::TOTP = with_digits(raw).parse().ok()?;
+    let code = totp.value_now().ok()?;
     Some((code.code, code.valid_for.as_secs()))
 }
 
@@ -633,6 +713,23 @@ impl Vault {
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
        here to restore them. */
+    /* The `otp` field, set or cleared. Protected, like the password: it is a
+       seed that mints codes forever, so it must not sit in the file in the
+       clear. */
+    pub fn set_otp(&mut self, id: &EntryId, url: Option<&str>) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match url {
+            Some(url) => entry.set_protected("otp", url),
+            None => {
+                entry.fields.remove("otp");
+            }
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+
     /// Swap an entry wholesale — the original timestamps ride along, which
     /// an update_entry-based undo would not preserve.
     pub fn replace_entry(&mut self, entry: &Entry) -> Result<(), VaultError> {
@@ -888,6 +985,79 @@ mod tests {
     /* Sennel autosaves after every change, so a vault that has moved on under
        us must refuse the write: the alternative is this session silently
        winning every race with KeePassXC or a sync client. */
+    /* What a site hands over is either the long url behind its QR code or a
+       run of base32 with spaces in it. Both have to reach the same stored
+       url, and anything that cannot mint a code has to be refused before it
+       is written. */
+    #[test]
+    fn a_seed_is_taken_as_a_url_or_as_the_printed_secret() {
+        /* A url that leaves `digits` out gets it spelled in: the crate would
+           otherwise mint eight digits where the site expects six. */
+        let url = totp_url("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP", "x", "y").unwrap();
+        assert_eq!(url, "otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&digits=6");
+
+        // Printed with groupings, lowercase, hyphenated: all the same secret.
+        let from_print = totp_url("jbsw y3dp-ehpk 3pxp", "Bank", "me").unwrap();
+        assert!(from_print.starts_with("otpauth://totp/Bank:me?secret="), "{from_print}");
+        assert!(from_print.contains("secret=JBSWY3DPEHPK3PXP"), "{from_print}");
+        assert!(from_print.contains("digits=6"), "{from_print}");
+
+        // And both produce the same six digits.
+        let a: keepass::db::TOTP = url.parse().unwrap();
+        let b: keepass::db::TOTP = from_print.parse().unwrap();
+        assert_eq!(a.value_now().unwrap().code, b.value_now().unwrap().code);
+        assert_eq!(a.value_now().unwrap().code.len(), 6, "not six digits");
+
+        // Nonsense is refused rather than stored as a code that never works.
+        assert!(totp_url("not base32 at all!!", "x", "").is_err());
+        assert!(totp_url("otpauth://totp/x?issuer=nobody", "x", "").is_err());
+        assert!(totp_url("   ", "x", "").is_err());
+    }
+
+    /* An entry written by something that left `digits` out still reads as six
+       digits here, without rewriting what is in the file. */
+    #[test]
+    fn a_url_without_digits_still_reads_as_six() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "Bank", "me", "pw", "", "").unwrap();
+        v.set_otp(&id, Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP"))
+            .unwrap();
+        let entry = v.get_entry(&id).unwrap();
+        let (code, _) = totp_now(&entry).expect("no code");
+        assert_eq!(code.len(), 6, "{code}");
+        // And the file still holds exactly what was put in it.
+        assert_eq!(
+            raw_otp(&entry).as_deref(),
+            Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP")
+        );
+    }
+
+    /* Set, read back, and cleared — stored protected, because the seed mints
+       codes forever while a code is worth thirty seconds. */
+    #[test]
+    fn an_entry_takes_and_drops_its_one_time_secret() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "Bank", "me", "pw", "", "").unwrap();
+        assert!(raw_otp(&v.get_entry(&id).unwrap()).is_none());
+
+        let url = totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
+        v.set_otp(&id, Some(&url)).unwrap();
+        let entry = v.get_entry(&id).unwrap();
+        assert_eq!(raw_otp(&entry).as_deref(), Some(url.as_str()));
+        let (code, left) = totp_now(&entry).expect("no code from a good seed");
+        assert_eq!(code.len(), 6);
+        assert!(left <= 30 && left > 0, "{left}");
+        assert!(
+            entry.fields.get("otp").is_some_and(keepass::db::Value::is_protected),
+            "the seed was stored in the clear"
+        );
+
+        v.set_otp(&id, None).unwrap();
+        assert!(raw_otp(&v.get_entry(&id).unwrap()).is_none());
+    }
+
     #[test]
     fn a_file_written_by_somebody_else_refuses_the_next_save() {
         let file = Temp::new("conflict");

@@ -66,6 +66,9 @@ pub enum FormField {
     Username,
     Password,
     Url,
+    /// The one-time seed: an `otpauth://` url, or the base32 a site prints
+    /// beside its QR code.
+    Otp,
     Notes,
 }
 
@@ -80,6 +83,19 @@ pub enum FormKind {
 /* The modal entry editor. Values are plain Strings here: the password leaves
    ProtectedString only while the user is literally looking at it, and the
    form is closed (or the app exits) in every other state. */
+impl Form {
+    /* One latch per secret box: empty means "keep what is stored" only while
+       the box has not been touched, so backspacing one empty clears it and
+       never looking at it keeps it. */
+    fn touch_secret(&mut self) {
+        match self.field {
+            FormField::Password => self.password_touched = true,
+            FormField::Otp => self.otp_touched = true,
+            _ => {}
+        }
+    }
+}
+
 pub struct Form {
     pub kind: FormKind,
     pub field: FormField,
@@ -87,6 +103,9 @@ pub struct Form {
     pub username: String,
     pub password: String,
     pub url: String,
+    /// Typed one-time seed. Empty and untouched keeps whatever the entry
+    /// already has, the same latch the password box uses.
+    pub otp: String,
     pub notes: String,
     /// Char index into the focused box, same rule as the unlock caret.
     pub caret: usize,
@@ -95,6 +114,10 @@ pub struct Form {
        not to keep: so one keystroke in the box flips this latch, and submit
        reads it rather than guessing from emptiness. */
     pub password_touched: bool,
+    pub otp_touched: bool,
+    /// Whether this entry already carries a code, so the box can say that
+    /// leaving it empty keeps it rather than that there is nothing there.
+    pub had_otp: bool,
     /* Whether the password box shows what it holds. Off by default and per
        form: `^s` generates into a masked box, and a secret you cannot read is
        one you cannot check before saving. */
@@ -1773,6 +1796,9 @@ impl App {
             notes: String::new(),
             caret: 0,
             password_touched: false,
+            otp: String::new(),
+            otp_touched: false,
+            had_otp: false,
             reveal: false,
         });
     }
@@ -1796,6 +1822,12 @@ impl App {
             notes: entry.notes().to_string(),
             caret: entry.title().chars().count(),
             password_touched: false,
+            /* The stored seed never prefills the box: it is a secret, and a
+               masked run of bullets forty characters long teaches nobody
+               anything. Empty-and-untouched keeps it, the password's rule. */
+            otp: String::new(),
+            otp_touched: false,
+            had_otp: crate::vault::raw_otp(&entry).is_some(),
             reveal: false,
         });
     }
@@ -1855,6 +1887,7 @@ impl App {
             FormField::Username,
             FormField::Password,
             FormField::Url,
+            FormField::Otp,
             FormField::Notes,
         ];
         let at = order.iter().position(|f| *f == form.field).unwrap_or(0);
@@ -1915,9 +1948,7 @@ impl App {
         value.insert(at, c);
         let form = self.form.as_mut().expect("just inserted");
         form.caret += 1;
-        if form.field == FormField::Password {
-            form.password_touched = true;
-        }
+        form.touch_secret();
     }
 
     pub fn form_backspace(&mut self) {
@@ -1934,9 +1965,7 @@ impl App {
         value.remove(prev);
         let form = self.form.as_mut().expect("backspacing");
         form.caret = caret - 1;
-        if form.field == FormField::Password {
-            form.password_touched = true;
-        }
+        form.touch_secret();
     }
 
     pub fn form_delete(&mut self) {
@@ -1948,9 +1977,7 @@ impl App {
         if has_tail {
             self.active_form_value().remove(at);
             let form = self.form.as_mut().expect("deleting");
-            if form.field == FormField::Password {
-                form.password_touched = true;
-            }
+            form.touch_secret();
         }
     }
 
@@ -1975,9 +2002,7 @@ impl App {
         self.active_form_value().clear();
         let form = self.form.as_mut().expect("clearing");
         form.caret = 0;
-        if form.field == FormField::Password {
-            form.password_touched = true;
-        }
+        form.touch_secret();
     }
 
     /* The same word delete the unlock box takes. Deletes back to the word
@@ -1992,9 +2017,7 @@ impl App {
         self.active_form_value().drain(start..at);
         let form = self.form.as_mut().expect("killing a word");
         form.caret = form_field_value_ref(form, form.field)[..start].chars().count();
-        if form.field == FormField::Password {
-            form.password_touched = true;
-        }
+        form.touch_secret();
     }
 
     /* Enter on the form: write through to the vault and autosave. The title
@@ -2014,6 +2037,26 @@ impl App {
                 self.form.as_ref().unwrap().title.chars().count();
             return;
         }
+        /* The seed is checked before anything is written: a secret that
+           cannot mint a code is worse than no secret at all, because the
+           entry then looks set up and answers with nothing. */
+        let otp: Option<Option<String>> = if !form.otp_touched {
+            None
+        } else if form.otp.trim().is_empty() {
+            Some(None)
+        } else {
+            match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
+                Ok(url) => Some(Some(url)),
+                Err(why) => {
+                    self.warn(format!("{why}  ·  the form stays open"));
+                    self.form = Some(form);
+                    let form = self.form.as_mut().expect("just put back");
+                    form.field = FormField::Otp;
+                    form.caret = form.otp.chars().count();
+                    return;
+                }
+            }
+        };
         let result = match form.kind {
             FormKind::Add => {
                 let group = self.group_cursor;
@@ -2025,7 +2068,12 @@ impl App {
                 };
                 vault
                     .create_entry(&group, &form.title, &form.username, &form.password, &form.url, &form.notes)
-                    .map(Some)
+                    .map(|id| {
+                        if let Some(Some(url)) = otp.as_ref() {
+                            let _ = vault.set_otp(&id, Some(url));
+                        }
+                        Some(id)
+                    })
             }
             FormKind::Edit(id) => {
                 /* Empty and untouched keeps the stored password; anything
@@ -2047,6 +2095,11 @@ impl App {
                 }
                 vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
+                    .and_then(|()| match otp.as_ref() {
+                        // Untouched keeps whatever the entry already carried.
+                        None => Ok(()),
+                        Some(url) => vault.set_otp(&id, url.as_deref()),
+                    })
                     .map(|()| None)
             }
         };
@@ -2061,9 +2114,14 @@ impl App {
                 }
                 self.snap();
                 self.persist();
+                let note = match otp {
+                    Some(Some(_)) => "  ·  one-time code set",
+                    Some(None) if form.had_otp => "  ·  one-time code removed",
+                    _ => "",
+                };
                 self.say(match form.kind {
-                    FormKind::Add => "entry added",
-                    FormKind::Edit(_) => "entry saved",
+                    FormKind::Add => format!("entry added{note}"),
+                    FormKind::Edit(_) => format!("entry saved{note}"),
                 });
             }
             Err(e) => {
@@ -2514,6 +2572,7 @@ fn form_field_value(form: &mut Form, field: FormField) -> &mut String {
         FormField::Username => &mut form.username,
         FormField::Password => &mut form.password,
         FormField::Url => &mut form.url,
+        FormField::Otp => &mut form.otp,
         FormField::Notes => &mut form.notes,
     }
 }
@@ -2524,6 +2583,7 @@ fn form_field_value_ref(form: &Form, field: FormField) -> &str {
         FormField::Username => &form.username,
         FormField::Password => &form.password,
         FormField::Url => &form.url,
+        FormField::Otp => &form.otp,
         FormField::Notes => &form.notes,
     }
 }
@@ -3309,6 +3369,85 @@ pub mod tests {
         assert_eq!(app.entry_rows().len(), global, "the scope did not come back");
     }
 
+    /* The whole loop through the form: a printed secret typed into the otp
+       box becomes a working code on the entry, and the flash says so. */
+    #[test]
+    fn the_form_gives_an_entry_a_working_one_time_code() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.switch_pane();
+        app.open_edit_form();
+        app.form.as_mut().unwrap().field = FormField::Otp;
+        for c in "jbsw y3dp ehpk 3pxp".chars() {
+            app.form_insert(c);
+        }
+        app.submit_form();
+        assert!(app.form.is_none(), "the form did not submit: {}", app.stage);
+        assert!(app.stage.contains("one-time code set"), "{}", app.stage);
+
+        let entry = app.selected_entry().expect("the entry went missing");
+        let (code, left) = crate::vault::totp_now(&entry).expect("no code on the entry");
+        assert_eq!(code.len(), 6, "{code}");
+        assert!(left > 0 && left <= 30, "{left}");
+
+        // `t` copies the code, not the seed behind it.
+        let stored = crate::vault::raw_otp(&entry).unwrap();
+        assert!(stored.contains("JBSWY3DPEHPK3PXP"), "{stored}");
+    }
+
+    /* A seed that cannot mint a code never reaches the vault: the form stays
+       open on the box that is wrong, with what was typed still in it. */
+    #[test]
+    fn a_bad_seed_keeps_the_form_open() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.switch_pane();
+        app.open_edit_form();
+        app.form.as_mut().unwrap().field = FormField::Otp;
+        for c in "nope!!".chars() {
+            app.form_insert(c);
+        }
+        app.submit_form();
+        let form = app.form.as_ref().expect("the form closed over a bad seed");
+        assert_eq!(form.field, FormField::Otp, "focus did not land on the box");
+        assert_eq!(form.otp, "nope!!", "the typed text was thrown away");
+        assert_eq!(app.level, Level::Warn);
+        let entry = app.selected_entry().unwrap();
+        assert!(crate::vault::raw_otp(&entry).is_none(), "a bad seed was stored");
+    }
+
+    /* Untouched keeps the stored seed; cleared on purpose removes it — the
+       password box's latch, applied to the other secret in the form. */
+    #[test]
+    fn an_untouched_otp_box_keeps_the_code_and_a_cleared_one_drops_it() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.switch_pane();
+        let id = app.entry_cursor.unwrap();
+        let url = crate::vault::totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
+        app.vault.as_mut().unwrap().set_otp(&id, Some(&url)).unwrap();
+
+        // An edit that never looks at the box keeps it.
+        app.open_edit_form();
+        assert!(app.form.as_ref().unwrap().had_otp, "the form did not see the code");
+        app.form_insert('x'); // types into the title
+        app.submit_form();
+        let entry = app.selected_entry().unwrap();
+        assert!(crate::vault::raw_otp(&entry).is_some(), "the code was dropped");
+
+        // Touching it and leaving it empty removes it.
+        app.open_edit_form();
+        app.form.as_mut().unwrap().field = FormField::Otp;
+        app.form_insert('q');
+        app.form_backspace();
+        app.submit_form();
+        let entry = app.selected_entry().unwrap();
+        assert!(crate::vault::raw_otp(&entry).is_none(), "the code survived");
+        // The earlier save's flash is still up, so drain before reading.
+        app.expire_now();
+        assert!(app.stage.contains("removed"), "{}", app.stage);
+    }
+
     /* ---- Wave 5.1: entry form ---- */
 
     /* `a` on an open vault opens the form; Enter writes the entry into the
@@ -3355,7 +3494,8 @@ pub mod tests {
         app.open_edit_form();
         app.next_form_field(true);
         app.next_form_field(true); // password box, empty
-        app.next_form_field(true);
+        app.next_form_field(true); // url
+        app.next_form_field(true); // otp, also empty and untouched
         app.next_form_field(true); // notes
         for c in "note".chars() {
             app.form_insert(c);

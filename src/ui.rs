@@ -529,6 +529,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(n, id)| {
             let selected = Some(*id) == app.entry_cursor;
+            let has_code = app
+                .vault
+                .as_ref()
+                .and_then(|v| v.get_entry(id))
+                .is_some_and(|e| crate::vault::raw_otp(&e).is_some());
             let (title, user, group) = app
                 .vault
                 .as_ref()
@@ -562,6 +567,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             if !group.is_empty() {
                 spans.push(dim(format!("  · {group}")));
+            }
+            /* A field lookup, not a parse: the marker says a row has a code
+               without pricing every row on every frame. */
+            if has_code {
+                spans.push(dim(" ⊙"));
             }
             ListItem::new(Line::from(spans))
         })
@@ -1120,6 +1130,18 @@ fn draw_form(frame: &mut Frame, app: &App) {
             }
             FormField::Password if form.reveal => value.to_string(),
             FormField::Password => "•".repeat(value.chars().count()),
+            /* The seed box says which of the two empties it is in: an entry
+               that already has a code keeps it, and one that does not says
+               what it will take. */
+            FormField::Otp if value.is_empty() && !form.otp_touched => {
+                if form.had_otp {
+                    "(leave empty to keep)".to_string()
+                } else {
+                    "(otpauth:// url or the printed secret)".to_string()
+                }
+            }
+            FormField::Otp if form.reveal => value.to_string(),
+            FormField::Otp => "•".repeat(value.chars().count()),
             _ => value.to_string(),
         };
         let (head, tail) = split_at_char(&shown, if focused { form.caret } else { 0 });
@@ -1194,6 +1216,26 @@ fn draw_form(frame: &mut Frame, app: &App) {
         ]));
     }
     lines.push(row("url", FormField::Url, &form.url));
+    lines.push(row("otp", FormField::Otp, &form.otp));
+    /* The code the typed seed produces, right now. A seed is a run of
+       characters nobody can check by eye, and the site asks for a code to
+       confirm the setup — so the box answers with one before it is saved. */
+    if form.otp_touched && !form.otp.trim().is_empty() {
+        let note = match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
+            Ok(url) => match url.parse::<keepass::db::TOTP>().ok().and_then(|t| t.value_now().ok()) {
+                Some(code) => (
+                    format!("{} · {}s", code.code, code.valid_for.as_secs()),
+                    TEAL,
+                ),
+                None => ("cannot read the clock".to_string(), AMBER),
+            },
+            Err(why) => (why, AMBER),
+        };
+        lines.push(Line::from(vec![
+            dim(format!(" {:<LABEL$}", "")),
+            Span::styled(note.0, Style::new().fg(note.1)),
+        ]));
+    }
     lines.extend(notes_rows(
         &form.notes,
         form.field == FormField::Notes,
@@ -2325,6 +2367,7 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 
 

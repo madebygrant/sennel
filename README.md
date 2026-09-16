@@ -46,7 +46,7 @@ this screen is text — a `*` in a password types as `*` — so the reveal is `^
 | `^g` (in search) | narrow the needle to this group, or widen it again |
 | `n` `N`         | next / previous match                         |
 | `↑ ↓` (in search) | move through the results while still typing |
-| `a` `e` `D`     | add / edit / delete entry                     |
+| `a` `e` `D`     | add / edit / delete entry (the form has an `otp` box) |
 | `A` `E`         | add / rename group                            |
 | `D` (on groups) | delete group (refused while not empty)        |
 | `X` `V`         | cut / paste entry or group                    |
@@ -84,9 +84,13 @@ has a visible home in the `h` overlay.
 - **Never overwrites somebody else's write.** Sennel remembers what the file looked like when it
   opened it. If KeePassXC, a sync client or a second Sennel writes the vault in the meantime, the
   next autosave is refused rather than silently winning: `^s` overwrites theirs, `^r` takes theirs.
-- **One-time codes, not their seeds.** An entry with an `otp` field shows its current code and the
-  seconds left; `t` copies the six digits. The secret behind it is never copied — that would put a
-  permanent credential on the clipboard to save typing a code.
+- **One-time codes, not their seeds.** An entry with a code is marked `⊙` in the list and shows the
+  current digits and the seconds left; `t` copies them. The seed behind them is never copied — that
+  would put a permanent credential on the clipboard to save typing six digits. The `otp` box in the
+  entry form takes either the `otpauth://` url behind a QR code or the secret a site prints beside
+  it (spaces, hyphens and lower case are all fine), stores it protected, and shows the code it
+  produces while you type so it can be checked before it is saved. Codes are six digits unless the
+  url says otherwise — the rule every authenticator app follows.
 - **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
   paths — never notes — and printed inventories carry titles only.
 
