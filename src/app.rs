@@ -83,6 +83,18 @@ pub enum FormKind {
 /* The modal entry editor. Values are plain Strings here: the password leaves
    ProtectedString only while the user is literally looking at it, and the
    form is closed (or the app exits) in every other state. */
+/* The form holds plaintext until it is submitted or thrown away, and both
+   end in a drop: a generated password and a one-time seed would otherwise be
+   freed intact. Notes come too — they are stored protected in the vault, and
+   a recovery code is exactly the kind of thing people keep there. */
+impl Drop for Form {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.otp.zeroize();
+        self.notes.zeroize();
+    }
+}
+
 impl Form {
     /* One latch per secret box: empty means "keep what is stored" only while
        the box has not been touched, so backspacing one empty clears it and
@@ -821,9 +833,12 @@ impl App {
         self.vault = None;
         self.group_cursor = None;
         self.entry_cursor = None;
-        self.unlock_password.clear();
-        self.unlock_keyfile.clear();
-        self.unlock_confirm.clear();
+        /* Zeroized, not cleared: `String::clear` sets the length to zero and
+           leaves the bytes in the allocation, and this is the path whose
+           whole job is getting the typed password out of memory. */
+        self.unlock_password.zeroize();
+        self.unlock_keyfile.zeroize();
+        self.unlock_confirm.zeroize();
         self.unlock_reveal = false;
         self.caret = 0;
         self.dirty = false;
@@ -842,6 +857,14 @@ impl App {
         self.view = View::Unlock;
         self.resting = "locked".into();
         self.refresh_db_state();
+    }
+
+    /// Wipe the clipboard if what is on it is still ours. Called on the way
+    /// out, where the auto-clear thread cannot help.
+    pub fn clear_clipboard(&self) {
+        if let Some(board) = &self.board {
+            board.clear_now();
+        }
     }
 
     /// Seconds until the clipboard wipes what was copied, for the status bar.
@@ -984,7 +1007,7 @@ impl App {
         let result = if self.unlock_new {
             if self.unlock_confirm.as_bytes() != password.as_slice() {
                 self.warn("passwords differ  ·  retype both fields");
-                self.unlock_confirm.clear();
+                self.unlock_confirm.zeroize();
                 self.caret = 0;
                 password.zeroize();
                 return;
@@ -1003,8 +1026,7 @@ impl App {
                    path stays: it names a file, not a secret, and prefills the
                    next unlock after an auto-lock. */
                 self.unlock_password.zeroize();
-                self.unlock_password.clear();
-                self.unlock_confirm.clear();
+                self.unlock_confirm.zeroize();
                 /* The next screen opens on bullets again: a reveal is for
                    reading the box you are on, never a browser-side default. */
                 self.unlock_reveal = false;
@@ -1306,7 +1328,8 @@ impl App {
 
     /// Clear the focused box. The other boxes hold answers being kept.
     pub fn unlock_clear(&mut self) {
-        self.active_unlock_value().clear();
+        // The box being cleared is usually the password one.
+        self.active_unlock_value().zeroize();
         self.caret = 0;
     }
 
@@ -2234,7 +2257,8 @@ impl App {
 
     /// Clear the focused box.
     pub fn form_clear(&mut self) {
-        self.active_form_value().clear();
+        // Might be the password or the seed box; zeroize covers all of them.
+        self.active_form_value().zeroize();
         let form = self.form.as_mut().expect("clearing");
         form.caret = 0;
         form.touch_secret();
@@ -3755,6 +3779,49 @@ pub mod tests {
         app.browse_up();
         assert_ne!(app.browse.as_ref().unwrap().dir, before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* The claim in the README, pinned: a lock leaves no typed secret behind,
+       and `String::clear` — which only moves the length — is not enough. The
+       test reads the buffer the string still owns. */
+    #[test]
+    fn locking_zeroizes_the_typed_secrets() {
+        let mut app = open_app();
+        app.unlock_password = "master-secret".into();
+        app.unlock_confirm = "master-secret".into();
+        app.unlock_keyfile = "/keys/secret.key".into();
+        /* Capacity survives a zeroize, so the bytes behind the empty string
+           are readable from the test — which is the point. */
+        let (ptr, cap) = (app.unlock_password.as_ptr(), app.unlock_password.capacity());
+        app.lock_now();
+        assert!(app.unlock_password.is_empty());
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(6).any(|w| w == b"secret"),
+            "the master password survived the lock in freed memory"
+        );
+        assert!(app.unlock_confirm.is_empty());
+        assert!(app.unlock_keyfile.is_empty());
+    }
+
+    /* Same promise for the form: cancelling or saving drops it, and a
+       generated password must not be left intact in the allocation. */
+    #[test]
+    fn dropping_the_form_zeroizes_what_was_typed_in_it() {
+        let mut app = open_app();
+        app.step_group(true);
+        app.open_add_form();
+        let form = app.form.as_mut().unwrap();
+        form.password = "generated-secret".into();
+        form.otp = "JBSWY3DPEHPK3PXP".into();
+        form.notes = "recovery-secret".into();
+        let (ptr, cap) = (form.password.as_ptr(), form.password.capacity());
+        app.cancel_form();
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            !bytes.windows(6).any(|w| w == b"secret"),
+            "a cancelled form left its password in memory"
+        );
     }
 
     /* ---- Wave 5.1: entry form ---- */

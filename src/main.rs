@@ -67,6 +67,10 @@ fn main() -> Result<()> {
        copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));
     let result = run(&mut terminal, &mut app);
+    /* Before anything else on the way out: the auto-clear lives in a thread
+       that dies with this process, so quitting three seconds after a copy
+       used to leave the password sitting on the clipboard. */
+    app.clear_clipboard();
     if cfg.mouse {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }

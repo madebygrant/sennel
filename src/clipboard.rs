@@ -60,6 +60,24 @@ impl Board {
         Some(left.as_secs() + u64::from(left.subsec_millis() > 0))
     }
 
+    /* Wipe now, if what is on the clipboard is still ours. The timer is a
+       thread inside this process, so quitting used to abandon a password on
+       the pasteboard — on macOS it is system-owned and sits there until
+       something else copies. A cleared deadline means either nothing of ours
+       is there or the user asked for no wipe at all (`clipboard_timeout =
+       0`), and both are left alone. */
+    pub fn clear_now(&self) {
+        let mut until = self.until.lock().unwrap_or_else(|e| e.into_inner());
+        if until.is_none() {
+            return;
+        }
+        *until = None;
+        drop(until);
+        // Bumped so the sleeping clearer does not wipe a later copy of theirs.
+        self.claim();
+        let _ = Clipboard::new().and_then(|mut c| c.clear());
+    }
+
     /// Copies text and re-arms the auto-clear. The failure message names the
     /// fix and never echoes the text back: it is usually a password.
     pub fn copy(&self, text: &str) -> Result<(), String> {
@@ -124,6 +142,23 @@ mod tests {
         assert_eq!(board.clears_in(), Some(9));
         *board.until.lock().unwrap() = Some(std::time::Instant::now() - Duration::from_secs(1));
         assert_eq!(board.clears_in(), None, "a past deadline still counted");
+    }
+
+    /* Quitting must not abandon a secret: the wipe deadline is dropped and
+       the generation bumped, so the sleeping thread cannot wipe whatever the
+       user copies next. */
+    #[test]
+    fn clearing_on_exit_disarms_the_pending_wipe() {
+        let board = Board::new(15);
+        *board.until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(9));
+        let generation = *board.epoch.lock().unwrap();
+        board.clear_now();
+        assert_eq!(board.clears_in(), None, "the deadline survived");
+        assert!(board.stale(generation), "the sleeping clearer stayed current");
+        // Nothing of ours on the board: no clipboard call, no surprise wipe.
+        let quiet = Board::new(15);
+        quiet.clear_now();
+        assert_eq!(quiet.clears_in(), None);
     }
 
     #[test]
