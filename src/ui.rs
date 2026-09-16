@@ -57,6 +57,11 @@ impl Palette {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
+    /* Cleared here rather than by each detail view: on a narrow terminal
+       neither of them draws at all, and last frame's targets would be left
+       sitting over the entries pane, where a click would copy instead of
+       selecting a row. */
+    app.copy_rows.clear();
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() {
@@ -663,7 +668,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
 /* The row keeps only title and user, so the pane says the rest: url, notes,
    and the password masked to a fixed run of bullets. Fixed length because
    even the length is something the screen may not reveal. */
-fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
+/* Fills `app.copy_rows` as it goes: which screen row copies what. The rows
+   move — url, notes, the code and the expiry are each optional — so the
+   layout is the only thing that can know, and a click recomputing it would be
+   a second copy of this function's decisions. */
+fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let block = Block::new()
         .borders(Borders::LEFT)
@@ -687,34 +696,57 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(value, style),
         ])
     };
+    /* A row a click copies. Lit for a moment afterwards, because a copy is
+       otherwise invisible: the clipboard is somewhere else, and the status
+       flash is at the other end of the screen from the hand that just moved. */
+    let copyable = |label: &str, value: String, style: Style, what: app::CopyRow| {
+        let lit = app.glowing(what);
+        let ink = if lit { Style::new().fg(p.cursor) } else { style };
+        Line::from(vec![
+            match lit {
+                // The tick replaces the label rather than pushing the row
+                // along, so nothing moves under the pointer that just clicked.
+                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                false => p.faint(format!(" {label:<LABEL$}")),
+            },
+            Span::styled(value, ink),
+        ])
+    };
     let cream = Style::new().fg(p.text);
     let faint = Style::new().fg(p.muted);
+    let mut copy_rows: Vec<(usize, app::CopyRow)> = Vec::new();
     let mut lines = vec![
         Line::from(Span::styled(
             truncate(entry.title(), width),
             p.row(true),
         )),
         Line::default(),
-        row(
-            "user",
-            truncate(entry.username(), width.saturating_sub(LABEL + 1)),
-            cream,
-        ),
-        row(
-            "pass",
-            if app.show_password {
-                truncate(entry.password(), width.saturating_sub(LABEL + 1))
-            } else {
-                "••••••••".to_string()
-            },
-            cream,
-        ),
     ];
+    copy_rows.push((lines.len(), app::CopyRow::Username));
+    lines.push(copyable(
+        "user",
+        truncate(entry.username(), width.saturating_sub(LABEL + 1)),
+        cream,
+        app::CopyRow::Username,
+    ));
+    copy_rows.push((lines.len(), app::CopyRow::Password));
+    lines.push(copyable(
+        "pass",
+        if app.show_password {
+            truncate(entry.password(), width.saturating_sub(LABEL + 1))
+        } else {
+            "••••••••".to_string()
+        },
+        cream,
+        app::CopyRow::Password,
+    ));
     if !entry.url().is_empty() {
-        lines.push(row(
+        copy_rows.push((lines.len(), app::CopyRow::Url));
+        lines.push(copyable(
             "url",
             truncate(entry.url(), width.saturating_sub(LABEL + 1)),
             faint,
+            app::CopyRow::Url,
         ));
     }
     /* First line only: the row is one row, and a note that wraps the pane is
@@ -731,8 +763,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
        could not show at all: an entry with `otp` looked exactly like an entry
        without one, and the answer was to pick up a phone. */
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
+        let lit = app.glowing(app::CopyRow::Totp);
+        copy_rows.push((lines.len(), app::CopyRow::Totp));
         lines.push(Line::from(vec![
-            p.faint(format!(" {:<LABEL$}", "totp")),
+            match lit {
+                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                false => p.faint(format!(" {:<LABEL$}", "totp")),
+            },
             Span::styled(code, Style::new().fg(p.cursor)),
             p.faint(format!("  {left}s")),
         ]));
@@ -757,11 +794,21 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         format!(" {}", "─".repeat(width.saturating_sub(2))),
         Style::new().fg(p.rule),
     )));
+    /* Says the rows are clickable, because nothing else on a terminal screen
+       does: there is no cursor change and no underline to give it away. */
     lines.push(Line::from(p.faint(truncate(
-        " y p U copy · t totp · * reveal · e edit",
+        " click a row to copy · y p U t · * reveal · e edit",
         width,
     ))));
     lines.truncate(inner.height as usize);
+    /* Screen coordinates, and only the rows that actually rendered: a pane
+       too short to reach the password row must not have a click target
+       sitting where the row would have been. */
+    app.copy_rows = copy_rows
+        .into_iter()
+        .filter(|(at, _)| *at < lines.len())
+        .map(|(at, what)| (inner.top() + at as u16, what))
+        .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -802,7 +849,7 @@ fn local(utc: chrono::NaiveDateTime) -> String {
 /* Enter's detail popup: the whole entry, wide enough for a url and tall
    enough for the notes, on the 80-column terminal where no side pane fits.
    Same masking rule as the pane — `*` is the only way to a plain password. */
-fn draw_detail_popup(frame: &mut Frame, app: &App) {
+fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
     let Some(entry) = app.selected_entry() else {
         return;
@@ -821,20 +868,48 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
         ])
     };
     let value = inner.saturating_sub(LABEL + 1);
-    let mut lines = vec![
-        row("user", truncate(entry.username(), value), cream),
-        row(
-            "password",
-            if app.show_password {
-                truncate(entry.password(), value)
-            } else {
-                "••••••••".to_string()
+    /* Same rule as the pane: clickable, and lit for a moment after. This is
+       the only detail view on a narrow terminal, so leaving it out would mean
+       click-to-copy existed only on wide screens. */
+    let copyable = |label: &str, text: String, style: Style, what: app::CopyRow| {
+        let lit = app.glowing(what);
+        let ink = if lit { Style::new().fg(p.cursor) } else { style };
+        Line::from(vec![
+            match lit {
+                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                false => p.faint(format!(" {label:<LABEL$}")),
             },
-            cream,
-        ),
-    ];
+            Span::styled(text, ink),
+        ])
+    };
+    let mut copy_rows: Vec<(usize, app::CopyRow)> = Vec::new();
+    let mut lines = Vec::new();
+    copy_rows.push((lines.len(), app::CopyRow::Username));
+    lines.push(copyable(
+        "user",
+        truncate(entry.username(), value),
+        cream,
+        app::CopyRow::Username,
+    ));
+    copy_rows.push((lines.len(), app::CopyRow::Password));
+    lines.push(copyable(
+        "password",
+        if app.show_password {
+            truncate(entry.password(), value)
+        } else {
+            "••••••••".to_string()
+        },
+        cream,
+        app::CopyRow::Password,
+    ));
     if !entry.url().is_empty() {
-        lines.push(row("url", truncate(entry.url(), value), faint));
+        copy_rows.push((lines.len(), app::CopyRow::Url));
+        lines.push(copyable(
+            "url",
+            truncate(entry.url(), value),
+            faint,
+            app::CopyRow::Url,
+        ));
     }
     /* Notes get a block of their own: the pane's one-line form is most of
        why this popup exists. */
@@ -847,8 +922,13 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
         }
     }
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
+        let lit = app.glowing(app::CopyRow::Totp);
+        copy_rows.push((lines.len(), app::CopyRow::Totp));
         lines.push(Line::from(vec![
-            p.faint(format!(" {:<LABEL$}", "totp")),
+            match lit {
+                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                false => p.faint(format!(" {:<LABEL$}", "totp")),
+            },
             Span::styled(code, Style::new().fg(p.cursor)),
             p.faint(format!("  {left}s · t copies")),
         ]));
@@ -866,8 +946,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(" y p U", Style::new().fg(p.accent)),
-        p.faint(" copy   "),
+        p.faint(" click a row to copy   "),
         Span::styled("*", Style::new().fg(p.accent)),
         p.faint(" reveal   "),
         Span::styled("e", Style::new().fg(p.accent)),
@@ -878,7 +957,13 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
         p.faint(" close"),
     ]));
     let title = truncate(entry.title(), inner);
-    popup(frame, &title, lines, width, &p);
+    let at = popup(frame, &title, lines, width, &p);
+    // The popup's own line numbers become screen rows once it has landed.
+    app.copy_rows = copy_rows
+        .into_iter()
+        .filter(|(row, _)| (*row as u16) < at.height)
+        .map(|(row, what)| (at.top() + row as u16, what))
+        .collect();
 }
 
 /// Where the popup stops reading notes: past this it is an editor, not a view.
@@ -1152,7 +1237,9 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &Palette) {
+/// Draws the box and hands back where its contents landed, so a caller that
+/// wants click targets can turn its own line numbers into screen rows.
+fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &Palette) -> Rect {
     let height = lines.len() as u16 + 2;
     let area = frame.area();
     let at = Rect::new(
@@ -1170,6 +1257,7 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &P
     let inner = block.inner(at);
     frame.render_widget(block, at);
     frame.render_widget(Paragraph::new(lines), inner);
+    inner
 }
 
 /* The file picker: directories and vaults only, the current directory in the
@@ -2414,6 +2502,191 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(!joined.contains("expires"), "{joined}");
         assert!(!joined.contains('⌛'), "{joined}");
+    }
+
+    /* Click-to-copy: the rows have to line up with what the draw put on
+       screen, and the pane's rows move — url, notes, the code and the expiry
+       are each optional — so this checks the map against the rendered text
+       rather than against an assumed layout. */
+    #[test]
+    fn clicking_a_detail_row_copies_that_field() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(110, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "s3cret-pw", "https://b.example", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.entry_cursor = Some(id);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        /* Every row the map claims is a copy target sits on the line the
+           draw gave that field. */
+        let rows = screen(&t);
+        /* A fn over the map rather than a closure over `app`: the closure
+           would hold a borrow across the redraw below. */
+        fn at(app: &App, what: app::CopyRow) -> Option<u16> {
+            app.copy_rows.iter().find(|(_, w)| *w == what).map(|(y, _)| *y)
+        }
+        let user_y = at(&app, app::CopyRow::Username).expect("no username row");
+        let pass_y = at(&app, app::CopyRow::Password).expect("no password row");
+        let url_y = at(&app, app::CopyRow::Url).expect("no url row");
+        assert!(rows[user_y as usize].contains("octo"), "{:?}", rows[user_y as usize]);
+        assert!(rows[pass_y as usize].contains("••••"), "{:?}", rows[pass_y as usize]);
+        assert!(rows[url_y as usize].contains("b.example"), "{:?}", rows[url_y as usize]);
+        // Three rows, three distinct lines.
+        assert_eq!(app.copy_rows.len(), 3);
+        assert!(user_y != pass_y && pass_y != url_y);
+
+        /* An entry with no url has no url target, and the password row moves
+           up — which is the whole reason the map is rebuilt by the draw. */
+        let bare = {
+            let vault = app.vault.as_mut().unwrap();
+            vault.create_entry(&root, "bare", "u", "p", "", "").unwrap()
+        };
+        app.snap();
+        app.entry_cursor = Some(bare);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.copy_rows.len(), 2, "a url row survived an entry with no url");
+        assert!(at(&app, app::CopyRow::Url).is_none());
+    }
+
+    /* A short pane truncates its rows, and a click target left behind at a
+       row that did not render would copy a password nobody can see — the one
+       way click-to-copy could put a secret on the clipboard silently. */
+    #[test]
+    fn a_row_the_pane_was_too_short_to_draw_is_not_clickable() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "s3cret", "https://b.example", "")
+            .unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.entry_cursor = Some(id);
+
+        /* Wide enough for the detail pane, then shrinking: each row falls off
+           the bottom in turn, and the map has to shrink with it. */
+        let mut seen = Vec::new();
+        for height in (4..=14).rev() {
+            let mut t = Terminal::new(TestBackend::new(110, height)).unwrap();
+            t.draw(|f| draw(f, &mut app)).unwrap();
+            let rows = screen(&t);
+            for (y, what) in &app.copy_rows {
+                assert!(
+                    (*y as usize) < rows.len(),
+                    "{what:?} is clickable at row {y} on a {height}-row screen"
+                );
+                /* And the row it points at is really that field's, not a
+                   stamp or the hint line that slid up into its place. */
+                let line = &rows[*y as usize];
+                let wants = match what {
+                    app::CopyRow::Username => "octo",
+                    app::CopyRow::Password => "••••",
+                    app::CopyRow::Url => "b.example",
+                    app::CopyRow::Totp => unreachable!("no code on this entry"),
+                };
+                assert!(
+                    line.contains(wants),
+                    "{what:?} points at {line:?} on a {height}-row screen"
+                );
+            }
+            seen.push(app.copy_rows.len());
+        }
+        // The map really did shrink, or this test proved nothing.
+        assert!(
+            seen.iter().any(|n| *n < 3),
+            "the pane never got short enough to drop a row: {seen:?}"
+        );
+    }
+
+    /* A narrow terminal draws no detail pane at all, so last frame's targets
+       must not be left sitting over the entries pane — a click there would
+       copy a password instead of selecting a row. */
+    #[test]
+    fn narrowing_the_window_takes_the_click_targets_with_it() {
+        use crate::vault::Vault;
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.entry_cursor = Some(id);
+
+        let mut wide = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        wide.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!app.copy_rows.is_empty(), "the wide pane registered nothing");
+
+        // Below PREVIEW_FROM there is no detail pane to click.
+        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        narrow.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(
+            app.copy_rows.is_empty(),
+            "stale targets survived the narrowing: {:?}",
+            app.copy_rows
+        );
+
+        /* And the popup, which is the narrow terminal's detail view, puts
+           them back — then takes them away again when it closes. */
+        app.detail = true;
+        narrow.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!app.copy_rows.is_empty(), "the popup registered nothing");
+        app.detail = false;
+        narrow.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(app.copy_rows.is_empty(), "the closed popup left targets behind");
+    }
+
+    /* A copy is otherwise invisible — the clipboard is somewhere else, and
+       the status flash is at the far end of the screen from the hand that
+       just moved — so the row lights up and then goes back on its own. */
+    #[test]
+    fn a_copied_row_lights_up_and_settles_back() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(110, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.entry_cursor = Some(id);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let user_y = app
+            .copy_rows
+            .iter()
+            .find(|(_, w)| *w == app::CopyRow::Username)
+            .map(|(y, _)| *y)
+            .unwrap();
+        assert!(screen(&t)[user_y as usize].contains("user"), "no label before the click");
+
+        /* The click goes through the same path the mouse takes. No clipboard
+           in a test environment, so the copy itself may fail — the row lights
+           either way, because a row that stayed dark reads as a click the app
+           missed. */
+        app.click(app.copy_rows[0].0.max(1), user_y);
+        assert!(app.glowing(app::CopyRow::Username));
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let lit = &screen(&t)[user_y as usize];
+        assert!(lit.contains("✓ copied"), "the row did not light: {lit:?}");
+        assert!(!lit.contains("user "), "the label stayed as well: {lit:?}");
+
+        // Only that row: the password row beside it is untouched.
+        assert!(!app.glowing(app::CopyRow::Password));
+
+        /* And it settles back on its own, without a keypress: the frame loop
+           already wakes every 120ms, so the decay needs nothing scheduled. */
+        app.copied = Some((app::CopyRow::Username, std::time::Instant::now() - std::time::Duration::from_secs(2)));
+        assert!(!app.glowing(app::CopyRow::Username), "the glow never expires");
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&t)[user_y as usize].contains("user"), "the label did not come back");
     }
 
     /* Custom fields and attachments were a count and nothing else, which

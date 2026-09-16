@@ -82,5 +82,17 @@ Fields you add go in protected, because a field somebody adds by hand to a passw
 likely to be a secret than not. An extracted attachment is written beside the vault file rather than
 into the working directory, and loses the vault's protection the moment it lands.
 
+## The mouse
+
+Off with `mouse = false`, which gives the terminal its own text selection back. Otherwise the wheel
+scrolls the pane under the pointer, a click selects a row and hands that pane the keys, and a click
+on the `user`, `pass`, `url` or `totp` row of the detail view copies that field — the same copy
+`y p U t` do, through the same clipboard wipe. The row shows `✓ copied` for a moment afterwards,
+because a copy is otherwise invisible: the clipboard is somewhere else and the status line is at the
+other end of the screen from the hand that just moved.
+
+Nothing here is the only way to do anything. The mouse stays out of the popups that ask a question,
+so a stray click cannot answer one.
+
 Some terminals bind `tab`, `backtab` and the arrow chords themselves. Every key here also has a
 visible home in the `h` overlay.

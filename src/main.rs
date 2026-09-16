@@ -552,6 +552,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
    is a convenience over a keyboard app, so it stays out of the popups, where
    a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    /* The popups that ask a question keep the mouse out, so a stray click
+       cannot answer one. The detail popup is not a question — it is the only
+       detail view a narrow terminal has, and its rows copy on click like the
+       pane's do — so it stays in, and `click` only acts on a copy row while
+       it is up. */
     if app.view != app::View::Browser
         || app.confirm.is_some()
         || app.form.is_some()
@@ -560,7 +565,6 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         || app.audit.is_some()
         || app.fields.is_some()
         || app.history.is_some()
-        || app.detail
         || app.show_help
     {
         return;

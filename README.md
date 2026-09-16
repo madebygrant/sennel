@@ -26,8 +26,9 @@ to print into a terminal where it would sit in your scrollback. [More](docs/get.
 **Real KeePass files.** KDBX4 in, KDBX4 out. KeePassXC opens what Sennel writes and Sennel opens
 what KeePassXC writes. No plugins, no homebrew format, no lock-in.
 
-**One key per secret.** `y` copies the username, `p` the password, `U` the url, `t` the one-time
-code. Every copy wipes after 15 seconds, and the status bar counts it down, so you always know
+**One key per secret, or one click.** `y` copies the username, `p` the password, `U` the url, `t`
+the one-time code — and clicking that row in the detail view does the same, lighting up `✓ copied`
+so you can see it worked. Every copy wipes after 15 seconds, and the status bar counts it down, so you always know
 when a password is still sitting on the pasteboard. Quitting wipes it immediately.
 
 **It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you

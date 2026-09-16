@@ -300,6 +300,23 @@ impl Drop for Rekey {
     }
 }
 
+/* A row in the detail view that copies when clicked. The keyboard has had
+   `y p U t` all along; this is the same four fields for the hand that is
+   already on the mouse, and for anyone who has not read the key table yet. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CopyRow {
+    Username,
+    Password,
+    Url,
+    Totp,
+}
+
+/* How long a copied row stays lit. Long enough to read as a confirmation,
+   short enough that it is gone before the next thing you do — and the frame
+   loop already wakes every 120ms, so it decays on its own without anything
+   having to schedule a redraw. */
+const GLOW: Duration = Duration::from_millis(700);
+
 /* Something sitting on the shelf between `X` and `V`. The id travels alone:
    the title is looked up fresh wherever it is shown, so a rename between the
    cut and the paste still reads right, and a deleted source disarms itself
@@ -563,6 +580,13 @@ pub struct App {
        Only the draw knows this, the same deal as `viewport`. */
     pub group_area: Rect,
     pub entry_area: Rect,
+    /* Which screen row copies what, rebuilt by each draw of the detail view.
+       The layout is the only thing that knows where a row landed — it moves
+       with the url, the notes, the code and the expiry all being optional —
+       so the draw records it rather than the click recomputing it. */
+    pub copy_rows: Vec<(u16, CopyRow)>,
+    /// The row a click just copied, and when, for the glow.
+    pub copied: Option<(CopyRow, Instant)>,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
        a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
@@ -692,6 +716,8 @@ impl App {
             heads: false,
             group_area: Rect::ZERO,
             entry_area: Rect::ZERO,
+            copy_rows: Vec::new(),
+            copied: None,
             order: SortOrder::default(),
             generator: crate::config::Generator::default(),
             db_path: None,
@@ -1881,6 +1907,19 @@ impl App {
                 && (area.left()..area.right()).contains(&column)
                 && (area.top()..area.bottom()).contains(&row)
         };
+        /* Before the panes, because a copy row can sit over the detail pane
+           and a click there means the field, not a list selection. */
+        if let Some((_, what)) = self.copy_rows.iter().find(|(at, _)| *at == row).copied() {
+            self.copy_row(what);
+            return;
+        }
+        /* While the detail popup is up it is the only thing on screen that a
+           click means anything to: the panes behind it must not move under
+           it, or closing the popup reveals a different entry than the one it
+           was showing. */
+        if self.detail {
+            return;
+        }
         if inside(self.group_area) {
             let at = self.group_scroll + (row - self.group_area.top()) as usize;
             self.active_pane = Pane::Groups;
@@ -1897,6 +1936,27 @@ impl App {
                 self.entry_cursor = Some(*id);
             }
         }
+    }
+
+    /* Click-to-copy. The same four copies `y p U t` do, through the same
+       board and the same auto-clear — this is a second way to reach them,
+       never a second implementation of them. */
+    pub fn copy_row(&mut self, what: CopyRow) {
+        match what {
+            CopyRow::Username => self.copy_username(),
+            CopyRow::Password => self.copy_password(),
+            CopyRow::Url => self.copy_url(),
+            CopyRow::Totp => self.copy_totp(),
+        }
+        /* Lit whether or not the copy worked: the flash says which, and a row
+           that stayed dark after a click reads as a click the app missed. */
+        self.copied = Some((what, Instant::now()));
+    }
+
+    /// Whether this row was copied recently enough to still be lit.
+    pub fn glowing(&self, what: CopyRow) -> bool {
+        self.copied
+            .is_some_and(|(row, at)| row == what && at.elapsed() < GLOW)
     }
 
     /// Wheel over a pane scrolls that pane, whichever one has the keys.
