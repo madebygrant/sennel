@@ -548,6 +548,16 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
    char-index rule as every other box in the app. */
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let needle = app.search.as_deref().unwrap_or_default();
+    /* A kept filter gave the keys back: a caret on a box that no longer takes
+       typing reads as one that does. */
+    if !app.band {
+        let line = Line::from(vec![
+            Span::styled(format!("/{needle}"), Style::new().fg(GOLD)),
+            dim("  esc clears"),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let at = char_index_to_byte(needle, app.search_caret);
     let (head, tail) = needle.split_at(at.min(needle.len()));
     let line = Line::from(vec![
@@ -1114,6 +1124,30 @@ mod tests {
         assert!(joined.contains("/check"), "{joined}");
         assert!(joined.contains("1 of 2 shown"), "{joined}");
         assert!(joined.contains("esc clear"), "{joined}");
+    }
+
+    /* Enter keeps the filter and hands the keys back, so the band stops being
+       a box: the needle stays visible as a chip with no caret to type into. */
+    #[test]
+    fn a_kept_filter_draws_as_a_chip_without_a_caret() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.open_search();
+        for ch in "check".chars() {
+            app.search_insert(ch);
+        }
+        app.keep_search();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("/check"), "{joined}");
+        assert!(joined.contains("esc clears"), "{joined}");
+        assert!(!joined.contains("█"), "a kept filter drew a text caret");
     }
 
     /* A live needle widens the pane to the whole vault: a hit from another

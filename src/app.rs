@@ -540,6 +540,8 @@ impl App {
         self.caret = 0;
         self.dirty = false;
         self.view = View::Unlock;
+        // Or the lock screen's header keeps the open vault's "ready".
+        self.resting = "locked".into();
         self.refresh_db_state();
         self.say(format!("locked after {secs} seconds idle"));
     }
@@ -2184,6 +2186,8 @@ mod tests {
     fn idleness_past_the_deadline_locks_and_wipes() {
         let mut app = open_app();
         app.set_lock_timeout(60);
+        // What an unlock leaves behind, and what the lock has to take back.
+        app.resting = "ready".into();
         app.last_activity = Instant::now() - Duration::from_secs(61);
         app.check_idle();
         assert_eq!(app.view, View::Unlock);
@@ -2192,6 +2196,10 @@ mod tests {
         assert!(app.entry_cursor.is_none());
         assert!(!app.dirty, "a lock invented unsaved changes");
         assert!(app.stage.contains("locked after 60 seconds idle"), "{}", app.stage);
+        /* And once the flash has been read the header says locked, not the
+           "ready" the open vault left behind. */
+        app.expire_now();
+        assert_eq!(app.stage, "locked");
     }
 
     /* The typed vault file outlives an auto-lock: it names a file, not a

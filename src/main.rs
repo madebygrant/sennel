@@ -413,15 +413,17 @@ fn unlock_now(app: &mut App) {
     }
 }
 
-/* `y`, `q` and Enter all mean yes, so a second `q` answers the question the
-   first one raised and nobody who meant it has to read the box. Everything
-   else means no: this is the guard on the one key that can still lose work,
-   so an unrecognised key must not be an accidental yes. */
+/* `y` and Enter mean yes anywhere; `q` and `^c` only on the quit question,
+   where they already mean quit — so `qq` still answers, and neither is a
+   hidden yes on a delete. Everything else dismisses: an unrecognised key
+   must not lose work. */
 fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    let yes = matches!(
-        code,
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('q') | KeyCode::Enter
-    ) || (matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL));
+    let quitting = matches!(app.confirm, Some(Confirm::Quit));
+    let yes = matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter)
+        || (quitting
+            && (matches!(code, KeyCode::Char('q'))
+                || (matches!(code, KeyCode::Char('c'))
+                    && mods.contains(KeyModifiers::CONTROL))));
     let question = app.confirm.take();
     if yes {
         match question {
@@ -472,6 +474,26 @@ mod tests {
             handle_confirm_key(&mut app, code, KeyModifiers::NONE);
             assert!(!app.quit, "{code:?} quit with nothing at stake");
             assert_eq!(app.confirm, None, "{code:?} left the question open");
+        }
+    }
+
+    /* `q` means quit and `^c` means cancel everywhere else in the app: on a
+       delete confirm, which advertises only `y`, neither may be a yes. */
+    #[test]
+    fn q_and_ctrl_c_do_not_confirm_a_delete() {
+        for (code, mods) in [
+            (KeyCode::Char('q'), KeyModifiers::NONE),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = open_browser();
+            handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            handle_key(&mut app, KeyCode::Char('D'), KeyModifiers::NONE);
+            assert!(app.confirm.is_some(), "D deleted without asking");
+            handle_key(&mut app, code, mods);
+            assert_eq!(app.entry_rows().len(), 2, "{code:?} deleted the row");
+            assert!(app.confirm.is_none(), "{code:?} left the question open");
+            assert!(!app.quit, "{code:?} quit through the delete confirm");
         }
     }
 
