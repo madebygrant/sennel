@@ -42,7 +42,17 @@ fn main() -> Result<()> {
         anyhow::bail!("Sennel needs a terminal · --check works without one");
     }
 
+    /* A crash must not cost the user their terminal, or leave the vault's
+       name in the title bar. `ratatui::init` restores raw mode and the
+       alternate screen on panic; mouse capture and the title are ours, so
+       they are chained onto the same hook. */
+    harden();
     let mut terminal = ratatui::init();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, SetTitle(""));
+        previous(info);
+    }));
     /* Wheel and click, unless the config turned them off: capture takes the
        terminal's own selection with it, which some people would rather keep
        (shift usually still selects). */
@@ -78,6 +88,24 @@ fn main() -> Result<()> {
     // The vault's name must not outlive the session in the window title.
     let _ = execute!(std::io::stdout(), SetTitle(""));
     result
+}
+
+/* Refuse to write the decrypted vault anywhere a crash could leave it. A
+   core dump of this process holds every secret at once, and on Linux a
+   dumpable process can also be attached to by anything running as the same
+   user — which is the whole machine's worth of software the user has ever
+   installed. Best effort: a platform that refuses either call is no worse
+   off than before. */
+fn harden() {
+    unsafe {
+        let no_core = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+        #[cfg(target_os = "linux")]
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
 }
 
 /* The first thing to run on a new machine and the first thing to ask for in
@@ -140,8 +168,11 @@ fn list(cfg: &Config) -> Result<()> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
-    let password = rpassword::prompt_password("password: ")?;
-    let vault = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut password = rpassword::prompt_password("password: ")?;
+    let opened = Vault::open(path, &password, None).map_err(|e| anyhow::anyhow!("{e}"));
+    // Used once; the key inside the vault is the only copy that lives on.
+    password.zeroize();
+    let vault = opened?;
     println!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
@@ -777,6 +808,20 @@ mod tests {
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
         assert!(app.detail, "Right did not open the entry");
+    }
+
+    /* The hardening is two syscalls whose only proof is the limit they set:
+       a core dump of this process would hold every secret at once. */
+    #[test]
+    fn hardening_forbids_core_dumps() {
+        harden();
+        let mut limit = libc::rlimit {
+            rlim_cur: 1,
+            rlim_max: 1,
+        };
+        let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
+        assert_eq!(read, 0, "getrlimit failed");
+        assert_eq!(limit.rlim_cur, 0, "core dumps are still allowed");
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what

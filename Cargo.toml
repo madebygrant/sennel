@@ -33,6 +33,9 @@ nucleo-matcher = "0.3"
 zeroize = "1"
 secrecy = "0.8"
 getrandom = "0.2"
+# Two calls only: no core dumps, and no ptrace by the rest of this user's
+# software — a dump of this process holds every secret at once.
+libc = "0.2"
 
 [profile.release]
 strip = true

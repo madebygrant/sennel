@@ -319,7 +319,20 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temp, text).with_context(|| format!("writing {}", temp.display()))?;
+    /* Owner-only: it holds no secret, but it names where the vault lives,
+       which is not something to hand every account on the machine. */
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::remove_file(&temp);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .with_context(|| format!("writing {}", temp.display()))?;
+    out.write_all(text.as_bytes())
+        .with_context(|| format!("writing {}", temp.display()))?;
+    drop(out);
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
@@ -329,10 +342,20 @@ pub fn expand(path: &str) -> PathBuf {
     if path == "~" {
         return PathBuf::from(home);
     }
+    /* `~other/…` is somebody else's home, which needs the password database
+       to resolve; taken literally it becomes a directory named `~other` that
+       the unlock screen then offers to create. Left alone and reported by the
+       caller instead of silently becoming a different path. */
     match path.strip_prefix("~/") {
         Some(rest) => PathBuf::from(home).join(rest),
         None => PathBuf::from(path),
     }
+}
+
+/// Whether a typed path names another user's home, which `expand` cannot
+/// resolve — the unlock screen says so rather than creating `~octo`.
+pub fn is_other_home(path: &str) -> bool {
+    path.starts_with('~') && path != "~" && !path.starts_with("~/")
 }
 
 #[cfg(test)]

@@ -433,11 +433,17 @@ impl Vault {
         use std::os::unix::fs::OpenOptionsExt;
         /* 0600 from the first byte: File::create + set_permissions afterwards
            would leave a umask-wide window holding a full plaintext-free but
-           still sensitive copy of the vault. */
+           still sensitive copy of the vault.
+
+           create_new, not create: in a directory somebody else can write to,
+           a symlink planted at this path would be followed and the vault
+           written wherever it points — 0600 on a file that is not ours. A
+           leftover from a killed process is removed first, since the name
+           carries our own pid. */
+        let _ = std::fs::remove_file(&temp);
         let opened = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&temp)
             .map_err(|e| VaultError::Io(e.to_string()));

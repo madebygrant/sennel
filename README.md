@@ -10,7 +10,8 @@ macOS and Linux only.
 
 ```sh
 sennel                     # opens ~/.config/sennel/config.toml's db, or asks for one
-sennel --db vault.kdbx     # open a specific vault (created on first unlock)
+sennel --db vault.kdbx     # open a specific vault (created on first unlock; note that
+                           # a path on the command line is visible to `ps`)
 sennel --check             # print what the app sees: config, paths, clipboard backend
 sennel --list --db v.kdbx  # group and entry inventory (titles only, no secrets)
 ```
@@ -77,7 +78,12 @@ has a visible home in the `h` overlay.
 - **KDBX4 end to end.** The vault is a real KeePass database. No plugins, no homebrew format; the
   file is never modified without your password being re-keyed.
 - **Owner-only files.** Saves are atomic (write to a sibling temp file, then rename) and
-  `chmod 0600`, so the vault is readable only by your user.
+  `chmod 0600` from the first byte, so the vault is readable only by your user. The temp file is
+  created exclusively, so a symlink planted in the vault's directory cannot redirect the write. The
+  config file is `0600` too — it holds no secret, but it names where the vault lives.
+- **No crash dumps, no ptrace.** Core dumps are disabled at startup and, on Linux, the process is
+  marked undumpable: a dump of Sennel holds every secret at once, and a dumpable process can be
+  attached to by anything running as the same user.
 - **Clipboard auto-clear.** Copies are wiped after a configurable interval (default 15s). A second
   copy re-arms the timer instead of being wiped early, and quitting wipes immediately rather than
   abandoning a secret on the clipboard — the timer is a thread inside the process, so it cannot
@@ -91,8 +97,10 @@ has a visible home in the `h` overlay.
 - **No recycle bin.** Deletes are confirmed; `u` restores the entry you just deleted (one level).
   Group deletes are refused while the group holds anything, and are not undoable.
 - **Never overwrites somebody else's write.** Sennel remembers what the file looked like when it
-  opened it. If KeePassXC, a sync client or a second Sennel writes the vault in the meantime, the
-  next autosave is refused rather than silently winning: `^s` overwrites theirs, `^r` takes theirs.
+  opened it — modification time and length. If KeePassXC, a sync client or a second Sennel writes the
+  vault in the meantime, the next autosave is refused rather than silently winning: `^s` overwrites
+  theirs, `^r` takes theirs. (Two writes inside one filesystem timestamp tick that leave the file the
+  same length would slip past; every real edit changes one or the other.)
 - **One-time codes, not their seeds.** An entry with a code is marked `⊙` in the list and shows the
   current digits and the seconds left; `t` copies them. The seed behind them is never copied — that
   would put a permanent credential on the clipboard to save typing six digits. The `otp` box in the
@@ -100,6 +108,13 @@ has a visible home in the `h` overlay.
   it (spaces, hyphens and lower case are all fine), stores it protected, and shows the code it
   produces while you type so it can be checked before it is saved. Codes are six digits unless the
   url says otherwise — the rule every authenticator app follows.
+- **Vault text cannot drive your terminal.** Entry titles and group names come out of a file that may
+  have been written by anyone, so control characters are stripped everywhere they leave the TUI —
+  `--list` output and the window title. (Inside the browser, ratatui's cell buffer drops them.)
+- **Entry history is not Sennel's.** Editing an entry here writes no history record, so an old
+  password is not kept behind your back. Entries imported from KeePassXC may already carry history
+  from that client; Sennel preserves it untouched but does not display or clear it — use KeePassXC if
+  you need to purge it.
 - **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, URLs and group
   paths — never notes — and printed inventories carry titles only.
 

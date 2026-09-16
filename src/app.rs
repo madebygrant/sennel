@@ -1274,6 +1274,13 @@ impl App {
             self.say("type a path first");
             return;
         }
+        /* `~octo/vault.kdbx` cannot be resolved without the password
+           database, and taking it literally would offer to create a folder
+           named `~octo`. */
+        if crate::config::is_other_home(self.unlock_file.trim()) {
+            self.warn("another user's ~ cannot be resolved  ·  type the full path");
+            return;
+        }
         self.db_path = Some(crate::config::expand(self.unlock_file.trim()));
         self.refresh_db_state();
         self.unlock_field = UnlockField::Password;
