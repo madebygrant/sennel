@@ -1424,6 +1424,11 @@ fn draw_library(frame: &mut Frame, app: &App) {
         } else {
             String::new()
         };
+        /* The marker gets its columns first and the name gives way to it: it
+           is the half that changes what `enter` does, and a row that has lost
+           its `missing` reads as a healthy vault right up until the unlock
+           screen offers to create a new empty one. */
+        let name = truncate(&name, inner.saturating_sub(cols(&tail) + 2));
         let room_for_folder = inner.saturating_sub(cols(&name) + cols(&tail) + 4);
         let style = if row.missing {
             Style::new().fg(p.muted)
@@ -3552,6 +3557,30 @@ mod tests {
             "an empty library still advertised a key"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* The marker outlives the name when the popup is narrow. It used to be
+       the first thing clipped, which left a vanished vault reading as a
+       healthy one right up until `enter` offered to create an empty one over
+       the top of it. */
+    #[test]
+    fn a_narrow_library_keeps_the_marker_and_drops_the_name() {
+        let backend = TestBackend::new(34, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let long = std::path::PathBuf::from(
+            "/Users/someone/Documents/vaults/a-really-quite-long-vault-name.kdbx",
+        );
+        app.set_recent(vec![long.clone()]);
+        app.open_library();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("missing"), "the marker was clipped: {joined}");
+        assert!(joined.contains('…'), "the name was not truncated: {joined}");
+        // And nothing spilled past the popup frame.
+        for line in screen(&t) {
+            assert!(cols(&line) <= 34, "{line:?} is wider than the terminal");
+        }
     }
 
     /* Nobody knows the path to a vault they have not opened yet, so `^o`

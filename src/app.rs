@@ -1317,6 +1317,13 @@ impl App {
             password.zeroize();
             return;
         };
+        /* Made absolute here, once, so everything downstream agrees on what
+           this vault is called: `--db vault.kdbx` is relative to the
+           directory it was typed in, and a library row spelled that way names
+           a different file from anywhere else — or nothing at all, which
+           would offer to create an empty vault over the top of it. */
+        let path = crate::config::absolute(&path);
+        self.db_path = Some(path.clone());
         if password.is_empty() {
             self.warn("empty password  ·  type one or ^c quits");
             password.zeroize();
@@ -1584,8 +1591,28 @@ impl App {
             library.cursor = library.cursor.min(library.shown().len().saturating_sub(1));
         }
         let name = vault_name(&path);
+        /* The `db` key names the vault the next launch opens. Left alone, it
+           would reopen the one just forgotten, which would put it straight
+           back in the library: `^d` on the startup vault meant "forget until
+           the next launch". Dropped rather than repointed at another vault —
+           which vault starts the session is a choice, and `^d` is not where
+           it gets made. */
+        let was_startup = self.configured_db.as_deref() == Some(path.as_path());
+        let startup = if was_startup {
+            match crate::config::forget_db(self.config_file.as_deref()) {
+                Ok(()) => {
+                    self.configured_db = None;
+                    "  ·  the next launch will ask which vault"
+                }
+                Err(_) => "",
+            }
+        } else {
+            ""
+        };
         match self.write_recent() {
-            Ok(()) => self.say(format!("forgot {name}  ·  the file itself is untouched")),
+            Ok(()) => self.say(format!(
+                "forgot {name}  ·  the file itself is untouched{startup}"
+            )),
             Err(e) => self.warn(format!("forgot {name} for this session only  ·  {e}")),
         }
         if self.recent.is_empty() {
@@ -6374,11 +6401,14 @@ pub mod tests {
         app.config_file = Some(cfg.0.clone());
         let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
-        assert_eq!(app.recent, vec![tmp.0.clone()]);
+        /* The settled spelling, not the one it was handed: a library row has
+           to name the same file from any directory. */
+        let settled = crate::config::absolute(&tmp.0);
+        assert_eq!(app.recent, vec![settled.clone()]);
 
         let text = std::fs::read_to_string(&cfg.0).unwrap();
         assert!(
-            text.contains(&format!("recent = [\"{}\"]", tmp.0.display())),
+            text.contains(&format!("recent = [\"{}\"]", settled.display())),
             "{text}"
         );
         // And it reads back through the real parser, which is the only proof.
@@ -6390,7 +6420,7 @@ pub mod tests {
         ])
         .unwrap();
         let parsed = crate::config::Config::build(cli).unwrap();
-        assert_eq!(parsed.recent, vec![tmp.0.clone()]);
+        assert_eq!(parsed.recent, vec![settled]);
     }
 
     /* Newest first, deduplicated and capped: opening the same two vaults all
@@ -6512,6 +6542,74 @@ pub mod tests {
             app.library_backspace();
         }
         assert_eq!(app.library.as_ref().unwrap().shown().len(), 2);
+    }
+
+    /* `--db vault.kdbx` names a different file from every other directory, so
+       the library resolves it once, at the unlock, and everything downstream
+       agrees on what the vault is called. */
+    #[test]
+    fn a_relative_vault_is_remembered_absolutely() {
+        let tmp = temp_path("relative");
+        let mut seed = Vault::new();
+        seed.save_as(&tmp.0, "correct horse", None).unwrap();
+        let settled = crate::config::absolute(&tmp.0);
+
+        /* The path a shell would hand over: relative to the directory the
+           command was typed in, and meaningless from anywhere else. */
+        let here = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in here.components().skip(1) {
+            relative.push("..");
+        }
+        let relative = relative.join(tmp.0.strip_prefix("/").unwrap());
+        assert!(!relative.is_absolute(), "the test path is not relative");
+
+        let mut app = App::new();
+        app.set_db_path(Some(relative));
+        let mut pw = "correct horse".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser, "{}", app.stage);
+        assert_eq!(app.db_path, Some(settled.clone()));
+        assert_eq!(app.recent, vec![settled], "a relative row went into the library");
+    }
+
+    /* `^d` on the startup vault takes the `db` key with it. Left behind, the
+       next launch would reopen the vault just forgotten and put it back at
+       the top of the library. */
+    #[test]
+    fn forgetting_the_startup_vault_clears_the_default() {
+        let cfg = temp_config("forget-db");
+        let (mut app, tmp) = locked_app_with_db("correct horse");
+        app.config_file = Some(cfg.0.clone());
+        app.configured_db = Some(tmp.0.clone());
+        crate::config::remember_db(Some(&cfg.0), &tmp.0).unwrap();
+        app.set_recent(vec![tmp.0.clone()]);
+
+        app.open_library();
+        app.library_forget();
+        assert_eq!(app.configured_db, None);
+        assert!(app.stage.contains("next launch will ask"), "{}", app.stage);
+
+        use clap::Parser;
+        let cli = crate::config::Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            cfg.0.display().to_string(),
+        ])
+        .unwrap();
+        let parsed = crate::config::Config::build(cli).unwrap();
+        assert_eq!(parsed.db, None, "the forgotten vault is still the default");
+
+        // A vault that was never the default leaves `db` alone.
+        let other = temp_path("keep-default");
+        let mut app = App::new();
+        app.config_file = Some(cfg.0.clone());
+        app.configured_db = Some(tmp.0.clone());
+        app.set_recent(vec![other.0.clone()]);
+        app.open_library();
+        app.library_forget();
+        assert_eq!(app.configured_db, Some(tmp.0.clone()));
+        assert!(!app.stage.contains("next launch will ask"), "{}", app.stage);
     }
 
     /* Creating a vault says what to press next. It used to clear the flag

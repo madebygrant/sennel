@@ -505,42 +505,115 @@ pub fn remember_recent(config_file: Option<&std::path::Path>, paths: &[PathBuf])
     remember(config_file, "recent", &format!("[{}]", list.join(", ")))
 }
 
-/// `value` arrives already spelled as TOML, so a caller can write an array
-/// as easily as a string.
+/// Drop a key entirely, value and all. `^d` on the startup vault has nothing
+/// to write in its place: the next launch should ask, not reopen what was
+/// just forgotten.
+pub fn forget_db(config_file: Option<&std::path::Path>) -> Result<()> {
+    rewrite(config_file, "db", None)
+}
+
+/// `value` arrives already spelled as TOML, so a caller can write an array as
+/// easily as a string. `None` removes the key.
 fn remember(config_file: Option<&std::path::Path>, key: &str, value: &str) -> Result<()> {
+    rewrite(config_file, key, Some(value))
+}
+
+fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>) -> Result<()> {
     let Some(path) = config_file else {
         anyhow::bail!("no config file in this session");
     };
-    let line = format!("{key} = {value}");
+    let line = value.map(|v| format!("{key} = {v}"));
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
+    let mut first_table: Option<usize> = None;
+    /* Brackets still open from an earlier line, and whether those lines
+       belong to the value being replaced. An array can span lines — every
+       formatter writes ten paths that way — and swapping only its first line
+       leaves the rest orphaned, which is a config file that no longer
+       parses and an app that will not start until someone edits it by
+       hand. */
+    let mut depth = 0i32;
+    let mut dropping = false;
     for text in existing.lines() {
-        /* Only a top-level `db` key, and only before any [table] header: a
-           `db` inside [generator] is a different key with the same name. */
+        if depth > 0 {
+            depth = scan(text, depth);
+            if !dropping {
+                out.push(text.to_string());
+            }
+            continue;
+        }
+        dropping = false;
+        /* Only a top-level key, and only before any [table] header: a `db`
+           inside [generator] is a different key with the same name. A `#`
+           before it makes the whole line a comment, and `split_once` leaves
+           the `#` on the name, so a commented-out key is never the match. */
         let is_key = !replaced
+            && first_table.is_none()
             && text
                 .split_once('=')
                 .is_some_and(|(found, _)| found.trim() == key);
-        if is_key && !out.iter().any(|l: &String| l.trim_start().starts_with('[')) {
-            out.push(line.clone());
+        if is_key {
+            if let Some(line) = &line {
+                out.push(line.clone());
+            }
             replaced = true;
-        } else {
-            out.push(text.to_string());
+            depth = scan(text, 0);
+            dropping = depth > 0;
+            continue;
         }
+        if text.trim_start().starts_with('[') {
+            first_table.get_or_insert(out.len());
+        }
+        depth = scan(text, 0);
+        out.push(text.to_string());
     }
-    if !replaced {
+    if !replaced && let Some(line) = line {
         /* Above any table header, or the key would be read as belonging to
            the last table in the file. */
-        let at = out
-            .iter()
-            .position(|l| l.trim_start().starts_with('['))
-            .unwrap_or(out.len());
+        let at = first_table.unwrap_or(out.len());
         out.insert(at, line);
     }
     let mut text = out.join("\n");
     text.push('\n');
     write_atomic(path, &text)
+}
+
+/* Bracket depth after this line, counting from `depth`. Quoted text and
+   comments are skipped, so a vault in a folder named `a]b` does not throw the
+   count off. A `"""` multi-line string would, but nothing Sennel reads or
+   writes uses one. */
+fn scan(line: &str, depth: i32) -> i32 {
+    let mut depth = depth;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '#' => break,
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            // Literal strings take no escapes, so the first quote ends it.
+            '\'' => {
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth.max(0)
 }
 
 /// A TOML basic string. Paths can hold quotes and backslashes, and a path
@@ -582,6 +655,36 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
     drop(out);
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
+}
+
+/// A path that still names the same file tomorrow, from another directory.
+/// `--db vault.kdbx` is relative to wherever it was typed, so remembering it
+/// verbatim puts a row in the library that names a different file from
+/// anywhere else — or no file at all.
+pub fn absolute(path: &std::path::Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(path),
+            // Nothing better to say than what was asked for.
+            Err(_) => return path.to_path_buf(),
+        }
+    };
+    /* Resolved through the parent, never the file: the directory has to
+       exist for a vault to be opened or created there, while the vault
+       itself may not yet. It also leaves a vault file that is itself a
+       symlink — into a synced folder, say — as the symlink, so saves still
+       go through it. `..` and a symlinked folder both collapse here, which
+       is what stops one vault holding two rows in the library. */
+    let (Some(dir), Some(name)) = (joined.parent(), joined.file_name()) else {
+        return joined;
+    };
+    match dir.canonicalize() {
+        Ok(dir) => dir.join(name),
+        // A folder that is not there yet cannot be resolved, only spelled out.
+        Err(_) => joined,
+    }
 }
 
 pub fn expand(path: &str) -> PathBuf {
@@ -976,6 +1079,120 @@ mod tests {
         let cfg = build("recent = [\"~/vaults/x.kdbx\"]\n", &[]);
         let home = std::env::var("HOME").unwrap();
         assert_eq!(cfg.recent, vec![PathBuf::from(home).join("vaults/x.kdbx")]);
+    }
+
+    /* A value that spans lines is replaced whole. Swapping only its first
+       line used to orphan the rest, which left a config file that no longer
+       parsed — and then nothing started, not even `--check`, until somebody
+       edited it by hand. Every TOML formatter writes ten paths this way. */
+    #[test]
+    fn a_value_that_spans_lines_is_replaced_whole() {
+        let mut file = temp("multiline");
+        write!(
+            file.handle,
+            "# mine\nlock_timeout = 90\nrecent = [\n  \"/vaults/a.kdbx\",\n  \"/vaults/b.kdbx\",\n]\ntheme = \"cool\"\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        remember_recent(Some(&path), &[PathBuf::from("/vaults/c.kdbx")]).unwrap();
+
+        // It still parses, which is the whole point.
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, vec![PathBuf::from("/vaults/c.kdbx")]);
+        assert_eq!(cfg.lock_timeout, 90);
+        assert_eq!(cfg.theme, crate::theme::COOL, "a key after the array was lost");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(!text.contains("/vaults/a.kdbx"), "the old rows survived: {text}");
+    }
+
+    /* A bracket inside a path is text, not structure: counting it would make
+       the rewriter eat the wrong lines. */
+    #[test]
+    fn a_bracket_in_a_path_does_not_confuse_the_rewriter() {
+        let mut file = temp("bracket");
+        write!(
+            file.handle,
+            "recent = [\n  \"/vaults/a]b.kdbx\",\n]\nlock_timeout = 45\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        let awkward = vec![PathBuf::from("/vaults/x[1].kdbx"), PathBuf::from("/vaults/y.kdbx")];
+        remember_recent(Some(&path), &awkward).unwrap();
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.recent, awkward);
+        assert_eq!(cfg.lock_timeout, 45, "the line after the array was eaten");
+    }
+
+    /* `^d` on the startup vault drops the key rather than writing something
+       in its place: left alone, the next launch would reopen the vault that
+       was just forgotten and put it back in the library. */
+    #[test]
+    fn forgetting_the_startup_vault_removes_the_key() {
+        let mut file = temp("forgetdb");
+        write!(
+            file.handle,
+            "# mine\ndb = \"/vaults/old.kdbx\"\nlock_timeout = 90\n\n[generator]\nlength = 24\n"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        forget_db(Some(&path)).unwrap();
+
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, None, "the startup vault came back");
+        assert_eq!(cfg.lock_timeout, 90, "the rest of the file went with it");
+        assert_eq!(cfg.generator.length, 24);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(!text.contains("/vaults/old.kdbx"), "{text}");
+    }
+
+    /* A commented-out key is a comment, not the key: rewriting it would
+       leave the live one below it untouched and the setting unchanged. */
+    #[test]
+    fn a_commented_out_key_is_left_alone() {
+        let mut file = temp("commented");
+        write!(file.handle, "# db = \"/vaults/note.kdbx\"\ndb = \"/vaults/live.kdbx\"\n").unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        remember_db(Some(&path), std::path::Path::new("/vaults/new.kdbx")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# db = \"/vaults/note.kdbx\""), "{text}");
+        assert!(!text.contains("/vaults/live.kdbx"), "the live key was skipped: {text}");
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, Some(PathBuf::from("/vaults/new.kdbx")));
+    }
+
+    /* A relative path names a different file from every other directory, so
+       the library cannot hold one. */
+    #[test]
+    fn a_relative_path_is_resolved_against_the_working_directory() {
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(absolute(std::path::Path::new("vault.kdbx")), here.join("vault.kdbx"));
+        /* `..` collapses too, or one vault would hold two rows in the
+           library. Through a folder that exists: one that does not cannot be
+           resolved, and guessing past it is how `..` lands somewhere else
+           entirely when a symlink is in the way. */
+        assert_eq!(absolute(&here.join("src/../vault.kdbx")), here.join("vault.kdbx"));
+        /* A folder that does not exist cannot be resolved, and saying so by
+           leaving the path alone beats inventing one. */
+        let absent = std::path::Path::new("/nowhere-at-all/x.kdbx");
+        assert_eq!(absolute(absent), absent);
     }
 
     #[test]

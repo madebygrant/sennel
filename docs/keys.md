@@ -13,7 +13,8 @@ A vault that opens is remembered. Its path goes into `config.toml` as `db`, and 
 library, which `^v` opens: every vault this machine has unlocked, newest first, with the current one
 marked and any that have since moved marked `missing`. `enter` points the session at one, `^d`
 forgets a row (the file itself is never touched), and typing narrows the list over the whole path,
-so `work` finds a vault by its folder as well as by its name. Under `--no-config` there is nowhere
+so `work` finds a vault by its folder as well as by its name. Forgetting the vault the config opens
+by default drops that setting too, so the next launch asks instead of bringing it back. Under `--no-config` there is nowhere
 to write, so nothing is remembered.
 
 Picking a vault whose file is gone is allowed, and the screen then reads `new database`: it is a
