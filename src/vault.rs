@@ -186,6 +186,43 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
     Some((code.code, code.valid_for.as_secs()))
 }
 
+/* KDBX carries an expiry on every entry and Sennel read neither half of it,
+   so an entry KeePassXC shows as expired looked perfectly healthy here. Both
+   halves matter: `expires` is the switch and `expiry` is the date, and a date
+   with the switch off is a date somebody set and then turned off. */
+pub fn expires_at(entry: &EntryRef<'_>) -> Option<chrono::NaiveDateTime> {
+    entry.times.expires.unwrap_or(false).then(|| entry.times.expiry)?
+}
+
+/// Whether the expiry has passed. Compared in UTC, which is what KDBX stores.
+pub fn expired(entry: &EntryRef<'_>) -> bool {
+    expires_at(entry).is_some_and(|at| at <= chrono::Utc::now().naive_utc())
+}
+
+/* Set or clear the expiry. `None` turns it off and leaves the old date where
+   it was, the way KeePassXC does — unticking the box should not throw away
+   the date you would tick it back on with. */
+impl Vault {
+    pub fn set_expiry(
+        &mut self,
+        id: &EntryId,
+        at: Option<chrono::NaiveDateTime>,
+    ) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match at {
+            Some(at) => {
+                entry.times.expiry = Some(at);
+                entry.times.expires = Some(true);
+            }
+            None => entry.times.expires = Some(false),
+        }
+        entry.times.last_modification = Some(Times::now());
+        Ok(())
+    }
+}
+
 /// The five Sennel has a row for, plus the seed. Everything else on an entry
 /// is a custom field, which is a thing KeePassXC users really do use.
 pub const STANDARD: [&str; 6] = [TITLE, USERNAME, PASSWORD, URL, NOTES, "otp"];
@@ -1272,6 +1309,10 @@ pub enum Issue {
     Empty,
     /// The same password as this many other entries.
     Reused(usize),
+    /* Past its own expiry date. Not a weakness in the password — it may be a
+       fine one — but a credential the owner already decided had a shelf life,
+       and the audit is the list of things to go and do. */
+    Expired,
     /// Fewer bits than a password worth having, by the form's own estimate.
     Weak(f64),
 }
@@ -1282,7 +1323,11 @@ impl Issue {
         match self {
             Issue::Empty => 0,
             Issue::Reused(_) => 1,
-            Issue::Weak(_) => 2,
+            /* Above `weak`: an expired credential is a decision somebody
+               already made, where weak is only an estimate disagreeing with
+               them. */
+            Issue::Expired => 2,
+            Issue::Weak(_) => 3,
         }
     }
 
@@ -1290,6 +1335,7 @@ impl Issue {
         match self {
             Issue::Empty => "no password".to_string(),
             Issue::Reused(n) => format!("reused across {} entries", n + 1),
+            Issue::Expired => "expired".to_string(),
             Issue::Weak(bits) => format!("~{bits:.0} bits · {}", crate::generator::strength(bits)),
         }
     }
@@ -1332,6 +1378,8 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
             Issue::Empty
         } else if let Some(others) = counts.get(&digest(password)).filter(|n| **n > 1) {
             Issue::Reused(others - 1)
+        } else if expired(entry) {
+            Issue::Expired
         } else {
             let bits = crate::generator::typed_bits(password);
             if bits >= WEAK_BITS {
@@ -1562,6 +1610,15 @@ mod tests {
     #[ignore]
     fn make_a_vault_to_smoke_test_against() {
         let mut v = Vault::new();
+        let root = v.root_id();
+        /* One of each thing that only shows up on a real screen: an expired
+           entry, a live one, and a code. */
+        let stale = v.create_entry(&root, "old-cert", "octo", "Xq7!vm2Zt4pLr9Wd6Ks1", "", "").unwrap();
+        v.set_expiry(&stale, Some((chrono::Utc::now() - chrono::Duration::days(3)).naive_utc()))
+            .unwrap();
+        let soon = v.create_entry(&root, "renews-soon", "octo", "Zt4pLr9Wd6Ks1Xq7vm2A", "", "").unwrap();
+        v.set_expiry(&soon, Some((chrono::Utc::now() + chrono::Duration::days(30)).naive_utc()))
+            .unwrap();
         v.save_as(std::path::Path::new("/tmp/sennel-smoke.kdbx"), "smoke-pw", None).unwrap();
     }
 
@@ -1681,6 +1738,80 @@ mod tests {
             "an old password survived the wipe"
         );
         assert!(bytes.iter().all(|b| *b == 0), "the buffer was not zeroed");
+    }
+
+    /* Both halves of the expiry matter: `expires` is the switch and `expiry`
+       is the date, and a date with the switch off is one somebody set and
+       then turned off. Reading only the date would mark those expired. */
+    #[test]
+    fn an_expiry_needs_both_the_switch_and_the_date() {
+        use chrono::{Duration, Utc};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
+        /* A fn, not a closure: an inferred closure return ties the borrow of
+           `v` to the closure itself, and each call here wants its own. */
+        fn entry<'a>(v: &'a Vault, id: &EntryId) -> EntryRef<'a> {
+            v.get_entry(id).expect("the entry went missing")
+        }
+
+        // A fresh entry has no expiry at all.
+        assert_eq!(expires_at(&entry(&v, &id)), None);
+        assert!(!expired(&entry(&v, &id)));
+
+        let yesterday = (Utc::now() - Duration::days(1)).naive_utc();
+        v.set_expiry(&id, Some(yesterday)).unwrap();
+        assert_eq!(expires_at(&entry(&v, &id)), Some(yesterday));
+        assert!(expired(&entry(&v, &id)), "a past date did not read as expired");
+
+        let tomorrow = (Utc::now() + Duration::days(1)).naive_utc();
+        v.set_expiry(&id, Some(tomorrow)).unwrap();
+        assert!(!expired(&entry(&v, &id)), "a future date read as expired");
+
+        /* Turning it off keeps the date, the way KeePassXC does: unticking
+           the box should not throw away what you would tick it back on with. */
+        v.set_expiry(&id, None).unwrap();
+        assert_eq!(expires_at(&entry(&v, &id)), None, "the switch was ignored");
+        assert!(!expired(&entry(&v, &id)));
+        assert_eq!(entry(&v, &id).times.expiry, Some(tomorrow), "the date was thrown away");
+
+        // A date with the switch never set is not an expiry either.
+        let mut bare = vault();
+        let root = bare.root_id();
+        let id = bare.create_entry(&root, "x", "u", "p", "", "").unwrap();
+        if let Some(mut e) = bare.db.entry_mut(id) {
+            e.times.expiry = Some(yesterday);
+            e.times.expires = None;
+        }
+        assert!(!expired(&bare.get_entry(&id).unwrap()));
+    }
+
+    /* The whole point is that KeePassXC and Sennel agree about which entries
+       have gone stale, so it has to survive the file. */
+    #[test]
+    fn an_expiry_round_trips_through_the_file() {
+        use chrono::{Duration, Utc};
+        let dir = std::env::temp_dir().join(format!("sennel-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exp.kdbx");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
+        /* Whole seconds: KDBX stores a second-resolution timestamp, so a
+           sub-second value would not survive and the test would be asserting
+           something the format cannot do. */
+        use chrono::Timelike;
+        let when = (Utc::now() - Duration::days(2))
+            .naive_utc()
+            .with_nanosecond(0)
+            .expect("zero is a valid nanosecond");
+        v.set_expiry(&id, Some(when)).unwrap();
+        v.save_as(&path, "pw", None).unwrap();
+
+        let back = Vault::open(&path, "pw", None).unwrap();
+        assert_eq!(expires_at(&back.get_entry(&id).unwrap()), Some(when));
+        assert!(expired(&back.get_entry(&id).unwrap()));
+        std::fs::remove_file(&path).ok();
     }
 
     /* Custom fields and attachments used to be a count and nothing else.

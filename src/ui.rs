@@ -590,6 +590,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 .as_ref()
                 .and_then(|v| v.get_entry(id))
                 .is_some_and(|e| crate::vault::raw_otp(&e).is_some());
+            let expired = app
+                .vault
+                .as_ref()
+                .and_then(|v| v.get_entry(id))
+                .is_some_and(|e| crate::vault::expired(&e));
             let (title, user, group) = app
                 .vault
                 .as_ref()
@@ -634,6 +639,15 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                without pricing every row on every frame. */
             if has_code {
                 spans.push(p.faint(" ⊙"));
+            }
+            /* Expired rows say so in the list, not only in the pane: the
+               whole point is spotting one you were about to reach for. In
+               `warn`, and with a glyph of its own, so NO_COLOR still shows
+               it. `!` is taken by the flash line and `×` by its errors, so
+               this is the hourglass — one cell wide in every font that has
+               it, unlike the emoji form. */
+            if expired {
+                spans.push(Span::styled(" ⌛", Style::new().fg(p.warn)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -727,6 +741,12 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), width.saturating_sub(LABEL + 1)), faint));
+    /* Above the other stamps, and in `warn` once it has passed: `updated` and
+       `created` are history, this one is a thing to do. */
+    if let Some((said, gone)) = expiry_row(&entry) {
+        let ink = if gone { Style::new().fg(p.warn) } else { faint };
+        lines.push(row("expires", said, ink));
+    }
     for (label, value) in stamps(&entry) {
         lines.push(row(label, value, faint));
     }
@@ -756,6 +776,20 @@ fn stamps(entry: &keepass::db::EntryRef<'_>) -> Vec<(&'static str, String)> {
     .into_iter()
     .filter_map(|(label, t)| t.map(|t| (label, local(t))))
     .collect()
+}
+
+/* The expiry row, which is a stamp with an opinion: past dates say so in
+   words as well as colour, because the date alone makes the reader do the
+   arithmetic. Absent when nothing expires, rather than "expires never" — a
+   row that says nothing happens is a row that costs a line for nothing. */
+fn expiry_row(entry: &keepass::db::EntryRef<'_>) -> Option<(String, bool)> {
+    let at = crate::vault::expires_at(entry)?;
+    let gone = crate::vault::expired(entry);
+    let said = match gone {
+        true => format!("{}  ·  expired", local(at)),
+        false => local(at),
+    };
+    Some((said, gone))
 }
 
 fn local(utc: chrono::NaiveDateTime) -> String {
@@ -823,6 +857,10 @@ fn draw_detail_popup(frame: &mut Frame, app: &App) {
         lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
     }
     lines.push(row("group", truncate(&app.here(), value), faint));
+    if let Some((said, gone)) = expiry_row(&entry) {
+        let ink = if gone { Style::new().fg(p.warn) } else { faint };
+        lines.push(row("expires", said, ink));
+    }
     for (label, stamp) in stamps(&entry) {
         lines.push(row(label, stamp, faint));
     }
@@ -1405,6 +1443,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
     lines.push(row("url", FormField::Url, &form.url));
     lines.push(row("otp", FormField::Otp, &form.otp));
     lines.push(row("tags", FormField::Tags, &form.tags));
+    lines.push(row("expires", FormField::Expires, &form.expires));
     /* The code the typed seed produces, right now. A seed is a run of
        characters nobody can check by eye, and the site asks for a code to
        confirm the setup — so the box answers with one before it is saved. */
@@ -1762,7 +1801,12 @@ fn draw_audit(frame: &mut Frame, app: &App) {
         /* Reuse is the finding a person cannot spot themselves and the one
            that costs more than one account, so it is the one in `warn`. */
         let ink = match issue {
-            crate::vault::Issue::Reused(_) | crate::vault::Issue::Empty => p.warn,
+            /* The three that are decisions rather than estimates: no
+               password, a shared one, and one whose owner already said it
+               should have stopped working. */
+            crate::vault::Issue::Reused(_)
+            | crate::vault::Issue::Empty
+            | crate::vault::Issue::Expired => p.warn,
             crate::vault::Issue::Weak(_) => p.muted,
         };
         let name = truncate(&title, inner.saturating_sub(cols(&say) + 4));
@@ -2310,6 +2354,66 @@ mod tests {
             crate::theme::WARM.muted,
             "a live group drew like the bin"
         );
+    }
+
+    /* The point of an expiry is spotting one in the list you were about to
+       reach for, so the marker has to be in the row and not only in the pane. */
+    #[test]
+    fn an_expired_entry_is_marked_in_the_list_and_named_in_the_pane() {
+        use crate::vault::Vault;
+        use chrono::{Duration, Utc};
+        let backend = TestBackend::new(110, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let stale = vault.create_entry(&root, "old-cert", "octo", "p", "", "").unwrap();
+        vault.create_entry(&root, "fresh-cert", "octo", "p", "", "").unwrap();
+        vault
+            .set_expiry(&stale, Some((Utc::now() - Duration::days(3)).naive_utc()))
+            .unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.entry_cursor = Some(stale);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+
+        let rows = screen(&t);
+        let stale_row = rows.iter().find(|r| r.contains("old-cert")).unwrap();
+        let fresh_row = rows.iter().find(|r| r.contains("fresh-cert")).unwrap();
+        assert!(stale_row.contains('⌛'), "no marker on the expired row: {stale_row:?}");
+        assert!(!fresh_row.contains('⌛'), "a live row was marked: {fresh_row:?}");
+
+        /* The glyph carries it without colour, but the colour is what the eye
+           catches first, so both are checked. */
+        let buf = t.backend().buffer();
+        let y = rows.iter().position(|r| r.contains("old-cert")).unwrap() as u16;
+        let x = stale_row.chars().take_while(|c| *c != '⌛').count() as u16;
+        assert_eq!(buf[(x, y)].fg, crate::theme::WARM.warn, "the marker is not in warn");
+
+        // And the pane spells it out, because a date alone makes the reader
+        // do the arithmetic.
+        let joined = rows.join("\n");
+        assert!(joined.contains("expires"), "{joined}");
+        assert!(joined.contains("expired"), "{joined}");
+    }
+
+    /* An entry that does not expire costs no row: "expires never" is a line
+       that says nothing happens. */
+    #[test]
+    fn an_entry_without_an_expiry_gets_no_row() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(110, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "plain", "octo", "p", "", "").unwrap();
+        app.open_vault(vault);
+        app.switch_pane();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(!joined.contains("expires"), "{joined}");
+        assert!(!joined.contains('⌛'), "{joined}");
     }
 
     /* Custom fields and attachments were a count and nothing else, which

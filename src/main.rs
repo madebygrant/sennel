@@ -248,7 +248,11 @@ fn list(cfg: &Config) -> Result<()> {
         let indent = "  ".repeat(depth);
         println!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
         for entry in vault.entries_in(&id) {
-            println!("{}  {}", indent, printable(entry.title()));
+            /* A script reading the inventory should see what the browser
+               sees, and "expired" is the one thing about an entry that can
+               make the rest of the line misleading. */
+            let stale = if vault::expired(&entry) { "  (expired)" } else { "" };
+            println!("{}  {}{stale}", indent, printable(entry.title()));
         }
     }
     Ok(())
@@ -275,7 +279,7 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
         println!("{:<40}  {}", printable(entry.title()), issue.say());
     }
     if found.is_empty() {
-        println!("nothing reused, weak or empty");
+        println!("nothing reused, weak, expired or empty");
     }
     if !pwned {
         return Ok(());

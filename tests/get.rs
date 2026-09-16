@@ -179,7 +179,7 @@ fn audit_prints_the_findings_without_printing_the_passwords() {
     /* The fixture's one entry has a strong unique password, so the clean
        answer is the one being pinned — including that it says so rather than
        printing nothing at all. */
-    assert!(out.contains("nothing reused, weak or empty"), "{out}");
+    assert!(out.contains("nothing reused, weak, expired or empty"), "{out}");
     assert!(!out.contains("sennel-entry-pw"), "the audit printed a password");
 }
 

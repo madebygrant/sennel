@@ -38,6 +38,10 @@ theirs.
 notes. The characters that matched light up in each row, so you can see why a row is there. A needle
 starting with `#` filters by tag instead, and lists the tags you have while you type it.
 
+**Expiry dates it actually reads.** KDBX has carried an expiry on every entry all along. Expired
+rows are marked `⌛` in the list and named in the pane, `--list` says `(expired)`, and `!` puts them
+above the merely-weak ones — an expiry is a decision its owner already made.
+
 **One-time codes without handing over the seed.** Entries with a code are marked `⊙` and show the
 digits with a countdown. `t` copies them. The seed stays in the vault, because putting a permanent
 credential on the clipboard to save typing six digits is a bad trade.
@@ -54,8 +58,8 @@ copies a field, `s` writes an attachment out, `a` and `f` add them.
 behind your back. Entries that arrive from KeePassXC often carry one anyway, and `H` shows every old
 version it holds and clears them for good.
 
-**It tells you which passwords to change.** `!` lists every reused, weak or empty password in the
-vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
+**It tells you which passwords to change.** `!` lists every reused, weak, expired or empty password
+in the vault, worst first, and `enter` puts the cursor on the entry so the fix is two keys from the
 finding. Reuse is the one nobody can spot themselves, and the one that costs more than one account.
 `sennel audit --pwned` adds a breach check that never sends your password anywhere.
 [More](docs/audit.md).

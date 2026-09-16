@@ -14,6 +14,10 @@ sennel audit --pwned --db vault.kdbx   # also check for known breaches
 **Reused.** The same password on more than one entry. This is the finding nobody can spot for
 themselves, and the one that costs more than one account when it bites.
 
+**Expired.** Past the date on the entry. Not a weakness in the password, which may be a fine one,
+but a credential whose owner already decided it had a shelf life — which is why it sits above weak,
+where the audit is only an estimate disagreeing with them.
+
 **Weak.** Under 60 bits by the same estimate the entry form draws in amber while you type. The same
 line, not a second opinion.
 

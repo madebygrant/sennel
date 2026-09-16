@@ -75,6 +75,8 @@ pub enum FormField {
     Otp,
     /// KeePassXC tags, comma-separated. `#` in search filters on them.
     Tags,
+    /// `YYYY-MM-DD`, or empty for no expiry.
+    Expires,
     Notes,
 }
 
@@ -137,6 +139,8 @@ pub struct Form {
     pub otp: String,
     /// Comma-separated, which is how a person writes a short list.
     pub tags: String,
+    /// `YYYY-MM-DD`, or empty for "does not expire".
+    pub expires: String,
     pub notes: String,
     /// Char index into the focused box, same rule as the unlock caret.
     pub caret: usize,
@@ -153,6 +157,26 @@ pub struct Form {
        form: `^s` generates into a masked box, and a secret you cannot read is
        one you cannot check before saving. */
     pub reveal: bool,
+}
+
+/* `YYYY-MM-DD`, or empty for "does not expire". One spelling, because a box
+   that guesses between 03/04 and 04/03 will eventually guess wrong about
+   somebody's certificate.
+
+   The stored stamp is a datetime and this is a date, so it lands at the end
+   of the day named: an expiry of "2026-09-16" should not go off at midnight
+   that morning, which is what taking the date alone would do. */
+fn parse_expiry(text: &str) -> Result<Option<chrono::NaiveDateTime>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .map_err(|_| format!("{text:?} is not a date · use YYYY-MM-DD, or leave it empty"))?;
+    let at = date
+        .and_hms_opt(23, 59, 59)
+        .ok_or_else(|| "that date has no end".to_string())?;
+    Ok(Some(at))
 }
 
 /* Commas, because that is how a person writes a short list. Whitespace round
@@ -2340,6 +2364,7 @@ impl App {
             password: String::new(),
             url: String::new(),
             tags: String::new(),
+            expires: String::new(),
             notes: String::new(),
             caret: 0,
             password_touched: false,
@@ -2370,6 +2395,12 @@ impl App {
                an edit that silently dropped them would be worse than one
                that shows them. */
             tags: entry.tags.join(", "),
+            /* Prefilled from the stored stamp, as a date: the time of day is
+               stored but nobody sets an expiry to the minute, and a box that
+               demands one is a box that gets retyped wrong. */
+            expires: crate::vault::expires_at(&entry)
+                .map(|at| at.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
             notes: entry.notes().to_string(),
             caret: entry.title().chars().count(),
             password_touched: false,
@@ -2449,6 +2480,7 @@ impl App {
             FormField::Url,
             FormField::Otp,
             FormField::Tags,
+            FormField::Expires,
             FormField::Notes,
         ];
         let at = order.iter().position(|f| *f == form.field).unwrap_or(0);
@@ -2602,6 +2634,19 @@ impl App {
         /* The seed is checked before anything is written: a secret that
            cannot mint a code is worse than no secret at all, because the
            entry then looks set up and answers with nothing. */
+        /* Read before anything is written, the same rule the seed follows: a
+           date that cannot be parsed must not leave half an entry behind. */
+        let expires = match parse_expiry(&form.expires) {
+            Ok(at) => at,
+            Err(why) => {
+                self.warn(format!("{why}  ·  the form stays open"));
+                self.form = Some(form);
+                let form = self.form.as_mut().expect("just put back");
+                form.field = FormField::Expires;
+                form.caret = form.expires.chars().count();
+                return;
+            }
+        };
         let otp: Option<Option<String>> = if !form.otp_touched {
             None
         } else if form.otp.trim().is_empty() {
@@ -2636,6 +2681,7 @@ impl App {
                             let _ = vault.set_otp(&id, Some(url));
                         }
                         let _ = vault.set_tags(&id, &tags);
+                        let _ = vault.set_expiry(&id, expires);
                         Some(id)
                     })
             }
@@ -2668,6 +2714,7 @@ impl App {
                 let wrote = vault
                     .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
                     .and_then(|()| vault.set_tags(&id, &tags))
+                    .and_then(|()| vault.set_expiry(&id, expires))
                     .and_then(|()| match otp.as_ref() {
                         // Untouched keeps whatever the entry already carried.
                         None => Ok(()),
@@ -3366,7 +3413,7 @@ impl App {
         };
         let rows = crate::vault::audit(vault);
         if rows.is_empty() {
-            self.say("nothing to fix  ·  no reused, weak or empty passwords");
+            self.say("nothing to fix  ·  nothing reused, weak, expired or empty");
             return;
         }
         self.audit = Some(Audit { rows, cursor: 0 });
@@ -3818,6 +3865,7 @@ fn form_field_value(form: &mut Form, field: FormField) -> &mut String {
         FormField::Url => &mut form.url,
         FormField::Otp => &mut form.otp,
         FormField::Tags => &mut form.tags,
+        FormField::Expires => &mut form.expires,
         FormField::Notes => &mut form.notes,
     }
 }
@@ -3830,6 +3878,7 @@ fn form_field_value_ref(form: &Form, field: FormField) -> &str {
         FormField::Url => &form.url,
         FormField::Otp => &form.otp,
         FormField::Tags => &form.tags,
+        FormField::Expires => &form.expires,
         FormField::Notes => &form.notes,
     }
 }
@@ -4920,6 +4969,92 @@ pub mod tests {
         assert!(!app.stage.contains("remembered"), "{}", app.stage);
     }
 
+    /* ---- Entry expiry ---- */
+
+    /* One spelling, checked before anything is written — the same rule the
+       seed follows, because a date that cannot be read must not leave half an
+       entry behind. */
+    #[test]
+    fn the_expires_box_takes_a_date_and_refuses_anything_else() {
+        let mut app = open_app();
+        app.step_group(true);
+        let id = app.entry_cursor.unwrap();
+
+        app.open_edit_form();
+        assert_eq!(app.form.as_ref().unwrap().expires, "", "a fresh entry had one");
+        app.form.as_mut().unwrap().expires = "2030-06-01".into();
+        app.submit_form();
+        assert!(app.form.is_none(), "the form stayed open: {}", app.stage);
+
+        /* End of the named day, not its start: an expiry of the 1st should
+           not go off at midnight that morning. */
+        let at = crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap());
+        assert_eq!(at.map(|a| a.to_string()), Some("2030-06-01 23:59:59".to_string()));
+
+        // It prefills as a date, so a second save does not move it.
+        app.open_edit_form();
+        assert_eq!(app.form.as_ref().unwrap().expires, "2030-06-01");
+        app.submit_form();
+        assert_eq!(
+            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            at,
+            "a round trip through the form moved the date"
+        );
+
+        // Emptying the box turns the expiry off.
+        app.open_edit_form();
+        app.form.as_mut().unwrap().expires = "  ".into();
+        app.submit_form();
+        assert_eq!(
+            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            None,
+            "an empty box left the expiry on"
+        );
+
+        /* Anything else keeps the form open on the box that is wrong, rather
+           than guessing between 03/04 and 04/03. */
+        for bad in ["01/06/2030", "June 2030", "2030-13-01", "tomorrow"] {
+            app.open_edit_form();
+            app.form.as_mut().unwrap().expires = bad.into();
+            app.submit_form();
+            let form = app.form.as_ref().unwrap_or_else(|| panic!("{bad} was accepted"));
+            assert_eq!(form.field, FormField::Expires, "{bad} left the wrong box focused");
+            app.cancel_form();
+        }
+        assert_eq!(
+            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            None,
+            "a refused date was written anyway"
+        );
+    }
+
+    /* An expired credential is a decision its owner already made, so it sits
+       above `weak`, which is only an estimate disagreeing with them. */
+    #[test]
+    fn the_audit_names_expired_entries() {
+        use chrono::{Duration, Utc};
+        let mut app = open_app();
+        let root = app.root_id();
+        let vault = app.vault.as_mut().unwrap();
+        let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
+        let stale = vault.create_entry(&root, "cert", "u", strong, "", "").unwrap();
+        let live = vault.create_entry(&root, "other", "u", "Zt4&pLr9Wd6*Ks1Xq7!vm2", "", "").unwrap();
+        vault.set_expiry(&stale, Some((Utc::now() - Duration::days(1)).naive_utc())).unwrap();
+        vault.set_expiry(&live, Some((Utc::now() + Duration::days(1)).naive_utc())).unwrap();
+        app.snap();
+
+        let found = crate::vault::audit(app.vault.as_ref().unwrap());
+        let issue = |id| found.iter().find(|(e, _)| *e == id).map(|(_, i)| *i);
+        assert_eq!(issue(stale), Some(crate::vault::Issue::Expired));
+        // A strong password with a future date has nothing wrong with it.
+        assert_eq!(issue(live), None, "a live expiry was flagged");
+
+        // And `!` opens on it rather than saying the vault is clean.
+        app.open_audit();
+        let audit = app.audit.as_ref().expect("the audit found nothing: {}");
+        assert!(audit.rows.iter().any(|(id, _)| *id == stale));
+    }
+
     /* ---- Reorganising the tree, and tags ---- */
 
     /* `X`/`V` can already move a group, in two keys plus a cursor trip.
@@ -5295,6 +5430,7 @@ pub mod tests {
         app.next_form_field(true); // url
         app.next_form_field(true); // otp, also empty and untouched
         app.next_form_field(true); // tags
+        app.next_form_field(true); // expires
         app.next_form_field(true); // notes
         for c in "note".chars() {
             app.form_insert(c);

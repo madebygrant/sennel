@@ -39,7 +39,7 @@ not the browser's `*`.
 | `#tag` (in search)  | filter by tag instead of fuzzy-matching · `#` alone lists them|
 | `n` `N`             | next, previous match                                          |
 | `↑ ↓` (in search)   | move through the results while still typing                   |
-| `a` `e` `D`         | add, edit, delete entry to the bin (`otp` and `tags` boxes)   |
+| `a` `e` `D`         | add, edit, delete entry to the bin (`otp`, `tags`, `expires`) |
 | `A` `E`             | add, rename group                                             |
 | `D` (on groups)     | group to the recycle bin, contents and all                    |
 | `X` `V`             | cut, paste entry or group                                     |
