@@ -508,29 +508,21 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0);
     let live = app.active_pane == Pane::Entries;
     let width = list_width(area, rows.len());
-    /* Which characters the needle matched, per row. Computed before the item
-       loop because the searcher and the vault are both behind `app`, and the
-       loop already borrows it. */
-    let hits: Vec<Vec<u32>> = if searching {
-        let needle = app.search.clone().unwrap_or_default();
-        rows.iter()
-            .map(|id| {
-                let title = app
-                    .vault
-                    .as_ref()
-                    .and_then(|v| v.get_entry(id))
-                    .map(|e| EntryExt::title(&e).to_string())
-                    .unwrap_or_default();
-                app.searcher.indices(&needle, &title)
-            })
-            .collect()
-    } else {
-        vec![Vec::new(); rows.len()]
-    };
-    let items: Vec<ListItem> = rows
+    /* The scroll before the rows, not after: only the window is built, so the
+       pane has to know which window it is. Five thousand ListItems a frame
+       cost twenty milliseconds to allocate and forty rows to show. */
+    app.entry_scroll = app::scroll_to(app.entry_scroll, at, rows.len(), area.height as usize);
+    let first = app.entry_scroll;
+    let window: Vec<keepass::db::EntryId> = rows
         .iter()
-        .enumerate()
-        .map(|(n, id)| {
+        .skip(first)
+        .take(area.height as usize)
+        .copied()
+        .collect();
+    let needle = searching.then(|| app.search.clone().unwrap_or_default());
+    let items: Vec<ListItem> = window
+        .iter()
+        .map(|id| {
             let selected = Some(*id) == app.entry_cursor;
             let has_code = app
                 .vault
@@ -562,9 +554,15 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                    user, and the first column dropped when space runs out. */
                 if searching { &group } else { "" },
             );
+            /* Which characters the needle matched, for this row only: the
+               ones scrolled off the pane light nothing. */
+            let hits = match &needle {
+                Some(needle) => app.searcher.indices(needle, &title),
+                None => Vec::new(),
+            };
             let mark = mark(selected, live);
             let mut spans = vec![mark, Span::raw(" ")];
-            spans.extend(highlight(&name, &hits[n], row_style(selected)));
+            spans.extend(highlight(&name, &hits, row_style(selected)));
             if !user.is_empty() {
                 spans.push(dim(format!("  {user}")));
             }
@@ -579,9 +577,10 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(Line::from(spans))
         })
         .collect();
-    app.entry_scroll = app::scroll_to(app.entry_scroll, at, rows.len(), area.height as usize);
-    let mut state = ListState::default().with_offset(app.entry_scroll);
-    state.select(Some(at));
+    /* The widget is handed the window, so its own indices are window-local;
+       the scrollbar still speaks in whole-list terms. */
+    let mut state = ListState::default();
+    state.select(Some(at.saturating_sub(first)));
     frame.render_stateful_widget(List::new(items), area, &mut state);
     draw_scrollbar(frame, area, rows.len(), at);
 }
@@ -2260,6 +2259,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /* The pane builds only the rows it can show, so the window it picks has
+       to be the right one: the cursor is always on screen, and what is far
+       above it is not. */
+    #[test]
+    fn a_long_list_draws_the_window_around_the_cursor() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(60, 14);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        for n in 0..60 {
+            vault
+                .create_entry(&root, &format!("entry-{n:02}"), "u", "p", "", "")
+                .unwrap();
+        }
+        app.open_vault(vault);
+        app.switch_pane();
+        for _ in 0..40 {
+            app.step_entry(true);
+        }
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("entry-40"), "the cursor row is off screen: {joined}");
+        assert!(!joined.contains("entry-00"), "the whole list drew: {joined}");
+        // The scrollbar still speaks in whole-list terms.
+        assert!(joined.contains('█'), "no scrollbar for a list this long");
+
+        // And back to the top brings the first rows back.
+        app.jump_pane(false);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("entry-00"), "{joined}");
+        assert!(!joined.contains("entry-40"), "{joined}");
+    }
+
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
        somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]
@@ -2495,6 +2530,7 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 
 

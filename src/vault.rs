@@ -524,6 +524,9 @@ impl Vault {
     }
 
     /// Every live entry id in the file, for the global search scope.
+    /* Test-only since the row cache took over the counting: kept because the
+       KeePassXC fixture reads entries without knowing their ids. */
+    #[cfg(test)]
     pub fn all_entry_ids(&self) -> Vec<EntryId> {
         let dead = self.recycled();
         self.db.iter_all_entries().map(|e| e.id()).filter(|id| !dead.contains(id)).collect()

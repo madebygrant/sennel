@@ -339,6 +339,17 @@ impl Browse {
     }
 }
 
+/// Everything `entry_rows` reads. Two equal keys must mean two equal answers,
+/// so anything that reorders or refilters the pane belongs in here.
+#[derive(PartialEq, Eq)]
+struct RowsKey {
+    revision: u64,
+    needle: Option<String>,
+    global: bool,
+    order: SortOrder,
+    group: Option<GroupId>,
+}
+
 pub struct App {
     pub tick: usize,
     pub view: View,
@@ -426,6 +437,14 @@ pub struct App {
     pub unlock_reveal: bool,
     /// Unsaved changes. Set by every vault mutation; quitting while set asks.
     dirty: bool,
+    /* Bumped by `persist`, which every mutation calls. The row cache keys on
+       it, so a cache can never outlive the vault it described. */
+    revision: u64,
+    /* The last answer `entry_rows` gave, and what it was an answer to.
+       Ranking the whole vault took 45ms on five thousand entries and ran two
+       or three times a frame, so typing in the search band redrew at about
+       twelve frames a second. */
+    rows_cache: Option<(RowsKey, Vec<EntryId>)>,
     /// A save was refused because the file changed underneath. The next `^s`
     /// means "overwrite theirs", which is a thing to do on purpose or not at
     /// all.
@@ -512,6 +531,8 @@ impl App {
             caret: 0,
             unlock_reveal: false,
             dirty: false,
+            revision: 0,
+            rows_cache: None,
             overwrite_armed: false,
             form: None,
             group_prompt: None,
@@ -1396,7 +1417,33 @@ impl App {
     /// frame, and the two meet in `snap`.
     /* &mut self, not &self: the matcher scores with internal scratch state,
        so the filter loop borrows it mutably while the vault stays shared. */
+    /* The pane's rows, memoized. Three callers a frame (the header's count,
+       the pane itself, the status bar) each used to re-rank the whole vault,
+       and a keystroke in the band redraws — so the answer is kept until
+       something it depends on moves. */
     pub fn entry_rows(&mut self) -> Vec<EntryId> {
+        let key = self.rows_key();
+        if let Some((cached, rows)) = &self.rows_cache
+            && *cached == key
+        {
+            return rows.clone();
+        }
+        let rows = self.compute_rows();
+        self.rows_cache = Some((key, rows.clone()));
+        rows
+    }
+
+    fn rows_key(&self) -> RowsKey {
+        RowsKey {
+            revision: self.revision,
+            needle: self.search.clone(),
+            global: self.search_global,
+            order: self.order,
+            group: self.group_cursor,
+        }
+    }
+
+    fn compute_rows(&mut self) -> Vec<EntryId> {
         /* A live needle widens the pane to the whole vault: search is the one
            question whose answer is rarely "the folder I was already in", and
            the count in the status bar already promised the matches existed. */
@@ -1506,13 +1553,10 @@ impl App {
        to one folder, a whole-vault count is an answer to a question nobody
        asked. */
     pub fn entry_matches(&mut self) -> usize {
-        if !self.search_global {
-            return self.entry_rows().len();
-        }
-        let Some(vault) = &self.vault else {
-            return 0;
-        };
-        vault.all_entry_ids().iter().filter(|id| self.search_hit(**id)).count()
+        /* The rows *are* the matches while the needle is live — a second
+           whole-vault pass to count what the first one just filtered was the
+           most expensive redundancy in the frame. */
+        self.entry_rows().len()
     }
 
     /* `o` cycles the entries-pane order. `snap` re-points the cursor because
@@ -1748,18 +1792,6 @@ impl App {
         self.snap();
     }
 
-    /// Whether the current needle passes an entry. The single predicate the
-    /// rows list and the status count both read, so they can never disagree.
-    pub fn search_hit(&mut self, id: EntryId) -> bool {
-        let Some(needle) = self.search.as_deref().filter(|n| !n.is_empty()) else {
-            return true;
-        };
-        let Some(vault) = &self.vault else {
-            return true;
-        };
-        self.searcher.rank_entry(needle, vault, &id).is_some()
-    }
-
     pub fn selected_group(&self) -> Option<keepass::db::GroupRef<'_>> {
         let (vault, id) = (self.vault.as_ref()?, self.group_cursor?);
         vault.get_group(&id)
@@ -1789,6 +1821,10 @@ impl App {
        entry of another group is a selection nobody can see, and every command
        reads as dead until the next keypress moves it. */
     pub fn snap(&mut self) {
+        /* Every mutation lands here to put the cursors back on real rows, and
+           it runs before the autosave — so this, not `persist`, is the first
+           moment the cached rows can be out of date. */
+        self.rows_cache = None;
         if self.vault.is_none() {
             self.group_cursor = None;
             self.entry_cursor = None;
@@ -1953,6 +1989,10 @@ impl App {
        An in-memory vault (tests) has no path: it cannot save, so it stays
        dirty rather than silently discarding. */
     pub fn persist(&mut self) {
+        /* Every mutation lands here on its way to disk, which makes it the
+           one place that can say "the vault is not what it was". */
+        self.revision = self.revision.wrapping_add(1);
+        self.rows_cache = None;
         let Some(vault) = &mut self.vault else {
             return;
         };
