@@ -67,6 +67,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.group_prompt.is_some() {
         draw_group_prompt(frame, app);
     }
+    if app.browse.is_some() {
+        draw_browse(frame, app);
+    }
     recolour(frame);
 }
 
@@ -789,6 +792,12 @@ const NOTE_LINES: usize = 8;
    show. */
 fn draw_unlock(frame: &mut Frame, app: &App) {
     use crate::app::UnlockField;
+    /* The picker stands in for this box while it is open: two popups over
+       each other read as one broken one, and the boxes behind are not
+       answering anything until a file is chosen. */
+    if app.browse.is_some() {
+        return;
+    }
     let title = if app.unlock_new && app.db_path.is_some() {
         "new database"
     } else if app.db_path.is_none() {
@@ -881,7 +890,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         "enter unlock"
     };
     rows.push(Line::from(dim(format!(
-        " tab field   {go}   esc clear   ^r reveal"
+        " tab field   {go}   ^o browse   esc clear   ^r reveal"
     ))));
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, title, rows, width.max(20));
@@ -1042,6 +1051,91 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
     let inner = block.inner(at);
     frame.render_widget(block, at);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/* The file picker: directories and vaults only, the current directory in the
+   title, and a typed filter that narrows rather than ranks. Nobody knows the
+   path to a vault they have not opened yet. */
+fn draw_browse(frame: &mut Frame, app: &App) {
+    let Some(browse) = &app.browse else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(24, 72);
+    let inner = width.saturating_sub(4) as usize;
+    /* Room for the frame, the title, the hint and a blank: the list takes
+       whatever is left rather than growing the popup off the screen. */
+    let room = (area.height as usize).saturating_sub(7).clamp(1, 18);
+    let shown = browse.shown();
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(problem) = &browse.problem {
+        lines.push(Line::from(Span::styled(
+            truncate(&format!(" {problem}"), inner),
+            Style::new().fg(RED),
+        )));
+    } else if shown.is_empty() {
+        lines.push(Line::from(dim(if browse.filter.is_empty() {
+            " no vaults or folders here  ·  ← goes up".to_string()
+        } else {
+            format!(" nothing matches {}  ·  backspace clears", browse.filter)
+        })));
+    }
+    /* The window follows the cursor: a list that always starts at the top
+       hides everything past the fold once the cursor is past it. */
+    let first = browse.cursor.saturating_sub(room.saturating_sub(1));
+    for (n, row) in shown.iter().enumerate().skip(first).take(room) {
+        let live = n == browse.cursor;
+        let mark = if live { teal("▌") } else { Span::raw(" ") };
+        let name = if row.dir {
+            format!("{}/", row.name)
+        } else {
+            row.name.clone()
+        };
+        let style = if row.dir {
+            Style::new().fg(DIM)
+        } else {
+            row_style(live)
+        };
+        lines.push(Line::from(vec![
+            mark,
+            Span::styled(format!(" {}", truncate(&name, inner.saturating_sub(2))), style),
+        ]));
+    }
+    if shown.len() > room {
+        lines.push(dim(format!(
+            " {} of {} shown",
+            room.min(shown.len()),
+            shown.len()
+        )).into());
+    }
+    lines.push(Line::default());
+    if !browse.filter.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" /", Style::new().fg(GOLD)),
+            Span::styled(browse.filter.clone(), Style::new().fg(CREAM)),
+        ]));
+    }
+    lines.push(Line::from(dim(truncate(
+        " enter open · ← up · type to narrow · esc cancel",
+        inner,
+    ))));
+    /* The directory, tail first: the end of a long path is the part that says
+       where you are. */
+    let title = browse.dir.display().to_string();
+    let title = if cols(&title) > inner.saturating_sub(2) {
+        let keep: String = title
+            .chars()
+            .rev()
+            .take(inner.saturating_sub(3))
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("…{keep}")
+    } else {
+        title
+    };
+    popup(frame, &title, lines, width);
 }
 
 /* Its own question rather than a prompt: no vault is blocked on the answer,
@@ -1279,6 +1373,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("move", "tab  ↑ ↓", "between boxes"),
             ("edit", "^u  ^w", "clear box, kill word"),
             ("reveal", "^r", "show the password plainly"),
+            ("find", "^o", "pick a vault file from a list"),
             ("go", "enter", "unlock · apply path from the file box"),
             ("close", "any key", "dismisses this table"),
             ("quit", "^c", ""),
@@ -2132,6 +2227,39 @@ mod tests {
         assert!(joined.contains("no entries here  ·  a adds one"), "{joined}");
     }
 
+    /* Nobody knows the path to a vault they have not opened yet, so `^o`
+       lists what is there: folders and vaults, nothing else, with a typed
+       filter that narrows rather than ranks. */
+    #[test]
+    fn the_picker_lists_folders_and_vaults_and_narrows() {
+        let dir = std::env::temp_dir().join(format!("sennel-pick-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Work")).unwrap();
+        for name in ["personal.kdbx", "shared.kdbx", "notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let backend = TestBackend::new(80, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.unlock_file = dir.display().to_string();
+        app.open_browse();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("Work/"), "{joined}");
+        assert!(joined.contains("personal.kdbx"), "{joined}");
+        assert!(!joined.contains("notes.txt"), "the picker listed a non-vault");
+        // The unlock boxes step aside rather than sitting under the popup.
+        assert!(!joined.contains("key file"), "two popups at once: {joined}");
+
+        app.browse_filter('h');
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("shared.kdbx"), "{joined}");
+        assert!(!joined.contains("personal.kdbx"), "the filter did not narrow");
+        assert!(joined.contains("/h"), "the filter is not shown: {joined}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
        somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]
@@ -2367,6 +2495,7 @@ mod tests {
         assert!(empty.contains("nothing matches zzz"), "{empty}");
         assert!(empty.contains("esc clears it"), "{empty}");
     }
+
 
 
 

@@ -256,6 +256,74 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
     Ok(out)
 }
 
+/* Writing one key back into a file a person wrote by hand: the whole file is
+   read, the `db` line swapped (or added at the top), and everything else —
+   comments, ordering, keys Sennel does not know — comes through untouched. A
+   serialize-the-struct round trip would eat all of it. */
+pub fn remember_db(config_file: Option<&std::path::Path>, db: &std::path::Path) -> Result<()> {
+    let Some(path) = config_file else {
+        anyhow::bail!("no config file in this session");
+    };
+    let line = format!("db = {}", quote(&db.display().to_string()));
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for text in existing.lines() {
+        /* Only a top-level `db` key, and only before any [table] header: a
+           `db` inside [generator] is a different key with the same name. */
+        let is_db = !replaced
+            && text
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "db");
+        if is_db && !out.iter().any(|l: &String| l.trim_start().starts_with('[')) {
+            out.push(line.clone());
+            replaced = true;
+        } else {
+            out.push(text.to_string());
+        }
+    }
+    if !replaced {
+        /* Above any table header, or the key would be read as belonging to
+           the last table in the file. */
+        let at = out
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .unwrap_or(out.len());
+        out.insert(at, line);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    write_atomic(path, &text)
+}
+
+/// A TOML basic string. Paths can hold quotes and backslashes, and a path
+/// written raw would make the file unparseable on the next run.
+fn quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/* Beside the target and renamed over it, the same rule the vault saves by: a
+   half-written config is a session that will not start. */
+fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temp, text).with_context(|| format!("writing {}", temp.display()))?;
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
 pub fn expand(path: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     if path == "~" {
@@ -411,6 +479,62 @@ mod tests {
             Ok(_) => panic!("a two-character generator started the session"),
         };
         assert!(err.contains("outside 4–256"), "{err}");
+    }
+
+    /* A vault chosen in the app has to still be the vault next launch, and
+       the file it is written into belongs to the user: comments, ordering and
+       keys Sennel does not know all survive. */
+    #[test]
+    fn remembering_a_vault_rewrites_only_the_db_key() {
+        let mut file = temp("remember");
+        writeln!(
+            file.handle,
+            "# my settings\ndb = \"/old/path.kdbx\"\nlock_timeout = 90\n\n[generator]\nlength = 24"
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+
+        remember_db(Some(&path), std::path::Path::new("/vaults/new.kdbx")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my settings"), "the comment was eaten: {text}");
+        assert!(text.contains("db = \"/vaults/new.kdbx\""), "{text}");
+        assert!(!text.contains("/old/path.kdbx"), "the old path stayed: {text}");
+        assert!(text.contains("lock_timeout = 90"), "{text}");
+        assert!(text.contains("length = 24"), "the table was lost: {text}");
+
+        // And it reads back through the real parser, which is the only proof.
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, Some(std::path::PathBuf::from("/vaults/new.kdbx")));
+        assert_eq!(cfg.lock_timeout, 90);
+        assert_eq!(cfg.generator.length, 24);
+    }
+
+    /* A file with no `db` line gains one above any table header, or the key
+       would be read as part of the last table in the file. */
+    #[test]
+    fn remembering_adds_the_key_above_the_tables() {
+        let mut file = temp("remember-add");
+        writeln!(file.handle, "[generator]\nsymbols = true").unwrap();
+        let path = std::path::PathBuf::from(&file.path);
+        remember_db(Some(&path), std::path::Path::new("/vaults/first.kdbx")).unwrap();
+        let cfg = run(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ]);
+        assert_eq!(cfg.db, Some(std::path::PathBuf::from("/vaults/first.kdbx")));
+        assert!(cfg.generator.classes.symbols, "the table was orphaned");
+    }
+
+    /* --no-config asked for the file to be left out of the run, so it cannot
+       be where a choice is kept. */
+    #[test]
+    fn no_config_has_nowhere_to_remember() {
+        assert!(remember_db(None, std::path::Path::new("/vaults/x.kdbx")).is_err());
     }
 
     #[test]

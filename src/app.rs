@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use keepass::db::{Entry, EntryId, GroupId};
@@ -278,11 +278,53 @@ pub fn char_index_to_byte(s: &str, at: usize) -> usize {
         .map_or(s.len(), |(byte, _)| byte)
 }
 
+/// Where the picker starts when nothing else says: `$HOME`, or the working
+/// directory on a machine that has no home to speak of.
+fn home() -> PathBuf {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+}
+
 /// The vault's file name — the whole path would push the header off the row,
 /// and the directory is not what tells two vaults apart.
 fn vault_name(path: &std::path::Path) -> String {
     path.file_name()
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// One row of the file picker: a directory to step into, or a vault to open.
+pub struct Listing {
+    pub name: String,
+    pub dir: bool,
+}
+
+/* The file picker behind `^o` on the unlock screen. Typing a path is fine
+   when you know it; nobody knows the path to a vault they have not opened
+   yet, and `~/Library/Mobile Documents/com~apple~CloudDocs/…` is not a thing
+   to type twice. */
+pub struct Browse {
+    pub dir: PathBuf,
+    pub rows: Vec<Listing>,
+    pub cursor: usize,
+    /// Typed narrowing, as a plain substring: the list is a directory, not a
+    /// vault, so fuzzy ranking would be more machinery than it is worth.
+    pub filter: String,
+    /// What went wrong reading this directory, if anything did.
+    pub problem: Option<String>,
+}
+
+impl Browse {
+    /// Rows after the filter, which is what the popup draws and what the
+    /// cursor indexes into.
+    pub fn shown(&self) -> Vec<&Listing> {
+        let needle = self.filter.to_lowercase();
+        self.rows
+            .iter()
+            .filter(|row| needle.is_empty() || row.name.to_lowercase().contains(&needle))
+            .collect()
+    }
 }
 
 pub struct App {
@@ -358,6 +400,13 @@ pub struct App {
     /// The typed vault-file path. Prefilled from the config once; edits here
     /// stay across auto-locks, so switching vaults is a Tab away.
     pub unlock_file: String,
+    /// The file picker, while it is open. `^o` on the unlock screen.
+    pub browse: Option<Browse>,
+    /* Where a chosen vault is remembered, and what is already written there.
+       Both `None` under --no-config, which asked for the file to be left out
+       of the run and so cannot be where a choice is kept. */
+    pub config_file: Option<PathBuf>,
+    pub configured_db: Option<PathBuf>,
     /// Where typing lands, as a char index into the focused box (see below).
     pub caret: usize,
     /// Plain-text password on the unlock screen. `^r` flips it, the way the
@@ -443,6 +492,9 @@ impl App {
             unlock_password: String::new(),
             unlock_keyfile: String::new(),
             unlock_file: String::new(),
+            browse: None,
+            config_file: None,
+            configured_db: None,
             board: None,
             unlock_confirm: String::new(),
             caret: 0,
@@ -806,6 +858,32 @@ impl App {
         }
     }
 
+    /* Writes the opened vault into the config as `db`, unless it is already
+       there or this session has no config file (--no-config). Says so out
+       loud: a tool that edits your dotfiles without a word is a tool you stop
+       trusting with your dotfiles. */
+    fn remember_vault(&mut self, path: &Path) {
+        if self.configured_db.as_deref() == Some(path) {
+            return;
+        }
+        let Some(file) = self.config_file.clone() else {
+            return;
+        };
+        match crate::config::remember_db(Some(&file), path) {
+            Ok(()) => {
+                self.configured_db = Some(path.to_path_buf());
+                self.say(format!(
+                    "remembered {}  ·  next launch opens it",
+                    vault_name(path)
+                ));
+            }
+            /* Not fatal: the vault is open, and the only thing lost is the
+               convenience. Worth naming, since the next launch will not do
+               what the user just asked for. */
+            Err(e) => self.warn(format!("cannot save your choice  ·  {e}")),
+        }
+    }
+
     /// What the terminal window is called. The vault while one is open, so a
     /// tab strip of terminals says which is which.
     pub fn window_title(&self) -> String {
@@ -946,6 +1024,11 @@ impl App {
                     let plural = if n == 1 { "entry" } else { "entries" };
                     self.say(format!("unlocked {n} {plural}"));
                 }
+                /* A vault that opened is a vault worth remembering: pointing
+                   the session somewhere new used to last exactly as long as
+                   the session. Written after the unlock, never before, so a
+                   mistyped path cannot become the default. */
+                self.remember_vault(&path);
             }
             Err(VaultError::WrongPassword) => {
                 self.unlock_reveal = false;
@@ -983,6 +1066,158 @@ impl App {
             UnlockField::KeyFile => &mut self.unlock_keyfile,
             UnlockField::Confirm => &mut self.unlock_confirm,
         }
+    }
+
+    /* `^o`: open the picker on the directory the current path names, or on
+       home when there is nothing to go by. */
+    pub fn open_browse(&mut self) {
+        let start = {
+            let typed = crate::config::expand(self.unlock_file.trim());
+            if self.unlock_file.trim().is_empty() {
+                home()
+            } else if typed.is_dir() {
+                typed
+            } else {
+                typed.parent().map_or_else(home, Path::to_path_buf)
+            }
+        };
+        self.browse = Some(Browse {
+            dir: start,
+            rows: Vec::new(),
+            cursor: 0,
+            filter: String::new(),
+            problem: None,
+        });
+        self.read_dir();
+    }
+
+    pub fn close_browse(&mut self) {
+        self.browse = None;
+    }
+
+    /* Directories and vaults, nothing else: a picker that lists every file on
+       the disk makes the reader do the filtering. Dotfiles stay hidden until
+       the filter asks for them, the way a shell hides them. */
+    fn read_dir(&mut self) {
+        let Some(browse) = &mut self.browse else {
+            return;
+        };
+        let wants_hidden = browse.filter.starts_with('.');
+        let mut rows = Vec::new();
+        let mut problem = None;
+        match std::fs::read_dir(&browse.dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') && !wants_hidden {
+                        continue;
+                    }
+                    let dir = entry.file_type().is_ok_and(|t| t.is_dir());
+                    let vault = name.to_lowercase().ends_with(".kdbx");
+                    if dir || vault {
+                        rows.push(Listing { name, dir });
+                    }
+                }
+            }
+            /* Named rather than shown as an empty directory: "permission
+               denied" and "there is nothing here" are different answers. */
+            Err(e) => problem = Some(e.to_string()),
+        }
+        rows.sort_by(|a, b| b.dir.cmp(&a.dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        browse.rows = rows;
+        browse.cursor = 0;
+        browse.problem = problem;
+    }
+
+    pub fn browse_step(&mut self, down: bool) {
+        let Some(browse) = &mut self.browse else {
+            return;
+        };
+        let len = browse.shown().len();
+        if len == 0 {
+            browse.cursor = 0;
+            return;
+        }
+        browse.cursor = if down {
+            (browse.cursor + 1).min(len - 1)
+        } else {
+            browse.cursor.saturating_sub(1)
+        };
+    }
+
+    pub fn browse_end(&mut self, end: bool) {
+        let Some(browse) = &mut self.browse else {
+            return;
+        };
+        let len = browse.shown().len();
+        browse.cursor = if end { len.saturating_sub(1) } else { 0 };
+    }
+
+    /// Up one directory. The filter goes with it: it was about this listing.
+    pub fn browse_up(&mut self) {
+        let Some(browse) = &mut self.browse else {
+            return;
+        };
+        match browse.dir.parent() {
+            Some(parent) => {
+                browse.dir = parent.to_path_buf();
+                browse.filter.clear();
+                self.read_dir();
+            }
+            None => self.say("this is the root of the disk"),
+        }
+    }
+
+    pub fn browse_filter(&mut self, c: char) {
+        if let Some(browse) = &mut self.browse {
+            browse.filter.push(c);
+            browse.cursor = 0;
+            /* A leading dot asks for the hidden entries, so the listing is
+               re-read rather than merely narrowed. */
+            if browse.filter == "." {
+                self.read_dir();
+            }
+        }
+    }
+
+    pub fn browse_backspace(&mut self) {
+        let Some(browse) = &mut self.browse else {
+            return;
+        };
+        let was_hidden = browse.filter.starts_with('.');
+        browse.filter.pop();
+        browse.cursor = 0;
+        if was_hidden && !browse.filter.starts_with('.') {
+            self.read_dir();
+        }
+    }
+
+    /* Enter on the picker: step into a directory, or take a vault and hand
+       the keys back to the password box, which is the next thing to fill. */
+    pub fn browse_choose(&mut self) {
+        let Some(browse) = &self.browse else {
+            return;
+        };
+        let Some(row) = browse.shown().get(browse.cursor).map(|r| (r.name.clone(), r.dir)) else {
+            self.say("nothing here to choose");
+            return;
+        };
+        let path = browse.dir.join(&row.0);
+        if row.1 {
+            if let Some(browse) = &mut self.browse {
+                browse.dir = path;
+                browse.filter.clear();
+            }
+            self.read_dir();
+            return;
+        }
+        self.unlock_file = path.display().to_string();
+        self.db_path = Some(path);
+        self.browse = None;
+        self.refresh_db_state();
+        self.unlock_field = UnlockField::Password;
+        self.caret = 0;
+        self.say(format!("vault set  ·  {}", row.0));
     }
 
     /* Enter on the file box: make the typed path the vault this session
@@ -3446,6 +3681,80 @@ pub mod tests {
         // The earlier save's flash is still up, so drain before reading.
         app.expire_now();
         assert!(app.stage.contains("removed"), "{}", app.stage);
+    }
+
+    /* Pointing the session at a vault used to last exactly as long as the
+       session. A vault that opens is written into the config, once, and the
+       flash says so rather than editing a dotfile in silence. */
+    #[test]
+    fn an_opened_vault_becomes_the_default_for_next_time() {
+        let (mut app, tmp) = locked_app_with_db("pw");
+        let config = temp_path("config");
+        std::fs::write(&config.0, "lock_timeout = 90\n").unwrap();
+        app.config_file = Some(config.0.clone());
+        app.configured_db = None;
+
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        assert!(app.vault.is_some(), "{}", app.stage);
+
+        let text = std::fs::read_to_string(&config.0).unwrap();
+        assert!(text.contains(&tmp.0.display().to_string()), "{text}");
+        assert!(text.contains("lock_timeout = 90"), "the file was rewritten: {text}");
+        app.expire_now();
+        assert!(app.stage.contains("remembered"), "{}", app.stage);
+
+        /* Already the configured vault: nothing is written and nothing is
+           said, or every unlock would narrate a file that did not change. */
+        let before = std::fs::metadata(&config.0).unwrap().len();
+        app.lock_now();
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        assert_eq!(std::fs::metadata(&config.0).unwrap().len(), before);
+    }
+
+    /* The picker walks a real directory: folders step in, vaults are chosen,
+       and choosing one points the session at it and moves to the password. */
+    #[test]
+    fn the_picker_walks_folders_and_chooses_a_vault() {
+        let dir = std::env::temp_dir().join(format!("sennel-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Vaults")).unwrap();
+        std::fs::write(dir.join("Vaults").join("personal.kdbx"), b"x").unwrap();
+        std::fs::write(dir.join("loose.txt"), b"x").unwrap();
+
+        let mut app = App::new();
+        app.unlock_file = dir.display().to_string();
+        app.open_browse();
+        {
+            let browse = app.browse.as_ref().expect("the picker did not open");
+            let names: Vec<&str> = browse.shown().iter().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, ["Vaults"], "only folders and vaults are listed");
+        }
+
+        // Enter on a folder steps in rather than choosing it.
+        app.browse_choose();
+        assert!(app.browse.is_some(), "a folder closed the picker");
+        assert!(app.db_path.is_none(), "a folder was taken as a vault");
+        {
+            let browse = app.browse.as_ref().unwrap();
+            assert_eq!(browse.shown().len(), 1);
+            assert!(browse.dir.ends_with("Vaults"));
+        }
+
+        // Enter on a vault takes it and hands the keys to the password box.
+        app.browse_choose();
+        assert!(app.browse.is_none(), "choosing left the picker open");
+        assert_eq!(app.db_path, Some(dir.join("Vaults").join("personal.kdbx")));
+        assert!(app.unlock_file.ends_with("personal.kdbx"), "{}", app.unlock_file);
+        assert_eq!(app.unlock_field, UnlockField::Password);
+
+        // And ← climbs back out of a folder.
+        app.open_browse();
+        let before = app.browse.as_ref().unwrap().dir.clone();
+        app.browse_up();
+        assert_ne!(app.browse.as_ref().unwrap().dir, before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* ---- Wave 5.1: entry form ---- */

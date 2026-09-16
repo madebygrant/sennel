@@ -54,6 +54,9 @@ fn main() -> Result<()> {
        loop must not stat: `refresh_db_state` runs here and after every save,
        and the cached `unlock_new` is all the draw ever reads. */
     app.set_db_path(cfg.db.clone());
+    /* Where a chosen vault gets remembered, so the next launch opens it. */
+    app.config_file = cfg.config_file.clone();
+    app.configured_db = cfg.db.clone();
     app.refresh_db_state();
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
@@ -262,6 +265,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        screen, with the popup still up over the box it landed in. */
     if app.show_help {
         app.show_help = false;
+        return;
+    }
+    /* The picker owns the keys while it is open: the boxes behind it must not
+       take a letter meant to narrow a list. */
+    if app.browse.is_some() {
+        handle_browse_key(app, code, mods);
         return;
     }
     /* The lock screen owns every printable key, so the overlay needs one no
@@ -508,6 +517,28 @@ fn handle_group_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+/* The file picker: movement, a typed filter, and the two keys that leave it.
+   Left goes up a directory rather than moving a caret — there is no text here
+   to move through, only a tree. */
+fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Esc => app.close_browse(),
+        KeyCode::Enter | KeyCode::Right => app.browse_choose(),
+        KeyCode::Left => app.browse_up(),
+        KeyCode::Up => app.browse_step(false),
+        KeyCode::Down => app.browse_step(true),
+        KeyCode::Char('p') if ctrl => app.browse_step(false),
+        KeyCode::Char('n') if ctrl => app.browse_step(true),
+        KeyCode::Home => app.browse_end(false),
+        KeyCode::End => app.browse_end(true),
+        KeyCode::Backspace => app.browse_backspace(),
+        KeyCode::Char(c) if !ctrl => app.browse_filter(c),
+        _ => {}
+    }
+}
+
 /* Every printable key is text while the lock owns the screen, so `q` types a
    letter instead of ending the session. The shape mirrors earworm's prompt
    keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
@@ -530,6 +561,8 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            printable key here is text, `*` and all — a password with a star
            in it would have been typed missing it. */
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
+        /* `^o`: pick the vault from a list instead of typing its path. */
+        KeyCode::Char('o') if ctrl => app.open_browse(),
         KeyCode::Left if !ctrl => app.unlock_move(false),
         KeyCode::Right if !ctrl => app.unlock_move(true),
         KeyCode::Home if !ctrl => app.unlock_end(false),

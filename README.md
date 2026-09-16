@@ -20,19 +20,25 @@ Install onto your PATH: `cargo install --path .`, then just `sennel`.
 
 ## The unlock screen
 
-The first box is the vault file, so one session can point at any vault: type (or accept the
-prefilled from config) a path, `tab` to the password box, `enter` to unlock. The path field is
-editable every time the app locks — idle auto-lock drops the secrets and the editor state, not the
-vault path, so switching vaults after a lock is `esc`, edit the file box, `enter`. A path that
-doesn't exist yet is a new database: confirm, then set the password twice. Every printable key on
-this screen is text — a `*` in a password types as `*` — so the reveal is `^r`, not the browser's
-`*`.
+The first box is the vault file, so one session can point at any vault. Type a path (or accept the
+one from your config), or press `^o` to pick one from a list: folders and `.kdbx` files only, `enter`
+steps into a folder or takes a vault, `←` goes back up, and typing narrows the list. Then `tab` to
+the password box and `enter` to unlock.
+
+A vault that opens is remembered — its path is written into `config.toml` as `db`, so the next launch
+opens it without arguments. Sennel says so when it does; `--no-config` has nowhere to write and so
+does not. The path field is editable every time the app locks — idle auto-lock drops the secrets and
+the editor state, not the vault path, so switching vaults after a lock is `esc`, edit the file box,
+`enter`. A path that doesn't exist yet is a new database: confirm, then set the password twice. Every
+printable key on this screen is text — a `*` in a password types as `*` — so the reveal is `^r`, not
+the browser's `*`.
 
 ## Keys
 
 | Key             | Action                                        |
 | --------------- | --------------------------------------------- |
 | `tab ↑ ↓`       | move between boxes on prompt screens (unlock, forms) |
+| `^o`            | pick the vault file from a list (unlock screen) |
 | `enter`         | unlock / save the form                        |
 | `j k ↑ ↓`       | move within the pane                          |
 | `^d ^u` `PgUp PgDn` | move a screen at a time                   |
@@ -99,7 +105,7 @@ has a visible home in the `h` overlay.
 `~/.config/sennel/config.toml`, all keys optional:
 
 ```toml
-db = "~/vaults/main.kdbx"      # default database
+db = "~/vaults/main.kdbx"      # default database · rewritten when you open another
 clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
