@@ -318,3 +318,51 @@ fn convert_writes_a_kdbx4_copy_and_leaves_the_original_alone() {
     std::fs::remove_file(&old).ok();
     std::fs::remove_file(&new).ok();
 }
+
+/* Every printing path survives a reader that stops early. `sennel --check |
+   head` used to panic on the broken pipe, and `sennel man | head` reported
+   "Error: Broken pipe" and exited 1 — both of them a normal thing to type,
+   and neither of them a failure of the command. The vault-opening paths are
+   the reason this is not left to SIGPIPE: dying by signal would skip every
+   zeroize on the way out. */
+#[test]
+fn a_reader_that_stops_early_is_not_an_error() {
+    for args in [
+        vec!["--check"],
+        vec!["man"],
+        vec!["completions", "zsh"],
+        vec!["--list", "--db", FIXTURE],
+        vec!["audit", "--db", FIXTURE],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sennel"))
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("could not run sennel");
+        let mut stdin = child.stdin.take().expect("no stdin");
+        let _ = stdin.write_all(PASSWORD.as_bytes());
+        drop(stdin);
+        /* The reader closing before the writer is done, which is all `head`
+           does. Dropped before the wait, so the writes land on a pipe with
+           nobody on the other end. */
+        drop(child.stdout.take());
+        let out = child.wait_with_output().expect("sennel did not finish");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            !stderr.contains("panicked"),
+            "{args:?} panicked into a closed pipe: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Broken pipe"),
+            "{args:?} called a closed pipe an error: {stderr}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?} exited {:?} · stderr: {stderr}",
+            out.status.code()
+        );
+    }
+}

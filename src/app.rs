@@ -1624,9 +1624,16 @@ impl App {
        deduplicated, so opening the same two vaults all week leaves two rows
        rather than ten. */
     fn remember_recent(&mut self, path: &Path) {
+        let before = self.recent.clone();
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(crate::config::RECENT_MAX);
+        /* Reopening the vault you always open changes nothing, and rewriting
+           the config to say so is one more chance for two Sennels running at
+           once to overwrite each other's list. */
+        if self.recent == before {
+            return;
+        }
         /* Silent on failure, unlike the `db` key beside it: that one is a
            choice the user just made, this one is bookkeeping, and two
            warnings about the same unwritable file is one too many. */
@@ -6421,6 +6428,30 @@ pub mod tests {
         .unwrap();
         let parsed = crate::config::Config::build(cli).unwrap();
         assert_eq!(parsed.recent, vec![settled]);
+    }
+
+    /* Reopening the vault you always open changes nothing, so it writes
+       nothing: every rewrite is another chance for two Sennels running at
+       once to overwrite each other's list. */
+    #[test]
+    fn reopening_the_same_vault_rewrites_nothing() {
+        let cfg = temp_config("idempotent");
+        let (mut app, _tmp) = locked_app_with_db("correct horse");
+        app.config_file = Some(cfg.0.clone());
+        let mut pw = "correct horse".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert!(cfg.0.is_file(), "the first open wrote nothing");
+
+        /* Removed rather than timestamped: `write_atomic` creates the file,
+           so its absence afterwards is proof nobody wrote. */
+        std::fs::remove_file(&cfg.0).unwrap();
+        let settled = app.recent[0].clone();
+        app.remember_recent(&settled);
+        assert!(!cfg.0.is_file(), "an unchanged library was written again");
+
+        // A different vault still writes.
+        app.remember_recent(Path::new("/vaults/elsewhere.kdbx"));
+        assert!(cfg.0.is_file(), "a new vault did not reach the file");
     }
 
     /* Newest first, deduplicated and capped: opening the same two vaults all

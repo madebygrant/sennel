@@ -28,6 +28,22 @@ use config::{Cli, Command, Config, Field};
 use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
+/* `sennel --check | head` is the reader having seen enough, not a failure.
+   Rust ignores SIGPIPE so the write comes back EPIPE instead, and `say!`
+   turns that into a panic — which on the paths that have a vault open would
+   also skip every zeroize on the way out. Dropped instead: the command runs
+   to its end, its destructors run, and what nobody is reading goes nowhere. */
+macro_rules! say {
+    () => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout());
+    }};
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 fn main() -> Result<()> {
     /* First, before a config is read or a vault is opened. Every path below
        this can end up holding secrets — `get` sleeps out the clipboard wipe
@@ -56,12 +72,21 @@ fn main() -> Result<()> {
        not a session, and it must work on a machine with no vault. */
     if let Some(Command::Completions { shell }) = &cfg.command {
         let mut command = Cli::command();
-        clap_complete::generate(*shell, &mut command, "sennel", &mut std::io::stdout());
+        /* Into a buffer first: clap_complete unwraps the write, so generating
+           straight into a closed pipe panics rather than returning. The
+           script is a few kilobytes, so holding it costs nothing. */
+        let mut script: Vec<u8> = Vec::new();
+        clap_complete::generate(*shell, &mut command, "sennel", &mut script);
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&script);
         return Ok(());
     }
     if let Some(Command::Man) = &cfg.command {
-        clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
-        return Ok(());
+        match clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout()) {
+            // `sennel man | head` reported "Error: Broken pipe" and exited 1.
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+            _ => return Ok(()),
+        }
     }
     if let Some(Command::Convert { to }) = &cfg.command {
         let to = to.clone();
@@ -173,14 +198,14 @@ fn harden() {
    there. Exits non-zero when copying could never work, so a script can act
    on it. */
 fn check(cfg: &Config) -> Result<()> {
-    println!("Sennel {}", env!("CARGO_PKG_VERSION"));
-    println!(
+    say!("Sennel {}", env!("CARGO_PKG_VERSION"));
+    say!(
         "config    {}",
         cfg.config_file
             .as_deref()
             .map_or("(none · --no-config)".to_string(), |p| p.display().to_string())
     );
-    println!(
+    say!(
         "db        {}",
         cfg.db
             .as_deref()
@@ -193,26 +218,26 @@ fn check(cfg: &Config) -> Result<()> {
         Some(path) if path.is_file() => {
             let writable = std::fs::OpenOptions::new().write(true).open(path).is_ok();
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            println!(
+            say!(
                 "vault     found · {size} bytes · {}",
                 if writable { "writable" } else { "READ-ONLY" }
             );
         }
-        Some(_) => println!("vault     not there yet · unlocking creates it"),
-        None => println!("vault     (none)"),
+        Some(_) => say!("vault     not there yet · unlocking creates it"),
+        None => say!("vault     (none)"),
     }
     /* The library, since "which vaults does this machine know about" is a
        question a bug report asks and the TUI answers only behind `^v`. */
     if cfg.recent.is_empty() {
-        println!("library   (none yet)");
+        say!("library   (none yet)");
     } else {
         for (n, path) in cfg.recent.iter().enumerate() {
             let label = if n == 0 { "library  " } else { "         " };
             let state = if path.is_file() { "" } else { " · missing" };
-            println!("{label} {}{state}", path.display());
+            say!("{label} {}{state}", path.display());
         }
     }
-    println!(
+    say!(
         "hardened  {}",
         match core_dumps_off() {
             true => "core dumps off",
@@ -223,26 +248,26 @@ fn check(cfg: &Config) -> Result<()> {
             false => "core dumps STILL ON · this machine refused the limit",
         }
     );
-    println!("theme     {}", cfg.theme.name());
+    say!("theme     {}", cfg.theme.name());
     for note in &cfg.theme_warnings {
-        println!("          ! {note}");
+        say!("          ! {note}");
     }
-    println!("sort      {}", cfg.sort.short());
-    println!(
+    say!("sort      {}", cfg.sort.short());
+    say!(
         "generate  {} chars · {}",
         cfg.generator.length,
         cfg.generator.describe()
     );
-    println!("mouse     {}", if cfg.mouse { "on" } else { "off" });
-    println!("clear in  {}s", cfg.clipboard_timeout);
-    println!("lock in   {}s (0 = off)", cfg.lock_timeout);
+    say!("mouse     {}", if cfg.mouse { "on" } else { "off" });
+    say!("clear in  {}s", cfg.clipboard_timeout);
+    say!("lock in   {}s (0 = off)", cfg.lock_timeout);
     match arboard::Clipboard::new() {
         Ok(_) => {
-            println!("clipboard ok");
+            say!("clipboard ok");
             Ok(())
         }
         Err(e) => {
-            println!("clipboard unavailable · {e}");
+            say!("clipboard unavailable · {e}");
             std::process::exit(1);
         }
     }
@@ -252,17 +277,17 @@ fn check(cfg: &Config) -> Result<()> {
    only — the point is scripting and inventory, not display. */
 fn list(cfg: &Config) -> Result<()> {
     let vault = unlock(cfg)?;
-    println!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
+    say!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
         let indent = "  ".repeat(depth);
-        println!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
+        say!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
         for entry in vault.entries_in(&id) {
             /* A script reading the inventory should see what the browser
                sees, and "expired" is the one thing about an entry that can
                make the rest of the line misleading. */
             let stale = if vault::expired(&entry) { "  (expired)" } else { "" };
-            println!("{}  {}{stale}", indent, printable(entry.title()));
+            say!("{}  {}{stale}", indent, printable(entry.title()));
         }
     }
     Ok(())
@@ -335,9 +360,9 @@ fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
         );
     }
 
-    println!("{} → {}", from.display(), out.display());
-    println!("{was} → {} · {} entries, verified", fresh.format(), after.len());
-    println!("the original is untouched · open the new file in KeePassXC before you replace it");
+    say!("{} → {}", from.display(), out.display());
+    say!("{was} → {} · {} entries, verified", fresh.format(), after.len());
+    say!("the original is untouched · open the new file in KeePassXC before you replace it");
     Ok(())
 }
 
@@ -353,10 +378,10 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
         let Some(entry) = vault.get_entry(id) else {
             continue;
         };
-        println!("{:<40}  {}", printable(entry.title()), issue.say());
+        say!("{:<40}  {}", printable(entry.title()), issue.say());
     }
     if found.is_empty() {
-        println!("nothing reused, weak, expired or empty");
+        say!("nothing reused, weak, expired or empty");
     }
     if !pwned {
         return Ok(());
@@ -366,7 +391,7 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
        share a password should ask once, and passwords that merely share the
        first five hex characters ride along in the same answer — which is the
        same property that makes the k-anonymity worth anything. */
-    println!();
+    say!();
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut breached = 0usize;
     for entry in vault.entry_refs() {
@@ -382,12 +407,12 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
         let count = pwned::count_in(&seen[&prefix], &suffix);
         if count > 0 {
             breached += 1;
-            println!("{:<40}  in {count} known breaches", printable(entry.title()));
+            say!("{:<40}  in {count} known breaches", printable(entry.title()));
         }
     }
     match breached {
-        0 => println!("no password in this vault is in a known breach"),
-        n => println!("\n{n} password(s) are in a known breach · change those first"),
+        0 => say!("no password in this vault is in a known breach"),
+        n => say!("\n{n} password(s) are in a known breach · change those first"),
     }
     Ok(())
 }
@@ -432,16 +457,16 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
         .unwrap_or_else(|| format!("Imported {}", chrono::Local::now().format("%Y-%m-%d")));
 
     if dry_run {
-        println!("{} entries would go into {into}:", found.rows.len());
+        say!("{} entries would go into {into}:", found.rows.len());
         for row in found.rows.iter().take(20) {
             let where_ = match row.group.trim() {
                 "" => String::new(),
                 g => format!("  ({})", printable(g)),
             };
-            println!("  {}{where_}", printable(&row.title));
+            say!("  {}{where_}", printable(&row.title));
         }
         if found.rows.len() > 20 {
-            println!("  … and {} more", found.rows.len() - 20);
+            say!("  … and {} more", found.rows.len() - 20);
         }
         return Ok(());
     }
@@ -461,7 +486,7 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
         eprintln!("{}", printable(note));
     }
     vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("imported {added} entries into {into}");
+    say!("imported {added} entries into {into}");
     /* The export is still sitting on disk in the clear, which is the part
        people forget once the import worked. */
     eprintln!("{file} is still plaintext on disk · delete it");
@@ -567,7 +592,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
         anyhow::bail!("{title} has no {}", field.name());
     }
     if to_stdout {
-        println!("{value}");
+        say!("{value}");
         return Ok(());
     }
 
