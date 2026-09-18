@@ -2,8 +2,8 @@
 
 [Back to the README](../README.md)
 
-Three ways in, all drawing from the OS (`getrandom`) and all refusing to produce something the
-settings could not honour.
+Three ways in, all drawing from the OS (`getrandom`), all refusing to produce something the settings
+could not honour.
 
 - `P` in the browser opens the generator on its own, with no entry to store the result in.
 - `^s` inside the add or edit form writes one straight into the password box.
@@ -36,13 +36,13 @@ settings could not honour.
 | `a`         | allow `l 1 I O 0`, which are left out by default            |
 | `esc` `q`   | close                                                       |
 
-The password is shown plainly, never masked: one you cannot read is one you cannot check against
-whatever rule the site has. Every key rolls a fresh password, so the numbers under it always
-describe what is on screen. Lower case is always on, which is why it has no key.
+The password is shown plainly, never masked. One you cannot read is one you cannot check against
+whatever rule the site has this week. Every key rolls a fresh password, so the numbers under it
+always describe what is on screen. Lower case is always on, which is why it has no key.
 
-The toggles last the session and are never written back — [the config file](configuration.md) stays
-the one place the default is set. Nothing here touches the vault, and `^l` or the idle lock takes
-the popup with it.
+The toggles last the session and are never written back, so [the config file](configuration.md)
+stays the one place the default is set. Nothing here touches the vault, and `^l` or the idle lock
+takes the popup with it.
 
 ## `sennel gen`
 
@@ -64,22 +64,20 @@ sennel gen -n 32 --symbols --stdout --force
 | `--stdout`     | print it instead of copying it                            |
 | `--force`      | allow `--stdout` into a terminal                          |
 
-No vault is opened and no password is asked for, so this works on a machine with no database at
-all. The defaults come from the `[generator]` table; the flags override them for one run.
+No vault is opened and no password is asked for, so this works on a machine with no database at all.
+The defaults come from the `[generator]` table, and the flags override them for one run.
 
 Without `--stdout` the password goes to the clipboard and the process waits out the wipe before
-exiting, the same as `sennel get`. With it, stdout is the password and nothing else — everything
-the run has to say goes to stderr — and printing into a terminal is refused unless you add
+exiting, the same as `sennel get`. With it, stdout is the password and nothing else. Everything the
+run has to say goes to stderr instead, and printing into a terminal is refused unless you add
 `--force`, because scrollback keeps what the clipboard would not.
 
 ## What it makes
 
-Every class you ask for is guaranteed to appear at least once, then the rest is drawn from the
-combined pool and the whole thing is shuffled, so the forced characters are not sitting at the
-front in class order. Indices are rejection-sampled rather than taken modulo, so no character is
-slightly likelier than another.
+Every class you ask for appears at least once. The rest is drawn from the combined pool, then the
+whole thing is shuffled so the forced characters are not sitting at the front in class order.
+Indices are rejection-sampled rather than taken modulo, so no character is likelier than another.
 
-The bit count is `length × log2(alphabet)`, priced against the pool actually drawn from: excluding
-the lookalikes shrinks the alphabet, and quoting the wider one would overstate the secret in the
-one direction that matters. Under 40 bits reads as `weak`, 60 `fair`, 80 `good`, above that
-`strong`.
+The bit count is `length × log2(alphabet)`, priced against the pool actually drawn from. Excluding
+the lookalikes shrinks the alphabet, and quoting the wider one would overstate the secret in the one
+direction that matters. Under 40 bits reads as `weak`, 60 `fair`, 80 `good`, above that `strong`.

@@ -32,15 +32,15 @@ cursor = "#00ff88"
 
 Sennel rewrites `db`, `recent` and `theme` in place when you open another vault or press `^t`. It
 replaces the one key and leaves your comments, ordering and unknown keys alone. A value written
-across several lines is replaced whole, so an array you have reformatted by hand survives.
+across several lines is replaced whole, so an array you reformatted by hand survives.
 
 `recent` holds paths and nothing else, but a list of where your vaults live is still worth keeping
 to yourself, which is why the file is `0600`. Trim it by hand, or press `^d` on a row in `^v`.
-Forgetting the vault named by `db` removes that key too, so the next launch asks rather than
-reopening what you just forgot. `--check` prints the library.
+Forget the vault named by `db` and that key goes too, so the next launch asks rather than reopening
+what you just forgot. `--check` prints the library.
 
-Paths are stored absolute, resolved through the folder they are in. `sennel --db vault.kdbx` names
-a different file from every other directory, and a library row has to mean the same thing tomorrow.
+Paths are stored absolute, resolved through the folder they are in: `sennel --db vault.kdbx` names a
+different file from every other directory, and a library row has to mean the same thing tomorrow.
 
 ## Command line
 

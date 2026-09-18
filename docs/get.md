@@ -20,25 +20,24 @@ sennel get github --stdout | pbcopy
 | `--stdout` | print the value instead of copying it            |
 | `--force`  | allow `--stdout` into a terminal                 |
 
-Name one field. Two would mean one clipboard silently winning, and you could not tell which.
+Name one field. Two would mean one clipboard silently winning, and no way to tell which.
 
 ## Finding the entry
 
 The needle is fuzzy and covers titles, usernames, urls and group paths, the same index the TUI's `/`
-uses. One shot, no list to pick from, so the rules are ones you can predict:
+uses. There is no list to pick from here, so the rules are ones you can predict:
 
 1. An exact title, ignoring case, wins outright. `mail` finds the entry called `mail` even when
    `mailchimp-api-key` also matches.
 2. Otherwise a single fuzzy match wins.
-3. Anything else prints the candidates and exits 2. Two entries with the same title stay ambiguous:
-   the score that separates them is not something you can see, so it does not get to pick.
+3. Anything else prints the candidates and exits 2. Two entries with the same title stay ambiguous,
+   because the score that separates them is not something you can see, so it does not get to pick.
 
 Entries in the recycle bin are never candidates, by any needle, including their exact name.
 
 ## The password
 
-From a terminal, `get` prompts. From a pipe it reads the first line of stdin, which is how a script
-supplies it:
+From a terminal, `get` prompts. From a pipe it reads the first line of stdin:
 
 ```sh
 pass sennel-master | sennel get github --stdout
@@ -58,7 +57,7 @@ pass sennel-master | sennel get github --stdout
 ## Two things it will not do
 
 **`--stdout` into a terminal** puts the secret in your scrollback, which is what the TUI exists to
-avoid. Refused unless you pass `--force`, and refused before the password prompt rather than after.
+avoid. Refused unless you pass `--force`, and refused before the password prompt, not after.
 
 **Hand over a TOTP seed.** `--otp` gives the six digits the seed produces right now. The seed mints
 codes forever, so it stays in the vault.
@@ -67,4 +66,5 @@ codes forever, so it stays in the vault.
 
 A copy is wiped by a timer thread inside the process, so a `get` that exited immediately would
 abandon the password on the clipboard. It stays alive for the timeout, says how long, and wipes
-before returning. `clipboard_timeout = 0` means leave it there, and then it exits at once.
+before returning. Under `clipboard_timeout = 0` there is nothing to wait for, and it exits at
+once.

@@ -616,7 +616,10 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     };
     let entry = vault.get_entry(&id).expect("resolve returned a live id");
     let title = printable(entry.title());
-    let value = match field {
+    /* Wiped when this returns: the copy path below holds it across a
+       fifteen-second sleep, and a `get -p` that leaves the password in a
+       freed allocation undoes the point of every zeroize above it. */
+    let value = zeroize::Zeroizing::new(match field {
         Field::User => entry.username().to_string(),
         Field::Password => entry.password().to_string(),
         Field::Url => entry.url().to_string(),
@@ -626,12 +629,12 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
             Some((code, _)) => code,
             None => anyhow::bail!("{title} has no one-time code"),
         },
-    };
+    });
     if value.is_empty() {
         anyhow::bail!("{title} has no {}", field.name());
     }
     if to_stdout {
-        say!("{value}");
+        say!("{}", *value);
         return Ok(());
     }
 
@@ -1354,7 +1357,12 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 fn unlock_now(app: &mut App) {
     /* Taken, not borrowed: `try_unlock` consumes and zeroizes on every path,
        and a take leaves `App` holding nothing the moment the key is read. */
-    let mut password: Vec<u8> = std::mem::take(&mut app.unlock_password).into_bytes();
+    /* Replaced with a box of the same shape rather than taken: `mem::take`
+       leaves a zero-capacity String behind, and the next password typed into
+       it would grow one keystroke at a time through allocations nothing wipes.
+       See `app::secret_box`. */
+    let mut password: Vec<u8> =
+        std::mem::replace(&mut app.unlock_password, app::secret_box()).into_bytes();
     /* Copied out first: the read below borrows `app` through the match, and a
        key-file error must still reach `say`. Key bytes are key material too,
        wiped the moment the attempt returns. */

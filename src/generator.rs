@@ -79,28 +79,33 @@ impl Classes {
     }
 }
 
-/// One uniform byte from the OS. Failures are real (no entropy source) and
-/// the caller names them rather than silently degrading to a weak source.
-fn os_byte() -> Result<u8, String> {
-    let mut buf = [0u8; 1];
+/// Eight uniform bytes from the OS, as one number. Failures are real (no
+/// entropy source) and the caller names them rather than silently degrading
+/// to a weak source.
+fn os_draw() -> Result<u64, String> {
+    let mut buf = [0u8; 8];
     getrandom::fill(&mut buf).map_err(|e| format!("os randomness failed: {e}"))?;
-    Ok(buf[0])
+    Ok(u64::from_le_bytes(buf))
 }
 
 /// A uniform index into `n`, rejection-sampled so `%` never skews the pick.
-/// A uniform index into `n`, rejection-sampled so `%` never skews the pick.
-/// For n at or past a full byte there is nothing to reject against — a byte
-/// already covers the range — so it passes straight through.
+/* Drawn from the whole 64-bit range rather than from one byte. The byte
+   version passed n = 255 straight through to `% n` — 256 values over 255
+   slots, which handed index 0 twice the weight of every other one, in the one
+   function here whose whole job is not doing that. It was reachable: the
+   shuffle asks for `i + 1`, and LENGTH_RANGE tops out at 256. A wider draw
+   has no such edge to get wrong and no ceiling for a future caller to cross,
+   and at one syscall per character the extra seven bytes cost nothing. */
 fn os_index(n: usize) -> Result<usize, String> {
     debug_assert!(n > 0);
-    if n >= u8::MAX as usize {
-        return Ok(os_byte()? as usize % n);
-    }
-    let limit = (u8::MAX as usize / n) * n;
+    let n = n as u64;
+    /* The largest multiple of n that fits, so everything at or above it is
+       redrawn rather than folded onto the low indices. */
+    let limit = (u64::MAX / n) * n;
     loop {
-        let b = os_byte()? as usize;
-        if b < limit {
-            return Ok(b % n);
+        let draw = os_draw()?;
+        if draw < limit {
+            return Ok((draw % n) as usize);
         }
     }
 }

@@ -1,7 +1,9 @@
-use keepass::db::{EntryId, EntryRef};
+use std::collections::HashMap;
+
+use keepass::db::{EntryId, EntryRef, GroupId};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Utf32Str, Utf32String};
+use nucleo_matcher::{Utf32Str};
 
 use crate::vault::Vault;
 
@@ -10,6 +12,10 @@ use crate::vault::Vault;
    user did not mean. Title, user, url and the group path are the fields a
    person reaches for when looking for an entry. If notes search is ever
    wanted, it becomes an opt-in toggle, not a default. */
+/* Test-only since `haystacks` took over the whole-vault pass, which resolves
+   each group path once instead of per entry. Kept because it is the one place
+   the join is stated for a single entry, and the tests pin it. */
+#[allow(dead_code)]
 pub fn haystack(vault: &Vault, id: &EntryId) -> String {
     let Some(entry) = vault.get_entry(id) else {
         return String::new();
@@ -19,6 +25,37 @@ pub fn haystack(vault: &Vault, id: &EntryId) -> String {
         .map(|g| vault.group_path(&g).join("/"))
         .unwrap_or_default();
     haystack_from(&entry, &group)
+}
+
+/* The needle, parsed once for a whole pass over the vault. It used to be
+   rebuilt inside the per-entry rank, so a keystroke in the band parsed the
+   same needle into the same atoms once per entry — thousands of times, for an
+   answer that cannot change between two entries. */
+pub fn pattern(needle: &str) -> Pattern {
+    Pattern::new(needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy)
+}
+
+/* What each of `ids` answers to, in the same order, with every group path
+   resolved once. The path is a walk to the root and a `join`, and a vault
+   keeps far fewer folders than entries — so the entries in one folder used to
+   pay for the same walk over and over, per keystroke. */
+pub fn haystacks(vault: &Vault, ids: &[EntryId]) -> Vec<String> {
+    let mut paths: HashMap<GroupId, String> = HashMap::new();
+    ids.iter()
+        .map(|id| {
+            let Some(entry) = vault.get_entry(id) else {
+                return String::new();
+            };
+            let group = match vault.parent_group_of_entry(id) {
+                Some(at) => paths
+                    .entry(at)
+                    .or_insert_with(|| vault.group_path(&at).join("/"))
+                    .clone(),
+                None => String::new(),
+            };
+            haystack_from(&entry, &group)
+        })
+        .collect()
 }
 
 /// Split from `haystack` for tests: the same join without needing the vault.
@@ -37,15 +74,13 @@ fn haystack_from(entry: &EntryRef<'_>, group_path: &str) -> String {
    keypress — the band re-ranks the whole vault on each typed character. */
 pub struct Searcher {
     matcher: Matcher,
-    /* Owned by `rank` (test-only, see there); kept together so the buffers
-       stay allocated rather than rebuilt per call. */
-    #[allow(dead_code)]
+    /// Scratch the haystack is decoded into, kept so a whole-vault pass reuses
+    /// one allocation instead of growing a fresh vec per entry.
     hay_chars: Vec<char>,
+    /* Owned by `rank` (test-only, see there); kept here so the buffer stays
+       allocated rather than rebuilt per call. */
     #[allow(dead_code)]
     needle_chars: Vec<char>,
-    /// Scratch for owned haystacks: rank_entry builds a String then borrows
-    /// it, and Utf32Str wants a char buffer to fill.
-    hay_buf: Utf32String,
 }
 
 impl Searcher {
@@ -54,8 +89,18 @@ impl Searcher {
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
             hay_chars: Vec::new(),
             needle_chars: Vec::new(),
-            hay_buf: Utf32String::default(),
         }
+    }
+
+    /// One haystack against a needle parsed by `pattern`. Pattern scores u32
+    /// and never returns Some(0) for a real hit below 1, so the cast stays
+    /// lossless in practice; clamp keeps the u16 ceiling honest.
+    pub fn score(&mut self, pattern: &Pattern, hay: &str) -> Option<u16> {
+        /* Destructured so the scratch buffer and the matcher are two borrows
+           of two fields rather than one of the whole Searcher. */
+        let Searcher { matcher, hay_chars, .. } = self;
+        let hay = Utf32Str::new(hay, hay_chars);
+        pattern.score(hay, matcher).map(|s| s.min(u16::MAX as u32) as u16)
     }
 
     /// None means "no match": the row is filtered out. An empty needle
@@ -66,9 +111,10 @@ impl Searcher {
        score-based ordering needs it. */
     #[allow(dead_code)]
     pub fn rank(&mut self, needle: &str, hay: &str) -> Option<u16> {
-        let needle = Utf32Str::new(needle, &mut self.needle_chars);
-        let hay = Utf32Str::new(hay, &mut self.hay_chars);
-        self.matcher.fuzzy_match(hay, needle)
+        let Searcher { matcher, hay_chars, needle_chars } = self;
+        let needle = Utf32Str::new(needle, needle_chars);
+        let hay = Utf32Str::new(hay, hay_chars);
+        matcher.fuzzy_match(hay, needle)
     }
 
     /// Which characters of `text` the needle matched, as char indices. The
@@ -79,31 +125,27 @@ impl Searcher {
             return Vec::new();
         }
         let pattern = Pattern::parse(needle, CaseMatching::Smart, Normalization::Smart);
-        let mut chars = Vec::new();
-        let hay = Utf32Str::new(text, &mut chars);
+        let Searcher { matcher, hay_chars, .. } = self;
+        let hay = Utf32Str::new(text, hay_chars);
         let mut out = Vec::new();
-        pattern.indices(hay, &mut self.matcher, &mut out);
+        pattern.indices(hay, matcher, &mut out);
         out.sort_unstable();
         out.dedup();
         out
     }
 
-    /// Whole-vault convenience: rank one entry's haystack. Pattern (not raw
-    /// fuzzy_match) so multi-word needles like "git octo" require both atoms,
-    /// and Smart casing/normalisation come along for free. Pattern scores
-    /// u32 and never returns Some(0) for a real hit below 1, so the cast
-    /// stays lossless in practice; clamp keeps the u16 ceiling honest.
+    /// One entry, needle and all, for a caller with a single id to rank.
+    /* Test-only in practice: prod passes go through `pattern` + `haystacks` +
+       `score`, which build both once for the vault rather than once per
+       entry. Kept because the tests pin what ranking one entry means. */
+    #[allow(dead_code)]
+    /* Pattern (not raw fuzzy_match) so multi-word needles like "git octo"
+       require both atoms, and Smart casing/normalisation come along for free.
+       A pass over the whole vault builds the pattern and the haystacks once
+       and calls `score` instead — this is the convenience, not the hot
+       path. */
     pub fn rank_entry(&mut self, needle: &str, vault: &Vault, id: &EntryId) -> Option<u16> {
-        let pattern = Pattern::new(
-            needle,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
-        let hay = haystack(vault, id);
-        self.hay_buf = hay.into();
-        let hay = self.hay_buf.slice(..);
-        pattern.score(hay, &mut self.matcher).map(|s| s.min(u16::MAX as u32) as u16)
+        self.score(&pattern(needle), &haystack(vault, id))
     }
 }
 

@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use arboard::Clipboard;
 
@@ -17,8 +17,13 @@ pub struct Board {
     timeout: Option<Duration>,
     /* When the secret on the clipboard stops being there. The status bar
        counts this down: "clears in 15s" is a promise shown for three seconds
-       and then gone, while the secret is still sitting there. */
-    until: Arc<Mutex<Option<std::time::Instant>>>,
+       and then gone, while the secret is still sitting there.
+
+       On the wall clock, not the monotonic one: a sleeping thread does not
+       run during a system suspend, so a fifteen-second wipe used to become
+       "fifteen seconds of the machine being awake" — a password left on the
+       pasteboard across a closed lid. */
+    until: Arc<Mutex<Option<SystemTime>>>,
 }
 
 impl Board {
@@ -55,7 +60,7 @@ impl Board {
     /// nothing of ours is on it (or the wipe is switched off).
     pub fn clears_in(&self) -> Option<u64> {
         let until = (*self.until.lock().unwrap_or_else(|e| e.into_inner()))?;
-        let left = until.checked_duration_since(std::time::Instant::now())?;
+        let left = until.duration_since(SystemTime::now()).ok()?;
         // Round up, so the last fraction of a second is not shown as zero.
         Some(left.as_secs() + u64::from(left.subsec_millis() > 0))
     }
@@ -91,11 +96,35 @@ impl Board {
             .map_err(|e| format!("clipboard refused the copy · {e}"))?;
         let generation = self.claim();
         if let Some(wait) = self.timeout {
-            *self.until.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(std::time::Instant::now() + wait);
+            let deadline = SystemTime::now() + wait;
+            *self.until.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
             let board = self.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(wait);
+                /* Sliced rather than one long sleep: a thread asleep when the
+                   machine suspends wakes up owing the rest of its nap, so the
+                   wipe landed a quarter of an hour of *uptime* later however
+                   long the lid was shut. Each slice re-reads the wall clock,
+                   so waking is what ends the wait. */
+                let monotonic = std::time::Instant::now() + wait;
+                loop {
+                    /* Whichever clock runs out first ends the wait. The wall
+                       clock is the one that notices a suspend; the monotonic
+                       one is what stops a clock set backwards from holding a
+                       password on the pasteboard for as long as it likes. */
+                    let left = deadline
+                        .duration_since(SystemTime::now())
+                        .unwrap_or_default()
+                        .min(monotonic.saturating_duration_since(std::time::Instant::now()));
+                    if left.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(left.min(Duration::from_secs(1)));
+                    /* A newer copy has a thread of its own; this one is done
+                       and must not wipe what that one put there. */
+                    if board.stale(generation) {
+                        return;
+                    }
+                }
                 /* Best effort and generation-checked: by now the user may have
                    copied something else themselves, and wiping that would
                    destroy their data to protect ours. */
@@ -138,9 +167,9 @@ mod tests {
     fn the_countdown_is_armed_and_runs_out() {
         let board = Board::new(15);
         assert_eq!(board.clears_in(), None, "nothing copied yet");
-        *board.until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(9));
+        *board.until.lock().unwrap() = Some(SystemTime::now() + Duration::from_secs(9));
         assert_eq!(board.clears_in(), Some(9));
-        *board.until.lock().unwrap() = Some(std::time::Instant::now() - Duration::from_secs(1));
+        *board.until.lock().unwrap() = Some(SystemTime::now() - Duration::from_secs(1));
         assert_eq!(board.clears_in(), None, "a past deadline still counted");
     }
 
@@ -150,7 +179,7 @@ mod tests {
     #[test]
     fn clearing_on_exit_disarms_the_pending_wipe() {
         let board = Board::new(15);
-        *board.until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(9));
+        *board.until.lock().unwrap() = Some(SystemTime::now() + Duration::from_secs(9));
         let generation = *board.epoch.lock().unwrap();
         board.clear_now();
         assert_eq!(board.clears_in(), None, "the deadline survived");

@@ -803,10 +803,26 @@ impl Vault {
             let _ = std::fs::remove_file(&temp);
             return Err(VaultError::Db(e.to_string()));
         }
+        /* The bytes on the disk before the name points at them. Rename is
+           atomic on its own, but only about the *name*: without this, a power
+           loss just after the rename can leave the vault's path pointing at a
+           file whose blocks never landed — the truncated kdbx this whole
+           dance exists to prevent, one layer down. */
+        if let Err(e) = out.sync_all() {
+            drop(out);
+            let _ = std::fs::remove_file(&temp);
+            return Err(VaultError::Io(e.to_string()));
+        }
         drop(out);
         if let Err(e) = std::fs::rename(&temp, path) {
             let _ = std::fs::remove_file(&temp);
             return Err(VaultError::Io(e.to_string()));
+        }
+        /* And the directory entry, so the rename itself survives the same
+           crash. Best effort: a filesystem that refuses to sync a directory
+           handle leaves us no worse off than the line above already did. */
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
         }
         Ok(())
     }
@@ -912,6 +928,12 @@ impl Vault {
             .group(*group)
             .map(|g| g.entry_ids().filter_map(|id| self.db.entry(id)).collect())
             .unwrap_or_default()
+    }
+
+    /// How many entries a group holds, without building the vec of them: the
+    /// tree draws this for every visible folder, on every frame.
+    pub fn count_in(&self, group: &GroupId) -> usize {
+        self.db.group(*group).map_or(0, |g| g.entry_ids().count())
     }
 
     /// Titles from the root down to `id`, for the "General / Banks" breadcrumb
@@ -1408,34 +1430,44 @@ const WEAK_BITS: f64 = 60.0;
    possibly spot themselves: a weak password costs one account, a reused one
    costs every account that shares it.
 
-   Passwords are grouped by hash, not by keeping a map of the plaintext:
-   equality is all this needs, and a table of every password in the vault is
-   not a thing to build when a count will do. SipHash is not a security claim
-   here — a collision would mean one wrong "reused" line, not an exposure. */
+   Passwords are grouped by hash, not by keeping a map of the plaintext: a
+   table of every password in the vault is not a thing to build when buckets
+   will do. The bucket is where the answer starts, not where it ends — two
+   passwords that merely hash alike are compared before either is called
+   reused, because a false "reused" is the one finding a reader cannot check
+   without putting two passwords side by side. */
 pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
     let entries = vault.entry_refs();
-    let mut counts: HashMap<u64, usize> = HashMap::new();
     let digest = |password: &str| {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         password.hash(&mut hasher);
         hasher.finish()
     };
-    for entry in &entries {
+    /* Positions, not passwords: the plaintext stays where it already is, on
+       the entries, and a bucket is a handful of indices to compare against. */
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
         if !password.is_empty() {
-            *counts.entry(digest(password)).or_default() += 1;
+            buckets.entry(digest(password)).or_default().push(at);
         }
     }
     let mut out: Vec<(EntryId, Issue)> = Vec::new();
-    for entry in &entries {
+    for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
+        let shared = buckets.get(&digest(password)).map_or(0, |bucket| {
+            bucket
+                .iter()
+                .filter(|other| **other != at && entries[**other].password() == password)
+                .count()
+        });
         let issue = if password.is_empty() {
             Issue::Empty
-        } else if let Some(others) = counts.get(&digest(password)).filter(|n| **n > 1) {
-            Issue::Reused(others - 1)
+        } else if shared > 0 {
+            Issue::Reused(shared)
         } else if expired(entry) {
             Issue::Expired
         } else {
@@ -1530,9 +1562,14 @@ pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &s
     if exact.len() == 1 {
         return Found::One(exact[0]);
     }
+    /* One parse of the needle and one pass of haystacks for the whole vault:
+       `rank_entry` would rebuild both per entry. */
+    let pattern = crate::search::pattern(needle);
+    let hays = crate::search::haystacks(vault, &live);
     let mut hits: Vec<(u16, EntryId)> = live
-        .into_iter()
-        .filter_map(|id| searcher.rank_entry(needle, vault, &id).map(|score| (score, id)))
+        .iter()
+        .zip(&hays)
+        .filter_map(|(id, hay)| searcher.score(&pattern, hay).map(|score| (score, *id)))
         .collect();
     // Best first, so an ambiguous answer lists the likeliest candidate first.
     hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));

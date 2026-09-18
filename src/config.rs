@@ -700,8 +700,15 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
         .with_context(|| format!("writing {}", temp.display()))?;
     out.write_all(text.as_bytes())
         .with_context(|| format!("writing {}", temp.display()))?;
+    /* Bytes before name, the same rule the vault saves by: a rename is atomic
+       about the name only, and a config that comes back empty after a crash
+       is a session that opens no vault. */
+    out.sync_all().with_context(|| format!("writing {}", temp.display()))?;
     drop(out);
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
     Ok(())
 }
 

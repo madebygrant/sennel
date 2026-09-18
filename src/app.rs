@@ -127,6 +127,25 @@ impl Form {
     }
 }
 
+/* A box a secret is typed into, given room for one up front.
+
+   `String` grows by reallocating, and the block it leaves behind is freed
+   with the bytes still in it — so a twenty-character master password typed
+   into a box that started empty scatters its first eight, sixteen, … keystrokes
+   across allocations nothing can reach to wipe. `zeroize` only ever reaches
+   the buffer the box ended up holding. One reservation up front means there
+   is only ever that one buffer, and `zeroize` keeps the capacity (it clears
+   the length, not the allocation), so it survives every wipe of the session.
+
+   Longer than any password anyone types, and small enough that a handful of
+   these cost nothing. A box typed past it reallocates like any other String —
+   this narrows the window, it does not pretend to close it. */
+const SECRET_BOX: usize = 512;
+
+pub fn secret_box() -> String {
+    String::with_capacity(SECRET_BOX)
+}
+
 pub struct Form {
     pub kind: FormKind,
     pub field: FormField,
@@ -220,7 +239,6 @@ pub struct Fields {
 }
 
 /// Adding a custom field, or attaching a file.
-#[derive(Default)]
 pub struct AddField {
     pub name: String,
     pub value: String,
@@ -230,6 +248,20 @@ pub struct AddField {
     /* A file rather than a string: the value box is then a path to read, and
        what lands in the vault is its bytes. */
     pub from_file: bool,
+}
+
+/* Hand-written rather than derived, for the one field that holds a secret:
+   see `secret_box`. */
+impl Default for AddField {
+    fn default() -> Self {
+        AddField {
+            name: String::new(),
+            value: secret_box(),
+            on_value: false,
+            caret: 0,
+            from_file: false,
+        }
+    }
 }
 
 impl AddField {
@@ -275,7 +307,6 @@ pub enum RekeyField {
    and both are zeroized on drop like every other typed secret — this prompt
    holds the only plaintext copy of what is about to become the key to
    everything. */
-#[derive(Default)]
 pub struct Rekey {
     pub password: String,
     pub confirm: String,
@@ -284,6 +315,20 @@ pub struct Rekey {
     pub caret: usize,
     /// `^r`, for reading back what was typed before committing to it.
     pub reveal: bool,
+}
+
+/* Hand-written rather than derived: both boxes hold what is about to become
+   the key to everything, and both get their room up front. See `secret_box`. */
+impl Default for Rekey {
+    fn default() -> Self {
+        Rekey {
+            password: secret_box(),
+            confirm: secret_box(),
+            field: RekeyField::default(),
+            caret: 0,
+            reveal: false,
+        }
+    }
 }
 
 impl Rekey {
@@ -764,6 +809,14 @@ pub struct App {
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
     pub last_activity: Instant,
+    /* The same moment on the wall clock. `Instant` stops during a system
+       suspend on both platforms Sennel ships to — Darwin has no
+       CLOCK_BOOTTIME and Linux's CLOCK_MONOTONIC excludes suspend — so a
+       laptop unlocked, closed, and opened in a café six hours later came back
+       to a vault that had measured almost no time at all. Both clocks are
+       kept and the longer answer wins: the wall clock covers the suspend, and
+       the monotonic one covers a wall clock that jumps backwards. */
+    pub last_activity_wall: std::time::SystemTime,
     /* The OS clipboard with its auto-clear timer. `None` until startup wires
        it from the config: `App::new` must stay callable in tests without
        touching platform clipboard state. */
@@ -806,8 +859,10 @@ impl App {
             unlock_new: false,
             unlocking: false,
             unlock_field: UnlockField::Password,
-            unlock_password: String::new(),
-            unlock_keyfile: String::new(),
+            unlock_password: secret_box(),
+            /* A path, not a secret — but it is typed into the same screen and
+               wiped by the same lock, so it keeps the same shape. */
+            unlock_keyfile: secret_box(),
             unlock_file: String::new(),
             browse: None,
             config_file: None,
@@ -816,7 +871,7 @@ impl App {
             mint: None,
             recent: Vec::new(),
             board: None,
-            unlock_confirm: String::new(),
+            unlock_confirm: secret_box(),
             caret: 0,
             unlock_reveal: false,
             dirty: false,
@@ -838,6 +893,7 @@ impl App {
             searcher: crate::search::Searcher::new(),
             lock_after: None,
             last_activity: Instant::now(),
+            last_activity_wall: std::time::SystemTime::now(),
         }
     }
 
@@ -1051,6 +1107,7 @@ impl App {
             self.say("no one-time code on this entry");
             return;
         };
+        let code = zeroize::Zeroizing::new(code);
         let Some(board) = &self.board else {
             self.say("clipboard is not ready  ·  report this as a bug");
             return;
@@ -1094,7 +1151,11 @@ impl App {
             self.say("no entry here to copy from");
             return;
         };
-        let text = take(&entry);
+        /* Wiped on the way out of this frame, which is the rule every other
+           secret in this file follows. `p` is the most-pressed key in the app
+           and it used to be the one path that dropped a plaintext password
+           into a freed allocation and left it there. */
+        let text = zeroize::Zeroizing::new(take(&entry));
         if text.is_empty() {
             self.say(format!("no {label} on this entry"));
             return;
@@ -1124,18 +1185,26 @@ impl App {
     /// lock and an idle vault would never close.
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+        self.last_activity_wall = std::time::SystemTime::now();
     }
 
     /* Whether the vault has sat untouched past the deadline. Takes the clock
        so tests drive it without sleeping: the lock path is about elapsed
-       time, not about whatever the frame loop happened to do. */
+       time, not about whatever the frame loop happened to do.
+
+       Whichever clock says more time has passed is the one answered to. See
+       `last_activity_wall`: the monotonic reading alone slept through a
+       suspend, and the wall reading alone would be steerable by anything that
+       sets the clock back. */
     pub fn idle_expired(&self, now: Instant) -> bool {
         let Some(after) = self.lock_after else {
             return false;
         };
-        self.view == View::Browser
-            && self.vault.is_some()
-            && now.duration_since(self.last_activity) >= after
+        let idle = now
+            .duration_since(self.last_activity)
+            // A backwards jump reads as no time passed, not as negative time.
+            .max(self.last_activity_wall.elapsed().unwrap_or_default());
+        self.view == View::Browser && self.vault.is_some() && idle >= after
     }
 
     /* Drop the vault and go back behind the password prompt. Dropping is the
@@ -2179,34 +2248,29 @@ impl App {
         }
         let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
         if global {
-            /* rank_entry, not raw rank: multi-word needles ("git octo")
-               become Pattern atoms there, and the band must agree with the
-               count in `entry_matches`, which uses the same predicate. */
+            /* A Pattern, not a raw fuzzy_match: multi-word needles ("git
+               octo") become atoms, and the band must agree with the count in
+               `entry_matches`, which is these same rows.
+
+               Needle parsed once and haystacks built once for the whole pass.
+               Scored once too: the filter used to throw the score away and a
+               second pass asked for it again, so every keystroke ranked the
+               vault twice over. */
             let needle = self.search.clone().unwrap_or_default();
-            let mut hits: Vec<EntryId> = ids
-                .into_iter()
-                .filter(|id| {
-                    self.searcher
-                        .rank_entry(&needle, vault, id)
-                        .is_some()
+            let pattern = crate::search::pattern(&needle);
+            let hays = crate::search::haystacks(vault, &ids);
+            let mut scored: Vec<(EntryId, u16)> = ids
+                .iter()
+                .zip(&hays)
+                .filter_map(|(id, hay)| {
+                    self.searcher.score(&pattern, hay).map(|score| (*id, score))
                 })
                 .collect();
             /* Relevance order while searching: the best hit first, so the
-               cursor lands on the likely answer without a single j. Ties keep
-               the sorted order above. */
-            let mut scored: Vec<(EntryId, u16)> = hits
-                .iter()
-                .map(|id| {
-                    let score = self
-                        .searcher
-                        .rank_entry(&needle, vault, id)
-                        .unwrap_or(0);
-                    (*id, score)
-                })
-                .collect();
+               cursor lands on the likely answer without a single j. A stable
+               sort, so ties keep the order above. */
             scored.sort_by_key(|a| std::cmp::Reverse(a.1));
-            hits = scored.into_iter().map(|(id, _)| id).collect();
-            return hits;
+            return scored.into_iter().map(|(id, _)| id).collect();
         }
         ids
     }
@@ -2227,7 +2291,7 @@ impl App {
 
     /// How many entries a group holds, for the counts in the tree.
     pub fn entries_in(&self, id: &GroupId) -> usize {
-        self.vault.as_ref().map_or(0, |v| v.entries_in(id).len())
+        self.vault.as_ref().map_or(0, |v| v.count_in(id))
     }
 
     pub fn entry_total(&self) -> usize {
@@ -2818,14 +2882,14 @@ impl App {
             field: FormField::Title,
             title: String::new(),
             username: String::new(),
-            password: String::new(),
+            password: secret_box(),
             url: String::new(),
             tags: String::new(),
             expires: String::new(),
             notes: String::new(),
             caret: 0,
             password_touched: false,
-            otp: String::new(),
+            otp: secret_box(),
             otp_touched: false,
             had_otp: false,
             reveal: false,
@@ -2846,7 +2910,7 @@ impl App {
             field: FormField::Title,
             title: entry.title().to_string(),
             username: entry.username().to_string(),
-            password: String::new(),
+            password: secret_box(),
             url: entry.url().to_string(),
             /* Prefilled, unlike the two secret boxes: a tag is a label, and
                an edit that silently dropped them would be worse than one
@@ -2864,7 +2928,7 @@ impl App {
             /* The stored seed never prefills the box: it is a secret, and a
                masked run of bullets forty characters long teaches nobody
                anything. Empty-and-untouched keeps it, the password's rule. */
-            otp: String::new(),
+            otp: secret_box(),
             otp_touched: false,
             had_otp: crate::vault::raw_otp(&entry).is_some(),
             reveal: false,
@@ -4487,6 +4551,36 @@ pub mod tests {
            "ready" the open vault left behind. */
         app.expire_now();
         assert_eq!(app.stage, "locked");
+    }
+
+    /* A suspend is idleness the monotonic clock cannot see: it stops while
+       the machine is asleep on both platforms Sennel ships to, so a vault
+       unlocked before the lid closed used to come back open however long it
+       was shut. The wall clock is what notices, and either clock running out
+       is enough. */
+    #[test]
+    fn a_suspend_counts_as_idle_time() {
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        /* What a six-hour suspend leaves behind: no monotonic time passed at
+           all, six hours of wall clock did. */
+        app.last_activity = Instant::now();
+        app.last_activity_wall = std::time::SystemTime::now() - Duration::from_secs(6 * 3600);
+        app.check_idle();
+        assert_eq!(app.view, View::Unlock, "the vault slept through the lock");
+        assert!(app.vault.is_none(), "the secrets survived the suspend");
+    }
+
+    /* And the other way, so a clock set backwards cannot hold a vault open:
+       the monotonic reading alone is past the deadline. */
+    #[test]
+    fn a_backwards_wall_clock_does_not_defer_the_lock() {
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.last_activity_wall = std::time::SystemTime::now() + Duration::from_secs(3600);
+        app.check_idle();
+        assert_eq!(app.view, View::Unlock, "a clock change outlasted the deadline");
     }
 
     /* The typed vault file outlives an auto-lock: it names a file, not a

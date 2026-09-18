@@ -9,20 +9,21 @@ from your config, or press `^o` to pick from a list of folders and `.kdbx` files
 a folder or takes a vault, `←` goes back up, and typing narrows the list. Then `tab` to the password
 box and `enter` to unlock.
 
-A vault that opens is remembered. Its path goes into `config.toml` as `db`, and it joins the vault
-library, which `^v` opens: every vault this machine has unlocked, newest first, with the current one
-marked and any that have since moved marked `missing`. `enter` points the session at one, `^d`
-forgets a row (the file itself is never touched), and typing narrows the list over the whole path,
-so `work` finds a vault by its folder as well as by its name. Forgetting the vault the config opens
-by default drops that setting too, so the next launch asks instead of bringing it back. Under `--no-config` there is nowhere
-to write, so nothing is remembered.
+A vault that opens is remembered. Its path goes into `config.toml` as `db` and joins the vault
+library that `^v` opens: every vault this machine has unlocked, newest first, the current one marked
+and any that have moved marked `missing`. `enter` points the session at one and `^d` forgets a row,
+never the file. Typing narrows the list over the whole path, so `work` finds a vault by its folder
+as well as by its name. Forget the vault `db` names and that setting goes too, so the next launch
+asks instead of bringing it back. Under `--no-config` there is nowhere to write, and nothing is
+remembered.
 
-Picking a vault whose file is gone is allowed, and the screen then reads `new database`: it is a
-path with nothing behind it, and `enter` would create one.
+Picking a vault whose file is gone is allowed. The screen then reads `new database`, because that is
+what a path with nothing behind it is, and `enter` would create one. Confirm, then set the password
+twice.
 
 The path field is editable every time the app locks. An idle auto-lock drops the secrets and the
-editor state, not the vault path, so switching vaults after a lock is `esc`, edit the file box,
-`enter`. A path that does not exist yet is a new database. Confirm, then set the password twice.
+editor state but not the vault path, so switching vaults after a lock is `esc`, edit the file box,
+`enter`.
 
 Every printable key on this screen is text, so a `*` in a password types as `*`. The reveal is `^r`,
 not the browser's `*`.
@@ -108,21 +109,21 @@ into the working directory, and loses the vault's protection the moment it lands
 | `⧖`   | the entry is past its expiry date                        |
 | `⌦`   | the recycle bin, and anything inside it                  |
 
-Every one is a glyph rather than a colour, so they still say what they say under `NO_COLOR` — and
-every one is a single cell, which is checked by a test that reads the UI's own source, because a
-two-cell glyph in a one-cell budget wraps rows on somebody else's terminal.
+Every one is a glyph rather than a colour, so they still say what they say under `NO_COLOR`. Every
+one is also a single cell, checked by a test that reads the UI's own source, because a two-cell
+glyph in a one-cell budget wraps rows on somebody else's terminal.
 
 ## The mouse
 
 Off with `mouse = false`, which gives the terminal its own text selection back. Otherwise the wheel
-scrolls the pane under the pointer, a click selects a row and hands that pane the keys, and a click
-on the `user`, `pass`, `url` or `totp` row of the detail view copies that field — the same copy
-`y p U t` do, through the same clipboard wipe. The row shows `✓ copied` for a moment afterwards,
-because a copy is otherwise invisible: the clipboard is somewhere else and the status line is at the
-other end of the screen from the hand that just moved.
+scrolls the pane under the pointer, and a click selects a row and hands that pane the keys. A click
+on the `user`, `pass`, `url` or `totp` row of the detail view copies that field, the same copy
+`y p U t` do and the same wipe. The row shows `✓ copied` for a moment afterwards, because a copy is
+otherwise invisible: the clipboard is somewhere else, and the status line is at the far end of the
+screen from the hand that just moved.
 
-Nothing here is the only way to do anything. The mouse stays out of the popups that ask a question,
-so a stray click cannot answer one.
+Nothing here is the only way to do anything, and the mouse stays out of the popups that ask a
+question, so a stray click cannot answer one.
 
 Some terminals bind `tab`, `backtab` and the arrow chords themselves. Every key here also has a
 visible home in the `h` overlay.
