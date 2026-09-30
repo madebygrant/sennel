@@ -66,7 +66,8 @@ not the browser's `*`.
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |
 | `P`                 | generate a password with no entry to put it in                |
-| `^s` (in a form)    | generate a password into the edit form                        |
+| `^s` (in a form)    | generate a password into the edit form (also copied)          |
+| `^y` (in a form)    | copy the password box before the entry is saved               |
 | `^r` (in a form)    | show what is in the password box                              |
 | `alt+enter`         | new line in the notes box (`enter` saves)                     |
 | `h` `?` `F1`        | keys overlay (`F1` on the lock screen, where letters are text)|
@@ -75,9 +76,10 @@ not the browser's `*`.
 
 ## The generator (`P`)
 
-A password with no entry to store it in. `r` rolls another, `y` copies it, `-` and `+` change the
-length, and `u` `d` `s` `a` turn capitals, digits, punctuation and the `l 1 I O 0` lookalikes on and
-off. The toggles last the session only. [More](generate.md).
+A password with no entry to store it in. `r` rolls another, `y` copies it, `t` walks complex,
+passphrase and pin, `-` and `+` change the length (words, for a passphrase), and `u` `d` `s` `a`
+turn capitals, digits, punctuation and the `l 1 I O 0` lookalikes on and
+off (complex only). The toggles last the session only. [More](generate.md).
 
 ## The fields screen (`F`)
 

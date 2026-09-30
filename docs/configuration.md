@@ -9,7 +9,7 @@ db = "~/vaults/main.kdbx"      # default database · rewritten when you open ano
 recent = ["~/vaults/main.kdbx", "~/vaults/work.kdbx"]
                                # the vault library behind ^v · written by the app,
                                # newest first, ten at most
-clipboard_timeout = 15         # seconds before the clipboard clears (0 = leave it)
+clipboard_timeout = 30         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
 sort = "name"                  # entries order at startup: stored, name, recent, updated
 theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
@@ -18,7 +18,9 @@ mouse = true                   # wheel scrolls, click selects; false gives the
 
 [generator]                    # the default for ^s in a form, P on its own,
                                # and sennel gen
-length = 20                    # 4–256
+kind = "complex"               # complex · passphrase · pin
+length = 20                    # 4–256 (characters; digits for a pin)
+words = 6                      # 1–64 (passphrase words)
 upper = true                   # A–Z
 digits = true                  # 0–9
 symbols = false                # !@#$… · on for sites that demand one

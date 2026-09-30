@@ -71,7 +71,9 @@ fn main() -> Result<()> {
     /* Also before the terminal checks, and the one subcommand that opens no
        vault at all: a password you are not storing needs no database. */
     if let Some(Command::Gen {
+        kind,
         length,
+        words,
         symbols,
         no_symbols,
         no_digits,
@@ -83,12 +85,24 @@ fn main() -> Result<()> {
     }) = &cfg.command
     {
         let mut settings = cfg.generator;
+        if let Some(kind) = kind {
+            settings.kind = generator::Kind::parse(kind).ok_or_else(|| {
+                anyhow::anyhow!("type {kind:?} is none of complex, passphrase, pin")
+            })?;
+        }
         if let Some(len) = *length {
             let (min, max) = config::LENGTH_RANGE;
             if !(min..=max).contains(&len) {
                 anyhow::bail!("length {len} is outside {min}–{max}");
             }
             settings.length = len;
+        }
+        if let Some(words) = *words {
+            let (min, max) = config::WORDS_RANGE;
+            if !(min..=max).contains(&words) {
+                anyhow::bail!("words {words} is outside {min}–{max}");
+            }
+            settings.words = words;
         }
         if *symbols {
             settings.classes.symbols = true;
@@ -104,6 +118,20 @@ fn main() -> Result<()> {
         }
         if *ambiguous {
             settings.exclude_ambiguous = false;
+        }
+        /* Said rather than silently ignored, the way the popup names a knob
+           that does nothing outside complex: a `gen --kind pin --symbols`
+           that looks successful but produced no symbols erodes trust. */
+        if settings.kind != generator::Kind::Complex
+            && (*symbols || *no_symbols || *no_digits || *no_upper || *ambiguous)
+        {
+            eprintln!("class flags shape complex passwords only  ·  ignored for {}", settings.kind.name());
+        }
+        if settings.kind == generator::Kind::Passphrase && length.is_some() {
+            eprintln!("-n sets characters, not words  ·  --words controls passphrases");
+        }
+        if settings.kind != generator::Kind::Passphrase && words.is_some() {
+            eprintln!("--words counts passphrase words  ·  ignored for {}", settings.kind.name());
         }
         return make_password(&cfg, settings, *count, *stdout, *force);
     }
@@ -293,8 +321,8 @@ fn check(cfg: &Config) -> Result<()> {
     }
     say!("sort      {}", cfg.sort.short());
     say!(
-        "generate  {} chars · {}",
-        cfg.generator.length,
+        "generate  {} · {}",
+        cfg.generator.amount(),
         cfg.generator.describe()
     );
     say!("mouse     {}", if cfg.mouse { "on" } else { "off" });
@@ -617,7 +645,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     let entry = vault.get_entry(&id).expect("resolve returned a live id");
     let title = printable(entry.title());
     /* Wiped when this returns: the copy path below holds it across a
-       fifteen-second sleep, and a `get -p` that leaves the password in a
+       thirty-second sleep, and a `get -p` that leaves the password in a
        freed allocation undoes the point of every zeroize above it. */
     let value = zeroize::Zeroizing::new(match field {
         Field::User => entry.username().to_string(),
@@ -675,13 +703,16 @@ fn make_password(
         anyhow::bail!("--count 0 would generate nothing");
     }
     let make = || {
-        generator::generate(settings.length, settings.classes, settings.exclude_ambiguous)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        (match settings.kind {
+            generator::Kind::Complex => {
+                generator::generate(settings.length, settings.classes, settings.exclude_ambiguous)
+            }
+            generator::Kind::Passphrase => generator::generate_passphrase(settings.words),
+            generator::Kind::Pin => generator::generate_pin(settings.length),
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))
     };
-    let bits = generator::entropy_bits(
-        settings.length,
-        settings.classes.alphabet_len(settings.exclude_ambiguous),
-    );
+    let bits = settings.bits();
     if to_stdout {
         for _ in 0..count {
             let mut password = make()?;
@@ -702,16 +733,16 @@ fn make_password(
         // The wipe is a thread in this process, so exiting now abandons it.
         Some(secs) => {
             eprintln!(
-                "copied {} chars · {} · ~{bits:.0} bits · clears in {secs}s",
-                settings.length,
+                "copied {} · {} · ~{bits:.0} bits · clears in {secs}s",
+                settings.amount(),
                 settings.describe()
             );
             std::thread::sleep(Duration::from_secs(secs));
             board.clear_now();
         }
         None => eprintln!(
-            "copied {} chars · {} · ~{bits:.0} bits",
-            settings.length,
+            "copied {} · {} · ~{bits:.0} bits",
+            settings.amount(),
             settings.describe()
         ),
     }
@@ -1114,6 +1145,9 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* ^s generates into the password box: a fresh secret without
            leaving the form, named in the flash with its entropy. */
         KeyCode::Char('s') if ctrl => app.form_generate(),
+        /* ^y copies the password box before the entry is saved: paste it
+           into the site first, then Enter keeps it. */
+        KeyCode::Char('y') if ctrl => app.form_copy_password(),
         /* The lock screen's reveal, on the same key: a generated password
            masked end to end cannot be checked before it is stored. */
         KeyCode::Char('r') if ctrl => app.toggle_form_reveal(),
@@ -1292,6 +1326,9 @@ fn handle_mint_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('r') | KeyCode::Char(' ') => app.mint_reroll(),
         // `y` copies here as it does everywhere else in the browser.
         KeyCode::Char('y') | KeyCode::Enter => app.mint_copy(),
+        /* `t` walks the kinds — complex, passphrase, pin — and rolls at
+           each stop, so the screen never describes a secret it did not draw. */
+        KeyCode::Char('t') => app.mint_cycle_kind(),
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => app.mint_resize(true),
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left => app.mint_resize(false),
         KeyCode::Char('s') => app.mint_toggle(app::Knob::Symbols),

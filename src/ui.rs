@@ -1485,32 +1485,43 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     let bits = mint.bits();
 
     /* Built first, because how many rows they take is part of the budget the
-       password is measured against. Each knob is coloured by its own state,
-       so the line doubles as the answer to "what is in this password", and it
-       wraps rather than clipping: a knob cut off by the border is a setting
-       whose state cannot be read. */
+       password is measured against. The first row names the kind — `t` walks
+       complex, passphrase, pin — and the class knobs join only for complex:
+       a passphrase is words off a list and a PIN is digits, so toggles there
+       would lie about what is on screen. Each knob is coloured by its own
+       state, so the line doubles as the answer to "what is in this password",
+       and it wraps rather than clipping: a knob cut off by the border is a
+       setting whose state cannot be read. */
     let mut knob_rows: Vec<Line> = Vec::new();
     let mut row: Vec<Span> = vec![Span::raw(" ")];
     let mut used = 1;
-    for (on, key, name) in [
-        (settings.classes.upper, "u", "A–Z"),
-        (settings.classes.digits, "d", "0–9"),
-        (settings.classes.symbols, "s", "!@#"),
-        (!settings.exclude_ambiguous, "a", "l1IO0"),
-    ] {
-        let cost = cols(key) + cols(name) + 3;
-        if used + cost > inner && row.len() > 1 {
-            knob_rows.push(Line::from(std::mem::replace(&mut row, vec![Span::raw(" ")])));
-            used = 1;
-        }
-        let style = if on {
-            Style::new().fg(p.text)
-        } else {
-            Style::new().fg(p.muted)
-        };
+    let push_knob = |row: &mut Vec<Span>, used: &mut usize, on: bool, key: &str, name: &str| {
         row.push(Span::styled(format!(" {key}"), Style::new().fg(p.accent)));
-        row.push(Span::styled(format!(" {name} "), style));
-        used += cost;
+        row.push(Span::styled(
+            format!(" {name} "),
+            if on {
+                Style::new().fg(p.text)
+            } else {
+                Style::new().fg(p.muted)
+            },
+        ));
+        *used += cols(key) + cols(name) + 3;
+    };
+    push_knob(&mut row, &mut used, true, "t", settings.kind.name());
+    if settings.kind == crate::generator::Kind::Complex {
+        for (on, key, name) in [
+            (settings.classes.upper, "u", "A–Z"),
+            (settings.classes.digits, "d", "0–9"),
+            (settings.classes.symbols, "s", "!@#"),
+            (!settings.exclude_ambiguous, "a", "l1IO0"),
+        ] {
+            let cost = cols(key) + cols(name) + 3;
+            if used + cost > inner && row.len() > 1 {
+                knob_rows.push(Line::from(std::mem::replace(&mut row, vec![Span::raw(" ")])));
+                used = 1;
+            }
+            push_knob(&mut row, &mut used, on, key, name);
+        }
     }
     knob_rows.push(Line::from(row));
 
@@ -1549,21 +1560,24 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     lines.push(Line::default());
     lines.push(Line::from(p.faint(truncate(
         &format!(
-            "  {} chars  ·  ~{bits:.0} bits  ·  {}",
-            settings.length,
+            "  {}  ·  ~{bits:.0} bits  ·  {}",
+            settings.amount(),
             crate::generator::strength(bits)
         ),
         inner,
     ))));
     lines.push(Line::default());
     lines.extend(knob_rows);
-    lines.push(Line::from(p.faint(truncate(
-        "  - +  shorter, longer",
-        inner,
-    ))));
+    /* A passphrase grows by words, the other kinds by characters — the hint
+       names the unit `-` and `+` actually move. */
+    let resize = match settings.kind {
+        crate::generator::Kind::Passphrase => "  - +  fewer, more words",
+        _ => "  - +  shorter, longer",
+    };
+    lines.push(Line::from(p.faint(truncate(resize, inner))));
     lines.push(Line::default());
     lines.push(Line::from(p.faint(truncate(
-        "  y copy · r again · esc close",
+        "  y copy · r again · t type · esc close",
         inner,
     ))));
     popup(frame, &format!("{MARK} generate"), lines, width, &p);
@@ -1820,6 +1834,8 @@ fn draw_form(frame: &mut Frame, app: &App) {
         p.faint(" save   "),
         Span::styled("^s", Style::new().fg(p.accent)),
         p.faint(" generate   "),
+        Span::styled("^y", Style::new().fg(p.accent)),
+        p.faint(" copy   "),
         Span::styled("^r", Style::new().fg(p.accent)),
         p.faint(" reveal   "),
         Span::styled("tab", Style::new().fg(p.accent)),

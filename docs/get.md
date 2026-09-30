@@ -5,7 +5,7 @@
 Copy one field of one entry without opening the TUI.
 
 ```sh
-sennel get github                  # copies the password, wipes it after 15s
+sennel get github                  # copies the password, wipes it after 30s
 sennel get github -u               # the username
 sennel get github --otp            # the current one-time code
 sennel get github --stdout | pbcopy

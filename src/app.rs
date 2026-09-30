@@ -615,14 +615,10 @@ impl Mint {
         self.password.zeroize();
     }
 
-    /// Priced against the pool actually drawn from, the same way `^s` is.
+    /// Priced against what it was drawn from — pool, wordlist or digits —
+    /// the same number `^s` quotes.
     pub fn bits(&self) -> f64 {
-        crate::generator::entropy_bits(
-            self.settings.length,
-            self.settings
-                .classes
-                .alphabet_len(self.settings.exclude_ambiguous),
-        )
+        self.settings.bits()
     }
 }
 
@@ -1788,11 +1784,18 @@ impl App {
             return;
         };
         let settings = mint.settings;
-        match crate::generator::generate(
-            settings.length,
-            settings.classes,
-            settings.exclude_ambiguous,
-        ) {
+        let made = match settings.kind {
+            crate::generator::Kind::Complex => crate::generator::generate(
+                settings.length,
+                settings.classes,
+                settings.exclude_ambiguous,
+            ),
+            crate::generator::Kind::Passphrase => {
+                crate::generator::generate_passphrase(settings.words)
+            }
+            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.length),
+        };
+        match made {
             Ok(password) => {
                 /* Wiped rather than dropped: the old password's bytes would
                    otherwise be freed intact behind the new one. */
@@ -1809,8 +1812,8 @@ impl App {
         if announce {
             let bits = self.mint.as_ref().map(Mint::bits).unwrap_or_default();
             self.say(format!(
-                "a new one  ·  {} chars  ·  ~{bits:.0} bits  ·  y copies it",
-                settings.length
+                "a new one  ·  {}  ·  ~{bits:.0} bits  ·  y copies it",
+                settings.amount()
             ));
         }
     }
@@ -1821,10 +1824,26 @@ impl App {
 
     /// Longer or shorter by one, inside the same bounds the config file is
     /// held to, then redrawn so the number on screen is the one you get.
+    /// A passphrase grows by words, the other kinds by characters.
     pub fn mint_resize(&mut self, longer: bool) {
         let Some(mint) = &mut self.mint else {
             return;
         };
+        if mint.settings.kind == crate::generator::Kind::Passphrase {
+            let (min, max) = crate::config::WORDS_RANGE;
+            let want = if longer {
+                mint.settings.words + 1
+            } else {
+                mint.settings.words.saturating_sub(1)
+            };
+            if want < min || want > max {
+                self.say(format!("passphrases stay between {min} and {max} words"));
+                return;
+            }
+            mint.settings.words = want;
+            self.mint_roll(false);
+            return;
+        }
         let (min, max) = crate::config::LENGTH_RANGE;
         let want = if longer {
             mint.settings.length + 1
@@ -1839,8 +1858,31 @@ impl App {
         self.mint_roll(false);
     }
 
+    /* `t` walks complex, passphrase, pin and back round: the shape of the
+       secret, before the knobs that shape it further. */
+    pub fn mint_cycle_kind(&mut self) {
+        let Some(mint) = &mut self.mint else {
+            return;
+        };
+        mint.settings.kind = mint.settings.kind.next();
+        let (kind, amount) = (mint.settings.kind, mint.settings.amount());
+        self.mint_roll(false);
+        self.say(format!("{}  ·  {amount}  ·  y copies it", kind.name()));
+    }
+
     pub fn mint_toggle(&mut self, knob: Knob) {
         let Some(mint) = &mut self.mint else {
+            return;
+        };
+        /* Classes shape complex passwords only: a passphrase is words off a
+           list and a PIN is digits, so the knob would lie about what is on
+           screen. Said rather than ignored, with the way back named. */
+        if mint.settings.kind != crate::generator::Kind::Complex {
+            if knob == Knob::Ambiguous {
+                self.say("l1IO0 only narrows complex passwords  ·  t switches kind");
+            } else {
+                self.say("classes shape complex passwords  ·  t switches kind");
+            }
             return;
         };
         let classes = &mut mint.settings.classes;
@@ -4372,38 +4414,77 @@ impl App {
     /* ^s on the form: generate into the password box. Excludes ambiguous
        glyphs so a password read off this screen can be typed elsewhere —
        l1IO0 are the ones every font renders alike. Touching the box flips
-       the keep-latch, so submit writes what was generated. */
+       the keep-latch, so submit writes what was generated. The shape follows
+       the session default: a passphrase there means a passphrase here. */
     pub fn form_generate(&mut self) {
-        let settings = self.generator;
-        let Some(form) = self.form.as_mut() else {
+        /* Before the RNG: with no form open there is nowhere to put a fresh
+           secret, so drawing one burns randomness for nothing. */
+        if self.form.is_none() {
             return;
+        }
+        let settings = self.generator;
+        let made = match settings.kind {
+            crate::generator::Kind::Complex => crate::generator::generate(
+                settings.length,
+                settings.classes,
+                settings.exclude_ambiguous,
+            ),
+            crate::generator::Kind::Passphrase => {
+                crate::generator::generate_passphrase(settings.words)
+            }
+            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.length),
         };
-        let generated = match crate::generator::generate(
-            settings.length,
-            settings.classes,
-            settings.exclude_ambiguous,
-        ) {
+        let generated = match made {
             Ok(pw) => pw,
             Err(e) => {
                 self.error(format!("cannot generate  ·  {e}"));
                 return;
             }
         };
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
         form.password = generated;
         form.password_touched = true;
         form.caret = form.password.chars().count();
-        /* Priced against the pool it was drawn from: excluding the lookalikes
+        /* Priced against what it was drawn from: excluding the lookalikes
            shrinks the alphabet, and the estimate used to quote the wider one,
            which overstates a secret in the one direction it must not. */
-        let bits = crate::generator::entropy_bits(
-            settings.length,
-            settings.classes.alphabet_len(settings.exclude_ambiguous),
-        );
+        let bits = settings.bits();
+        /* Onto the clipboard as well, under the same auto-clear timer every
+           other copy gets: the fresh password is usually needed in a browser
+           or signup form before this entry is ever saved, and retyping a
+           twenty-character secret is how it arrives wrong. */
+        let copied = match &self.board {
+            Some(board) => match board.copy(&form.password) {
+                Ok(()) => board
+                    .clears_in()
+                    .map(|secs| format!("  ·  copied, clears in {secs}s"))
+                    .unwrap_or_else(|| "  ·  copied".to_string()),
+                Err(e) => format!("  ·  clipboard refused the copy ({e})"),
+            },
+            None => "  ·  clipboard is not ready".to_string(),
+        };
         self.say(format!(
-            "generated {} chars  ·  {}  ·  ~{bits:.0} bits",
-            settings.length,
+            "generated {}  ·  {}  ·  ~{bits:.0} bits{copied}",
+            settings.amount(),
             settings.describe()
         ));
+    }
+
+    /* `^y` in the form: the password box onto the clipboard while the entry
+       is still unsaved — paste it into the site first, then Enter keeps it.
+       An empty box says so rather than wiping whatever the clipboard holds. */
+    pub fn form_copy_password(&mut self) {
+        let password = match &self.form {
+            Some(form) => form.password.clone(),
+            None => return,
+        };
+        if password.is_empty() {
+            self.say("password is empty  ·  ^s generates one");
+            return;
+        }
+        self.copy_named("password", &password);
     }
 }
 
@@ -7097,5 +7178,106 @@ pub mod tests {
         app.open_mint();
         app.lock_now();
         assert!(app.mint.is_none(), "a password survived the lock");
+    }
+
+    /* `t` walks complex, passphrase, pin and back round, rolling a fresh
+       secret of the right shape at each stop. */
+    #[test]
+    fn the_type_key_walks_all_three_kinds() {
+        use crate::generator::Kind;
+        let mut app = open_app();
+        app.open_mint();
+        assert_eq!(app.mint.as_ref().unwrap().settings.kind, Kind::Complex);
+        app.mint_cycle_kind();
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.settings.kind, Kind::Passphrase);
+        assert_eq!(
+            mint.password.split(crate::generator::WORD_SEPARATOR).count(),
+            mint.settings.words,
+            "{}",
+            mint.password
+        );
+        app.mint_cycle_kind();
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.settings.kind, Kind::Pin);
+        assert!(mint.password.bytes().all(|c| c.is_ascii_digit()));
+        app.mint_cycle_kind();
+        assert_eq!(app.mint.as_ref().unwrap().settings.kind, Kind::Complex);
+    }
+
+    /* In a passphrase `-` and `+` move words, not characters, and stop at
+       the word bounds rather than the length ones. */
+    #[test]
+    fn resizing_a_passphrase_moves_words() {
+        use crate::generator::Kind;
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_cycle_kind();
+        assert_eq!(app.mint.as_ref().unwrap().settings.kind, Kind::Passphrase);
+        let words = app.mint.as_ref().unwrap().settings.words;
+        let length = app.mint.as_ref().unwrap().settings.length;
+        app.mint_resize(true);
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.settings.words, words + 1);
+        assert_eq!(mint.settings.length, length, "words moved the length");
+        assert_eq!(
+            mint.password.split(crate::generator::WORD_SEPARATOR).count(),
+            words + 1
+        );
+        let (min, max) = crate::config::WORDS_RANGE;
+        for _ in 0..max {
+            app.mint_resize(true);
+        }
+        assert_eq!(app.mint.as_ref().unwrap().settings.words, max);
+        /* The cycle's own flash is still up, and a second message queues
+           behind it — expire it so the bound refusal is what the test reads
+           (it names words where the cycle message would also match). */
+        app.expire_now();
+        app.mint_resize(true);
+        assert!(app.stage.contains("words"), "{}", app.stage);
+        assert_eq!(app.mint.as_ref().unwrap().settings.words, max);
+        let _ = min;
+    }
+
+    /* Class knobs shape complex passwords only: on a passphrase they say so
+       and flip nothing, rather than relabelling a secret they did not draw. */
+    #[test]
+    fn class_toggles_are_refused_outside_complex() {
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_cycle_kind();
+        /* The cycle names itself in the flash, and a second message queues
+           behind it — the frame loop would expire it, tests have no loop. */
+        app.expire_now();
+        app.mint_toggle(Knob::Symbols);
+        assert!(app.stage.contains("t switches kind"), "{}", app.stage);
+        assert!(!app.mint.as_ref().unwrap().settings.classes.symbols);
+    }
+
+    /* ^s follows the session kind: a passphrase default means words in the
+       box, priced as words in the flash. */
+    #[test]
+    fn ctrl_s_follows_the_session_kind() {
+        use crate::generator::Kind;
+        let mut app = open_app();
+        app.generator.kind = Kind::Passphrase;
+        app.step_group(true); // onto Banks
+        app.open_edit_form();
+        app.form_generate();
+        let password = app.form.as_ref().unwrap().password.clone();
+        assert_eq!(
+            password.split(crate::generator::WORD_SEPARATOR).count(),
+            app.generator.words,
+            "{password:?}"
+        );
+        assert!(app.stage.contains("words"), "{}", app.stage);
+        /* The copy is part of `^s`, not just the fill: with no board wired
+           (tests never touch the OS clipboard) the attempt must still be
+           visible in the flash rather than silently skipped. */
+        assert!(
+            app.stage.contains("clipboard is not ready"),
+            "{}",
+            app.stage
+        );
     }
 }

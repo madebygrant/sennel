@@ -16,12 +16,12 @@ pub struct Board {
     epoch: Arc<Mutex<u64>>,
     timeout: Option<Duration>,
     /* When the secret on the clipboard stops being there. The status bar
-       counts this down: "clears in 15s" is a promise shown for three seconds
+        counts this down: "clears in 30s" is a promise shown for three seconds
        and then gone, while the secret is still sitting there.
 
        On the wall clock, not the monotonic one: a sleeping thread does not
-       run during a system suspend, so a fifteen-second wipe used to become
-       "fifteen seconds of the machine being awake" — a password left on the
+        run during a system suspend, so a thirty-second wipe used to become
+        "thirty seconds of the machine being awake" — a password left on the
        pasteboard across a closed lid. */
     until: Arc<Mutex<Option<SystemTime>>>,
 }

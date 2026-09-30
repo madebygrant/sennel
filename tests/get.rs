@@ -445,3 +445,51 @@ fn gen_refuses_a_length_outside_the_bounds() {
     assert!(out.is_empty(), "a refused length still printed: {out:?}");
     assert!(err.contains("outside"), "{err}");
 }
+
+/* `--kind` picks the shape on stdout: six dash-joined words for a
+   passphrase, digits for a PIN — and flags from another kind say so on
+   stderr instead of silently doing nothing. */
+#[test]
+fn gen_kind_picks_the_shape_and_names_ignored_flags() {
+    let (out, err, code) = run(&[
+        "--no-config",
+        "gen",
+        "--stdout",
+        "--kind",
+        "passphrase",
+        "--words",
+        "6",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim().split('-').count(), 6, "{out:?}");
+
+    let (out, err, code) = run(&["--no-config", "gen", "--stdout", "--kind", "pin", "-n", "6"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim().chars().count(), 6, "{out:?}");
+    assert!(
+        out.trim().chars().all(|c| c.is_ascii_digit()),
+        "{out:?}"
+    );
+
+    let (out, err, code) = run(&[
+        "--no-config",
+        "gen",
+        "--stdout",
+        "--kind",
+        "pin",
+        "--symbols",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("complex passwords only"),
+        "class flag silently ignored: {err:?}"
+    );
+    assert!(
+        out.trim().chars().all(|c| c.is_ascii_digit()),
+        "{out:?}"
+    );
+
+    let (_out, err, code) = run(&["--no-config", "gen", "--stdout", "--kind", "nope"]);
+    assert_eq!(code, 1, "an unknown kind was accepted");
+    assert!(err.contains("none of"), "{err}");
+}

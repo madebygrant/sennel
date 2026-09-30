@@ -24,7 +24,7 @@ That happens before the config is read or a vault is opened, on every path inclu
 and `import`. A dump of Sennel holds every secret at once, and anything running as the same user can
 attach to a dumpable process. `sennel --check` reads the limit back rather than assuming it took.
 
-**Clipboard auto-clear.** Copies are wiped after a configurable interval, 15 seconds by default,
+**Clipboard auto-clear.** Copies are wiped after a configurable interval, 30 seconds by default,
 counted on the wall clock as well as the monotonic one. A sleeping thread does not run while the
 machine is suspended, so the wipe waits out the interval rather than that many seconds of uptime. A
 second copy re-arms the timer instead of being wiped early by the first one. Quitting wipes

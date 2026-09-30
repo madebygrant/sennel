@@ -10,6 +10,63 @@ const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &[u8] = b"0123456789";
 const SYMBOLS: &[u8] = b"!@#$%^&*()-_=+[]{};:,.<>?/";
 
+/* The passphrase list: the EFF large wordlist, minus its four hyphenated
+   entries (`drop-down`, `felt-tip`, `t-shirt`, `yo-yo`), which would read as
+   separators rather than words. CC-BY, eff.org. One file rather than an
+   array: 7772 words as source would bury the module that reads it. */
+const WORDS_TXT: &str = include_str!("words.txt");
+
+/// The wordlist, parsed once. A `Vec` rather than a sorted table: draws are
+/// by uniform index, so nothing ever searches it.
+static WORDS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| WORDS_TXT.lines().collect());
+
+/// How many words a passphrase draws from.
+pub fn word_count() -> usize {
+    WORDS.len()
+}
+
+/* What a password is shaped like. `Complex` is the historical generator —
+   character classes over a length. `Passphrase` is words off the list.
+   `Pin` is digits, for the screens that only accept those. */
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Complex,
+    Passphrase,
+    Pin,
+}
+
+impl Kind {
+    /// The config file and `--kind` spellings. Lowercase, like every other
+    /// value Sennel reads.
+    pub fn parse(text: &str) -> Option<Kind> {
+        match text.trim().to_lowercase().as_str() {
+            "complex" => Some(Kind::Complex),
+            "passphrase" => Some(Kind::Passphrase),
+            "pin" => Some(Kind::Pin),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Complex => "complex",
+            Kind::Passphrase => "passphrase",
+            Kind::Pin => "pin",
+        }
+    }
+
+    /// For the `t` cycle in the popup: complex, passphrase, pin, back round.
+    pub fn next(self) -> Kind {
+        match self {
+            Kind::Complex => Kind::Passphrase,
+            Kind::Passphrase => Kind::Pin,
+            Kind::Pin => Kind::Complex,
+        }
+    }
+}
+
 /* Characters that read differently in some fonts or get mangled when read
    aloud: l 1 I O 0. Excluding them shrinks the alphabet, so it is opt-in. */
 const AMBIGUOUS: &[u8] = b"l1IO0";
@@ -97,7 +154,9 @@ fn os_draw() -> Result<u64, String> {
    has no such edge to get wrong and no ceiling for a future caller to cross,
    and at one syscall per character the extra seven bytes cost nothing. */
 fn os_index(n: usize) -> Result<usize, String> {
-    debug_assert!(n > 0);
+    if n == 0 {
+        return Err("nothing to draw from".to_string());
+    }
     let n = n as u64;
     /* The largest multiple of n that fits, so everything at or above it is
        redrawn rather than folded onto the low indices. */
@@ -158,6 +217,55 @@ pub fn entropy_bits(len: usize, alphabet_len: usize) -> f64 {
         return 0.0;
     }
     (len as f64) * (alphabet_len as f64).log2()
+}
+
+/// A passphrase's worth: one uniform word per slot, so words times the
+/// list's own width. Six off this list is ~78 bits.
+pub fn passphrase_bits(words: usize) -> f64 {
+    if words == 0 {
+        return 0.0;
+    }
+    (words as f64) * (word_count() as f64).log2()
+}
+
+/// A PIN's worth: one of ten digits per slot. Six is ~20 bits — fine for a
+/// screen that locks after three tries, nothing more.
+pub fn pin_bits(len: usize) -> f64 {
+    entropy_bits(len, DIGITS.len())
+}
+
+/// The separator between passphrase words. A dash: spaces get trimmed by
+/// sites and underscores need the shift key on most layouts.
+pub const WORD_SEPARATOR: &str = "-";
+
+/// Words off the list, joined with dashes. Each slot is a uniform index, so
+/// a six-word result holds ~78 bits — and reads as words, not noise.
+pub fn generate_passphrase(words: usize) -> Result<String, String> {
+    if words == 0 {
+        return Err("a passphrase needs at least one word".into());
+    }
+    if WORDS.is_empty() {
+        return Err("the wordlist is empty".into());
+    }
+    let mut out = Vec::with_capacity(words);
+    for _ in 0..words {
+        out.push(WORDS[os_index(WORDS.len())?]);
+    }
+    Ok(out.join(WORD_SEPARATOR))
+}
+
+/// Digits only, for the screens that accept nothing else. The full ten, even
+/// with ambiguous exclusion on: a PIN missing 0 and 1 would read as broken,
+/// and nobody confuses digits on a phone pad.
+pub fn generate_pin(len: usize) -> Result<String, String> {
+    if len == 0 {
+        return Err("length must be at least 1".into());
+    }
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        out.push(DIGITS[os_index(DIGITS.len())?]);
+    }
+    String::from_utf8(out).map_err(|_| "generator produced non-utf8".into())
 }
 
 /* What a typed password is worth, judged only by what is in it: the classes
@@ -305,6 +413,71 @@ mod tests {
         assert_eq!(entropy_bits(8, 1), 0.0);
         assert!((entropy_bits(8, 64) - 48.0).abs() < 1e-9);
         assert!((entropy_bits(16, 26) - 16.0 * 26f64.log2()).abs() < 1e-9);
+    }
+
+    /* The list survived embedding: thousands of words, all lowercase ASCII,
+       none hyphenated (they would read as separators). */
+    #[test]
+    fn the_wordlist_is_what_the_passphrase_draws_from() {
+        assert_eq!(word_count(), 7772, "only {} words", word_count());
+        let mut seen = std::collections::HashSet::new();
+        for w in WORDS.iter() {
+            assert!(
+                !w.is_empty() && w.bytes().all(|c| c.is_ascii_lowercase()),
+                "bad word {w:?}"
+            );
+            assert!(seen.insert(*w), "duplicate word {w:?}");
+        }
+    }
+
+    /* Six words, five dashes, all off the list. */
+    #[test]
+    fn a_passphrase_is_words_joined_with_dashes() {
+        let made = generate_passphrase(6).unwrap();
+        let words: Vec<&str> = made.split(WORD_SEPARATOR).collect();
+        assert_eq!(words.len(), 6, "{made:?}");
+        for w in words {
+            assert!(WORDS.contains(&w), "{w:?} is not off the list");
+        }
+        assert!(generate_passphrase(0).is_err());
+    }
+
+    #[test]
+    fn two_passphrases_differ() {
+        let a = generate_passphrase(6).unwrap();
+        let b = generate_passphrase(6).unwrap();
+        assert_ne!(a, b, "the OS source produced the same passphrase twice");
+    }
+
+    /* Six words hold ~78 bits; a dragged-out PIN holds barely twenty. */
+    #[test]
+    fn passphrase_and_pin_bits_price_what_they_draw_from() {
+        let six = passphrase_bits(6);
+        assert!(six > 70.0 && six < 85.0, "{six}");
+        assert_eq!(passphrase_bits(0), 0.0);
+        assert!((pin_bits(6) - 6.0 * 10f64.log2()).abs() < 1e-9);
+        assert_eq!(strength(passphrase_bits(6)), "good");
+    }
+
+    /* Digits and only digits, at exactly the length asked. */
+    #[test]
+    fn a_pin_is_digits_at_the_length_asked() {
+        let pin = generate_pin(6).unwrap();
+        assert_eq!(pin.chars().count(), 6);
+        assert!(pin.bytes().all(|c| c.is_ascii_digit()));
+        assert!(generate_pin(0).is_err());
+    }
+
+    /* The kind spellings round-trip, and the popup cycles all three. */
+    #[test]
+    fn kinds_parse_and_cycle() {
+        assert_eq!(Kind::parse("complex"), Some(Kind::Complex));
+        assert_eq!(Kind::parse(" Passphrase "), Some(Kind::Passphrase));
+        assert_eq!(Kind::parse("PIN"), Some(Kind::Pin));
+        assert_eq!(Kind::parse("words"), None);
+        assert_eq!(Kind::Complex.next(), Kind::Passphrase);
+        assert_eq!(Kind::Passphrase.next(), Kind::Pin);
+        assert_eq!(Kind::Pin.next(), Kind::Complex);
     }
 }
 
