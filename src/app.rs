@@ -1401,6 +1401,27 @@ impl App {
         self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
     }
 
+    /* Point `db_path` at whatever the file box currently names, when it names
+       something different. Enter on the file box does this explicitly via
+       `accept_file_box`; Tab-past typists and direct-Enter unlockers skip
+       that step, so `try_unlock` (and Tab cycling, which counts boxes from
+       `unlock_new`) reconcile here instead of trusting a stale path. Empty
+       keeps the current vault; another user's `~` is refused by the caller. */
+    fn sync_db_path_from_file_box(&mut self) {
+        let typed = self.unlock_file.trim().to_string();
+        if typed.is_empty() || crate::config::is_other_home(&typed) {
+            return;
+        }
+        let expanded = crate::config::expand(&typed);
+        let same = self.db_path.as_ref().is_some_and(|current| {
+            crate::config::absolute(current) == crate::config::absolute(&expanded)
+        });
+        if !same {
+            self.db_path = Some(expanded);
+            self.refresh_db_state();
+        }
+    }
+
     /* Unlock with the typed password (and optional key file), or create the
        database when the file is missing and the confirm matches. The password
        buffer is zeroized on every path out; the retained DatabaseKey inside
@@ -1421,13 +1442,21 @@ impl App {
         /* A path typed in the file box but never confirmed with Enter (Tab
            jumped to the password instead) is still the vault the user means:
            apply it here so unlock reads the path off the box it was typed in
-           rather than reporting that no vault was configured. */
-        if self.db_path.is_none() {
-            let typed = self.unlock_file.trim();
-            if !typed.is_empty() {
-                self.db_path = Some(crate::config::expand(typed));
-                self.refresh_db_state();
-            }
+           rather than opening the previous vault. This used to apply only
+           when no vault was configured, so switching files via the file box
+           silently unlocked the old database — and a stale `unlock_new`
+           either forced a confirm on an existing vault or skipped it for a
+           new one. */
+        self.sync_db_path_from_file_box();
+        if !self.unlock_file.trim().is_empty()
+            && crate::config::is_other_home(self.unlock_file.trim())
+        {
+            // `sync` refuses it, and Enter on the password box bypasses the
+            // file box's own check — so say so here rather than silently
+            // unlocking whatever vault was configured before.
+            self.warn("another user's ~ cannot be resolved  ·  type the full path");
+            password.zeroize();
+            return;
         }
         let Some(path) = self.db_path.clone() else {
             self.warn("no database configured  ·  run `Sennel --help` for --db");
@@ -1530,6 +1559,9 @@ impl App {
     /// Tab and shift-Tab through the unlock boxes, wrapping. Three boxes, or
     /// four in create mode where the confirm and the file box join.
     pub fn next_unlock_field(&mut self, forward: bool) {
+        // Tabbing away from an edited file box re-points the session, so the
+        // box count (and the confirm's visibility) follows the typed path.
+        self.sync_db_path_from_file_box();
         let n = if self.unlock_new { 4 } else { 3 };
         let at = match self.unlock_field {
             UnlockField::File => 0,

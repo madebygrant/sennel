@@ -33,7 +33,12 @@ keepass = { version = "0.14", features = ["save_kdbx4", "totp"] }
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rpassword = "7"
-arboard = "3"
+# wayland-data-control: without it arboard only speaks X11, so on a Wayland
+# session (no X11 clipboard manager) a copy reports success yet nothing
+# reaches native Wayland paste targets. With it, copies go over
+# zwlr_data_control and stay servable while Sennel runs; X11 sessions fall
+# back to the X11 backend as before.
+arboard = { version = "3", features = ["wayland-data-control"] }
 nucleo-matcher = "0.3"
 zeroize = "1"
 getrandom = "0.4"
