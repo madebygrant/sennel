@@ -9,9 +9,9 @@ could not honour. Three shapes: `complex` (characters from classes, the default)
 - `P` in the browser opens the generator on its own, with no entry to store the result in.
   `t` walks the three kinds.
 
-- `^s` inside the add or edit form writes one straight into the password box — and onto the
-  clipboard, on the same wipe timer as every other copy, so it can go into the site first.
-  `^y` copies the password box again without generating.
+- `^s` inside the add or edit form writes one straight into the password box.
+  `^y` copies the password box, on the same wipe timer as every other copy, so it can go into
+  the site first.
 - `sennel gen` does it without the TUI at all, and opens no vault to do it.
 
 ## `P`, the standalone generator
@@ -26,7 +26,7 @@ could not honour. Three shapes: `complex` (characters from classes, the default)
 │  t complex  u A–Z  d 0–9  s !@#  a l1IO0    │
 │  - +  shorter, longer                       │
 │                                             │
-│  y copy · r again · t type · esc close      │
+│  y copy · r again · t kind · esc close      │
 └─────────────────────────────────────────────┘
 ```
 
@@ -64,7 +64,7 @@ sennel gen --kind pin -n 6 --stdout --force
 | Flag           | What it does                                              |
 | -------------- | --------------------------------------------------------- |
 | `--kind`       | complex, passphrase or pin. Defaults to the config        |
-| `-n`, `--length` | how many characters (4–256). Defaults to the config   |
+| `-n`, `--length` | how many characters (4–256), or digits for a pin (4–12). Defaults to the config |
 | `--words`      | how many words, for a passphrase (1–64)                   |
 | `--symbols` / `--no-symbols` | punctuation in or out; the last one wins    |
 | `--no-digits`  | leave digits out                                          |

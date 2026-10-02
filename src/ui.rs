@@ -1577,7 +1577,7 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     lines.push(Line::from(p.faint(truncate(resize, inner))));
     lines.push(Line::default());
     lines.push(Line::from(p.faint(truncate(
-        "  y copy · r again · t type · esc close",
+        "  y copy · r again · t kind · esc close",
         inner,
     ))));
     popup(frame, &format!("{MARK} generate"), lines, width, &p);

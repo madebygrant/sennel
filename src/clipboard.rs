@@ -15,14 +15,9 @@ pub struct Board {
        being wiped early by the first one's thread. */
     epoch: Arc<Mutex<u64>>,
     timeout: Option<Duration>,
-    /* When the secret on the clipboard stops being there. The status bar
-        counts this down: "clears in 30s" is a promise shown for three seconds
-       and then gone, while the secret is still sitting there.
-
-       On the wall clock, not the monotonic one: a sleeping thread does not
-        run during a system suspend, so a thirty-second wipe used to become
-        "thirty seconds of the machine being awake" — a password left on the
-       pasteboard across a closed lid. */
+    /* When the secret on the clipboard stops being there; the status bar
+       counts it down. On the wall clock because a sleeping thread does not
+       run during a system suspend, so a monotonic wipe outlasts a closed lid. */
     until: Arc<Mutex<Option<SystemTime>>>,
 }
 
@@ -100,17 +95,12 @@ impl Board {
             *self.until.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
             let board = self.clone();
             std::thread::spawn(move || {
-                /* Sliced rather than one long sleep: a thread asleep when the
-                   machine suspends wakes up owing the rest of its nap, so the
-                   wipe landed a quarter of an hour of *uptime* later however
-                   long the lid was shut. Each slice re-reads the wall clock,
-                   so waking is what ends the wait. */
+                // Sliced: a thread asleep through a suspend wakes owing the rest of its nap.
+                // Each slice re-reads the wall clock, so waking ends the wait.
                 let monotonic = std::time::Instant::now() + wait;
                 loop {
-                    /* Whichever clock runs out first ends the wait. The wall
-                       clock is the one that notices a suspend; the monotonic
-                       one is what stops a clock set backwards from holding a
-                       password on the pasteboard for as long as it likes. */
+                    // Whichever clock runs out first ends the wait: wall catches suspend,
+                    // monotonic catches a clock set backwards.
                     let left = deadline
                         .duration_since(SystemTime::now())
                         .unwrap_or_default()

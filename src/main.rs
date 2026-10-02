@@ -87,15 +87,20 @@ fn main() -> Result<()> {
         let mut settings = cfg.generator;
         if let Some(kind) = kind {
             settings.kind = generator::Kind::parse(kind).ok_or_else(|| {
-                anyhow::anyhow!("type {kind:?} is none of complex, passphrase, pin")
+                anyhow::anyhow!("kind {kind:?} is none of complex, passphrase, pin")
             })?;
         }
         if let Some(len) = *length {
-            let (min, max) = config::LENGTH_RANGE;
+            let pin = settings.kind == generator::Kind::Pin;
+            let (min, max) = if pin { config::PIN_RANGE } else { config::LENGTH_RANGE };
             if !(min..=max).contains(&len) {
                 anyhow::bail!("length {len} is outside {min}–{max}");
             }
-            settings.length = len;
+            if pin {
+                settings.pin_length = len;
+            } else {
+                settings.length = len;
+            }
         }
         if let Some(words) = *words {
             let (min, max) = config::WORDS_RANGE;
@@ -119,9 +124,7 @@ fn main() -> Result<()> {
         if *ambiguous {
             settings.exclude_ambiguous = false;
         }
-        /* Said rather than silently ignored, the way the popup names a knob
-           that does nothing outside complex: a `gen --kind pin --symbols`
-           that looks successful but produced no symbols erodes trust. */
+        // Said, not ignored: `gen --kind pin --symbols` must not look like it worked.
         if settings.kind != generator::Kind::Complex
             && (*symbols || *no_symbols || *no_digits || *no_upper || *ambiguous)
         {
@@ -645,7 +648,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     let entry = vault.get_entry(&id).expect("resolve returned a live id");
     let title = printable(entry.title());
     /* Wiped when this returns: the copy path below holds it across a
-       thirty-second sleep, and a `get -p` that leaves the password in a
+       clipboard-timeout sleep, and a `get -p` that leaves the password in a
        freed allocation undoes the point of every zeroize above it. */
     let value = zeroize::Zeroizing::new(match field {
         Field::User => entry.username().to_string(),
@@ -679,9 +682,20 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
             board.clear_now();
         }
         // `clipboard_timeout = 0` asked for it to stay; nothing to wait for.
-        None => eprintln!("copied the {} for {title}", field.name()),
+        None => {
+            eprintln!("copied the {} for {title}", field.name());
+            warn_copy_dies_on_exit();
+        }
     }
     Ok(())
+}
+
+// Wayland and X11 serve a copy from the owning process, so it goes when we exit
+// unless a clipboard manager took it.
+fn warn_copy_dies_on_exit() {
+    if cfg!(target_os = "linux") {
+        eprintln!("the copy lasts only while a clipboard manager holds it  ·  use --stdout otherwise");
+    }
 }
 
 /* `sennel gen`: the generator on its own, with no entry to write it into and
@@ -708,7 +722,7 @@ fn make_password(
                 generator::generate(settings.length, settings.classes, settings.exclude_ambiguous)
             }
             generator::Kind::Passphrase => generator::generate_passphrase(settings.words),
-            generator::Kind::Pin => generator::generate_pin(settings.length),
+            generator::Kind::Pin => generator::generate_pin(settings.pin_length),
         })
         .map_err(|e| anyhow::anyhow!("{e}"))
     };
@@ -740,11 +754,14 @@ fn make_password(
             std::thread::sleep(Duration::from_secs(secs));
             board.clear_now();
         }
-        None => eprintln!(
-            "copied {} · {} · ~{bits:.0} bits",
-            settings.amount(),
-            settings.describe()
-        ),
+        None => {
+            eprintln!(
+                "copied {} · {} · ~{bits:.0} bits",
+                settings.amount(),
+                settings.describe()
+            );
+            warn_copy_dies_on_exit();
+        }
     }
     Ok(())
 }
@@ -1394,10 +1411,8 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 fn unlock_now(app: &mut App) {
     /* Taken, not borrowed: `try_unlock` consumes and zeroizes on every path,
        and a take leaves `App` holding nothing the moment the key is read. */
-    /* Replaced with a box of the same shape rather than taken: `mem::take`
-       leaves a zero-capacity String behind, and the next password typed into
-       it would grow one keystroke at a time through allocations nothing wipes.
-       See `app::secret_box`. */
+    // Replaced, not taken: `mem::take` leaves zero capacity, so the next password
+    // would grow through unwiped reallocations. See `app::secret_box`.
     let mut password: Vec<u8> =
         std::mem::replace(&mut app.unlock_password, app::secret_box()).into_bytes();
     /* Copied out first: the read below borrows `app` through the match, and a

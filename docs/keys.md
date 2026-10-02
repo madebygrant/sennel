@@ -66,7 +66,7 @@ not the browser's `*`.
 | `^s`                | save now (every change already autosaves)                     |
 | `^r`                | reload from disk (offered when the file changed under you)    |
 | `P`                 | generate a password with no entry to put it in                |
-| `^s` (in a form)    | generate a password into the edit form (also copied)          |
+| `^s` (in a form)    | generate a password into the edit form                       |
 | `^y` (in a form)    | copy the password box before the entry is saved               |
 | `^r` (in a form)    | show what is in the password box                              |
 | `alt+enter`         | new line in the notes box (`enter` saves)                     |

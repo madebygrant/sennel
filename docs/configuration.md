@@ -19,7 +19,8 @@ mouse = true                   # wheel scrolls, click selects; false gives the
 [generator]                    # the default for ^s in a form, P on its own,
                                # and sennel gen
 kind = "complex"               # complex · passphrase · pin
-length = 20                    # 4–256 (characters; digits for a pin)
+length = 20                    # 4–256 (characters)
+pin_length = 6                 # 4–12 (digits in a pin)
 words = 6                      # 1–64 (passphrase words)
 upper = true                   # A–Z
 digits = true                  # 0–9

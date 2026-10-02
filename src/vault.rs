@@ -803,11 +803,8 @@ impl Vault {
             let _ = std::fs::remove_file(&temp);
             return Err(VaultError::Db(e.to_string()));
         }
-        /* The bytes on the disk before the name points at them. Rename is
-           atomic on its own, but only about the *name*: without this, a power
-           loss just after the rename can leave the vault's path pointing at a
-           file whose blocks never landed — the truncated kdbx this whole
-           dance exists to prevent, one layer down. */
+        // Bytes before name: rename is atomic only about the name, so without this a
+        // power loss can leave the path pointing at a file whose blocks never landed.
         if let Err(e) = out.sync_all() {
             drop(out);
             let _ = std::fs::remove_file(&temp);

@@ -106,7 +106,7 @@ pub enum Command {
     /// Generate a password without storing it anywhere
     Gen {
         /// What shape: complex, passphrase or pin. Defaults to the config.
-        #[arg(long, value_name = "TYPE")]
+        #[arg(long, value_name = "KIND")]
         kind: Option<String>,
 
         /// How many characters. Defaults to the configured length.
@@ -258,6 +258,8 @@ pub struct FileGenerator {
     /// complex · passphrase · pin. The default shape of every secret.
     pub kind: Option<String>,
     pub length: Option<usize>,
+    /// Digits in a pin. Only read for that kind.
+    pub pin_length: Option<usize>,
     /// How many words a passphrase holds. Only read for that kind.
     pub words: Option<usize>,
     pub symbols: Option<bool>,
@@ -276,11 +278,16 @@ pub const LENGTH_RANGE: (usize, usize) = (4, 256);
    the popup is a wall of text nobody reads before copying. */
 pub const WORDS_RANGE: (usize, usize) = (1, 64);
 
+// Digits in a pin: below 4 is not a pin, past 12 no screen asks for one.
+pub const PIN_RANGE: (usize, usize) = (4, 12);
+
 /// The generator settings a session runs with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Generator {
     pub kind: crate::generator::Kind,
     pub length: usize,
+    /// Pin digits. Read only for that kind.
+    pub pin_length: usize,
     /// Passphrase words. Read only for that kind; kept beside length so one
     /// struct answers every generator there is.
     pub words: usize,
@@ -294,6 +301,7 @@ impl Default for Generator {
         Generator {
             kind: crate::generator::Kind::Complex,
             length: 20,
+            pin_length: 6,
             words: 6,
             classes: crate::generator::Classes::default(),
             exclude_ambiguous: true,
@@ -330,7 +338,7 @@ impl Generator {
         match self.kind {
             crate::generator::Kind::Complex => format!("{} chars", self.length),
             crate::generator::Kind::Passphrase => format!("{} words", self.words),
-            crate::generator::Kind::Pin => format!("{} digits", self.length),
+            crate::generator::Kind::Pin => format!("{} digits", self.pin_length),
         }
     }
 
@@ -343,7 +351,7 @@ impl Generator {
                 self.classes.alphabet_len(self.exclude_ambiguous),
             ),
             crate::generator::Kind::Passphrase => crate::generator::passphrase_bits(self.words),
-            crate::generator::Kind::Pin => crate::generator::pin_bits(self.length),
+            crate::generator::Kind::Pin => crate::generator::pin_bits(self.pin_length),
         }
     }
 }
@@ -561,7 +569,7 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
     };
     if let Some(kind) = file.kind.as_deref() {
         out.kind = crate::generator::Kind::parse(kind)
-            .ok_or_else(|| anyhow::anyhow!("generator type {kind:?} is none of complex, passphrase, pin"))?;
+            .ok_or_else(|| anyhow::anyhow!("generator kind {kind:?} is none of complex, passphrase, pin"))?;
     }
     if let Some(words) = file.words {
         let (min, max) = WORDS_RANGE;
@@ -569,6 +577,13 @@ fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
             anyhow::bail!("generator words {words} is outside {min}–{max}");
         }
         out.words = words;
+    }
+    if let Some(pin) = file.pin_length {
+        let (min, max) = PIN_RANGE;
+        if !(min..=max).contains(&pin) {
+            anyhow::bail!("generator pin_length {pin} is outside {min}–{max}");
+        }
+        out.pin_length = pin;
     }
     if let Some(length) = file.length {
         let (min, max) = LENGTH_RANGE;
@@ -972,9 +987,7 @@ mod tests {
         assert!(err.contains("outside 4–256"), "{err}");
     }
 
-    /* The kind and the word count ride the same table: a passphrase default
-       for every `^s`, and a misspelling stops startup rather than silently
-       generating complex passwords into a passphrase shop. */
+    // A bad kind or word count stops startup instead of silently falling back.
     #[test]
     fn the_generator_reads_kind_and_words() {
         use crate::generator::Kind;
@@ -998,6 +1011,23 @@ mod tests {
             Ok(_) => panic!("an unknown generator kind started the session"),
         };
         assert!(err.contains("none of complex, passphrase, pin"), "{err}");
+
+        let cfg = build("[generator]\npin_length = 8\n", &[]);
+        assert_eq!(cfg.generator.pin_length, 8);
+
+        let mut file = temp("genpin");
+        writeln!(file.handle, "[generator]\npin_length = 2").unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "sennel".to_string(),
+            "--config".into(),
+            file.path.clone(),
+        ])
+        .unwrap();
+        let err = match Config::build(cli) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a two-digit pin started the session"),
+        };
+        assert!(err.contains("outside 4–12"), "{err}");
 
         let mut file = temp("genwords");
         writeln!(file.handle, "[generator]\nwords = 0").unwrap();

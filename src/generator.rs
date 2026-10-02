@@ -10,10 +10,8 @@ const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &[u8] = b"0123456789";
 const SYMBOLS: &[u8] = b"!@#$%^&*()-_=+[]{};:,.<>?/";
 
-/* The passphrase list: the EFF large wordlist, minus its four hyphenated
-   entries (`drop-down`, `felt-tip`, `t-shirt`, `yo-yo`), which would read as
-   separators rather than words. CC-BY, eff.org. One file rather than an
-   array: 7772 words as source would bury the module that reads it. */
+// EFF large wordlist minus its four hyphenated entries (they would read as
+// separators). CC-BY, eff.org. A file because 7772 words would bury the module.
 const WORDS_TXT: &str = include_str!("words.txt");
 
 /// The wordlist, parsed once. A `Vec` rather than a sorted table: draws are
@@ -38,8 +36,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The config file and `--kind` spellings. Lowercase, like every other
-    /// value Sennel reads.
+    /// The config file and `--kind` spellings, matched case-insensitively.
     pub fn parse(text: &str) -> Option<Kind> {
         match text.trim().to_lowercase().as_str() {
             "complex" => Some(Kind::Complex),
@@ -146,20 +143,14 @@ fn os_draw() -> Result<u64, String> {
 }
 
 /// A uniform index into `n`, rejection-sampled so `%` never skews the pick.
-/* Drawn from the whole 64-bit range rather than from one byte. The byte
-   version passed n = 255 straight through to `% n` — 256 values over 255
-   slots, which handed index 0 twice the weight of every other one, in the one
-   function here whose whole job is not doing that. It was reachable: the
-   shuffle asks for `i + 1`, and LENGTH_RANGE tops out at 256. A wider draw
-   has no such edge to get wrong and no ceiling for a future caller to cross,
-   and at one syscall per character the extra seven bytes cost nothing. */
+// Drawn from 64 bits: a one-byte draw with n = 255 gave index 0 double weight,
+// and the shuffle can ask for it (LENGTH_RANGE tops out at 256).
 fn os_index(n: usize) -> Result<usize, String> {
     if n == 0 {
         return Err("nothing to draw from".to_string());
     }
     let n = n as u64;
-    /* The largest multiple of n that fits, so everything at or above it is
-       redrawn rather than folded onto the low indices. */
+    // Redraw at or above the largest multiple of n, so low indices are not favoured.
     let limit = (u64::MAX / n) * n;
     loop {
         let draw = os_draw()?;

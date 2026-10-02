@@ -10,10 +10,10 @@ Your vault, in your terminal. Real KeePass files. A clipboard that cleans up aft
 
 - **Real KDBX4 files.** KeePassXC opens what Sennel writes, Sennel opens what KeePassXC writes. No plugins, no lock-in.
 - **One key per secret.** `y p U t` copy the username, password, url or one-time code.
-- **A clipboard with a timer.** Every copy wipes after 15 seconds, and the status bar counts it down.
+- **A clipboard with a timer.** Every copy wipes after 30 seconds, and the status bar counts it down.
 - **Fuzzy search that shows its work.** The matched characters light up in each row, so you can see why it is there. Titles, usernames, urls and group paths. Never your notes.
 - **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group.
-- **A generator on call.** `P` shows a password, what it is worth in bits, and one key per class for whatever rule the site has this week.
+- **A generator on call.** `P` shows a password, passphrase or PIN (`t` switches), what it is worth in bits, and one key per class for whatever rule the site has this week. `^s` in the entry form fills the password box, and `^y` copies it before you save.
 - **It audits itself.** `!` lists every reused, weak, expired or empty password, worst first, and puts the cursor two keys from the fix.
 - **Deletes are never losses.** `D` moves to the same recycle bin KeePassXC uses. One `u` brings it back.
 - **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped.
@@ -37,6 +37,7 @@ Or never open the TUI at all:
 ```sh
 sennel get github -p        # copy one secret and exit
 sennel gen --stdout         # a password, stored nowhere
+sennel gen --kind passphrase --stdout   # six words off the EFF list
 ```
 
 Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
@@ -52,7 +53,7 @@ and `^v` keeps them both.
 | `^v`        | the vaults you have opened (unlock screen)      |
 | `/`         | search                                          |
 | `a e D`     | add, edit, delete an entry (to the bin)         |
-| `P`         | generate a password, no entry needed            |
+| `P`         | generate a password, passphrase or PIN          |
 | `!`         | passwords worth changing                        |
 | `F`         | custom fields and attachments                   |
 | `u`         | undo, as many steps as you made                 |
@@ -113,6 +114,7 @@ working rather than a vault nobody can open.
 - [Security](docs/security.md), the interesting one: what is wiped, when, and why
 - [Themes](docs/themes.md) and how the colours are measured
 - [Configuration](docs/configuration.md)
+- [CLI reference for AI agents](docs/agents.md), also indexed in [`llms.txt`](llms.txt)
 
 ## Building
 
@@ -132,3 +134,6 @@ sennel man > /usr/local/share/man/man1/sennel.1
 ## License
 
 MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE.
+
+The passphrase wordlist is the [EFF large wordlist](https://www.eff.org/dice), CC-BY 3.0, minus four
+hyphenated entries.

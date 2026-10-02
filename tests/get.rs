@@ -463,6 +463,10 @@ fn gen_kind_picks_the_shape_and_names_ignored_flags() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(out.trim().split('-').count(), 6, "{out:?}");
 
+    let (out, err, code) = run(&["--no-config", "gen", "--stdout", "--kind", "pin"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim().chars().count(), 6, "pin default is not 6: {out:?}");
+
     let (out, err, code) = run(&["--no-config", "gen", "--stdout", "--kind", "pin", "-n", "6"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out.trim().chars().count(), 6, "{out:?}");

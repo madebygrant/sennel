@@ -127,19 +127,9 @@ impl Form {
     }
 }
 
-/* A box a secret is typed into, given room for one up front.
-
-   `String` grows by reallocating, and the block it leaves behind is freed
-   with the bytes still in it — so a twenty-character master password typed
-   into a box that started empty scatters its first eight, sixteen, … keystrokes
-   across allocations nothing can reach to wipe. `zeroize` only ever reaches
-   the buffer the box ended up holding. One reservation up front means there
-   is only ever that one buffer, and `zeroize` keeps the capacity (it clears
-   the length, not the allocation), so it survives every wipe of the session.
-
-   Longer than any password anyone types, and small enough that a handful of
-   these cost nothing. A box typed past it reallocates like any other String —
-   this narrows the window, it does not pretend to close it. */
+// Secret boxes reserve capacity up front: a String that grows by realloc frees
+// its old block unwiped, and zeroize only reaches the final buffer. Typing past
+// the reservation reallocates as usual, so this narrows the window.
 const SECRET_BOX: usize = 512;
 
 pub fn secret_box() -> String {
@@ -250,8 +240,7 @@ pub struct AddField {
     pub from_file: bool,
 }
 
-/* Hand-written rather than derived, for the one field that holds a secret:
-   see `secret_box`. */
+// Not derived: the value box is a secret, see `secret_box`.
 impl Default for AddField {
     fn default() -> Self {
         AddField {
@@ -317,8 +306,7 @@ pub struct Rekey {
     pub reveal: bool,
 }
 
-/* Hand-written rather than derived: both boxes hold what is about to become
-   the key to everything, and both get their room up front. See `secret_box`. */
+// Not derived: both boxes are secrets, see `secret_box`.
 impl Default for Rekey {
     fn default() -> Self {
         Rekey {
@@ -805,13 +793,8 @@ pub struct App {
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
     pub last_activity: Instant,
-    /* The same moment on the wall clock. `Instant` stops during a system
-       suspend on both platforms Sennel ships to — Darwin has no
-       CLOCK_BOOTTIME and Linux's CLOCK_MONOTONIC excludes suspend — so a
-       laptop unlocked, closed, and opened in a café six hours later came back
-       to a vault that had measured almost no time at all. Both clocks are
-       kept and the longer answer wins: the wall clock covers the suspend, and
-       the monotonic one covers a wall clock that jumps backwards. */
+    // Wall-clock twin of `last_activity`: `Instant` stops during suspend on macOS
+    // and Linux. `idle_expired` takes the longer of the two readings.
     pub last_activity_wall: std::time::SystemTime,
     /* The OS clipboard with its auto-clear timer. `None` until startup wires
        it from the config: `App::new` must stay callable in tests without
@@ -1147,10 +1130,7 @@ impl App {
             self.say("no entry here to copy from");
             return;
         };
-        /* Wiped on the way out of this frame, which is the rule every other
-           secret in this file follows. `p` is the most-pressed key in the app
-           and it used to be the one path that dropped a plaintext password
-           into a freed allocation and left it there. */
+        // Wiped when this frame returns, like every other secret here.
         let text = zeroize::Zeroizing::new(take(&entry));
         if text.is_empty() {
             self.say(format!("no {label} on this entry"));
@@ -1397,16 +1377,15 @@ impl App {
         self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
     }
 
-    /* Point `db_path` at whatever the file box currently names, when it names
-       something different. Enter on the file box does this explicitly via
-       `accept_file_box`; Tab-past typists and direct-Enter unlockers skip
-       that step, so `try_unlock` (and Tab cycling, which counts boxes from
-       `unlock_new`) reconcile here instead of trusting a stale path. Empty
-       keeps the current vault; another user's `~` is refused by the caller. */
-    fn sync_db_path_from_file_box(&mut self) {
+    // Point `db_path` at the file box when it names a different vault, so Tab-past
+    // and direct-Enter unlocks agree with the box. False for another user's `~`.
+    fn sync_db_path_from_file_box(&mut self) -> bool {
         let typed = self.unlock_file.trim().to_string();
-        if typed.is_empty() || crate::config::is_other_home(&typed) {
-            return;
+        if crate::config::is_other_home(&typed) {
+            return false;
+        }
+        if typed.is_empty() {
+            return true;
         }
         let expanded = crate::config::expand(&typed);
         let same = self.db_path.as_ref().is_some_and(|current| {
@@ -1416,6 +1395,7 @@ impl App {
             self.db_path = Some(expanded);
             self.refresh_db_state();
         }
+        true
     }
 
     /* Unlock with the typed password (and optional key file), or create the
@@ -1443,13 +1423,8 @@ impl App {
            silently unlocked the old database — and a stale `unlock_new`
            either forced a confirm on an existing vault or skipped it for a
            new one. */
-        self.sync_db_path_from_file_box();
-        if !self.unlock_file.trim().is_empty()
-            && crate::config::is_other_home(self.unlock_file.trim())
-        {
-            // `sync` refuses it, and Enter on the password box bypasses the
-            // file box's own check — so say so here rather than silently
-            // unlocking whatever vault was configured before.
+        if !self.sync_db_path_from_file_box() {
+            // Enter on the password box skips the file box's own check.
             self.warn("another user's ~ cannot be resolved  ·  type the full path");
             password.zeroize();
             return;
@@ -1793,7 +1768,7 @@ impl App {
             crate::generator::Kind::Passphrase => {
                 crate::generator::generate_passphrase(settings.words)
             }
-            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.length),
+            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.pin_length),
         };
         match made {
             Ok(password) => {
@@ -1844,17 +1819,23 @@ impl App {
             self.mint_roll(false);
             return;
         }
-        let (min, max) = crate::config::LENGTH_RANGE;
-        let want = if longer {
-            mint.settings.length + 1
+        let pin = mint.settings.kind == crate::generator::Kind::Pin;
+        let (min, max) = if pin {
+            crate::config::PIN_RANGE
         } else {
-            mint.settings.length.saturating_sub(1)
+            crate::config::LENGTH_RANGE
         };
+        let len = if pin {
+            &mut mint.settings.pin_length
+        } else {
+            &mut mint.settings.length
+        };
+        let want = if longer { *len + 1 } else { len.saturating_sub(1) };
         if want < min || want > max {
             self.say(format!("length stays between {min} and {max}"));
             return;
         }
-        mint.settings.length = want;
+        *len = want;
         self.mint_roll(false);
     }
 
@@ -1874,9 +1855,7 @@ impl App {
         let Some(mint) = &mut self.mint else {
             return;
         };
-        /* Classes shape complex passwords only: a passphrase is words off a
-           list and a PIN is digits, so the knob would lie about what is on
-           screen. Said rather than ignored, with the way back named. */
+        // Classes shape complex passwords only; say so rather than flip a hidden knob.
         if mint.settings.kind != crate::generator::Kind::Complex {
             if knob == Knob::Ambiguous {
                 self.say("l1IO0 only narrows complex passwords  ·  t switches kind");
@@ -1884,7 +1863,7 @@ impl App {
                 self.say("classes shape complex passwords  ·  t switches kind");
             }
             return;
-        };
+        }
         let classes = &mut mint.settings.classes;
         match knob {
             Knob::Upper => classes.upper = !classes.upper,
@@ -2322,14 +2301,8 @@ impl App {
         }
         let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
         if global {
-            /* A Pattern, not a raw fuzzy_match: multi-word needles ("git
-               octo") become atoms, and the band must agree with the count in
-               `entry_matches`, which is these same rows.
-
-               Needle parsed once and haystacks built once for the whole pass.
-               Scored once too: the filter used to throw the score away and a
-               second pass asked for it again, so every keystroke ranked the
-               vault twice over. */
+            // A Pattern so multi-word needles ("git octo") become atoms, matching the count
+            // in `entry_matches`. Needle parsed and haystacks built once, each scored once.
             let needle = self.search.clone().unwrap_or_default();
             let pattern = crate::search::pattern(&needle);
             let hays = crate::search::haystacks(vault, &ids);
@@ -4432,10 +4405,10 @@ impl App {
             crate::generator::Kind::Passphrase => {
                 crate::generator::generate_passphrase(settings.words)
             }
-            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.length),
+            crate::generator::Kind::Pin => crate::generator::generate_pin(settings.pin_length),
         };
         let generated = match made {
-            Ok(pw) => pw,
+            Ok(pw) => zeroize::Zeroizing::new(pw),
             Err(e) => {
                 self.error(format!("cannot generate  ·  {e}"));
                 return;
@@ -4444,40 +4417,25 @@ impl App {
         let Some(form) = self.form.as_mut() else {
             return;
         };
-        form.password = generated;
+        // In place: assigning frees the old secret unwiped and loses `secret_box`.
+        form.password.zeroize();
+        form.password.push_str(&generated);
         form.password_touched = true;
         form.caret = form.password.chars().count();
-        /* Priced against what it was drawn from: excluding the lookalikes
-           shrinks the alphabet, and the estimate used to quote the wider one,
-           which overstates a secret in the one direction it must not. */
+        // Priced against the pool actually drawn from.
         let bits = settings.bits();
-        /* Onto the clipboard as well, under the same auto-clear timer every
-           other copy gets: the fresh password is usually needed in a browser
-           or signup form before this entry is ever saved, and retyping a
-           twenty-character secret is how it arrives wrong. */
-        let copied = match &self.board {
-            Some(board) => match board.copy(&form.password) {
-                Ok(()) => board
-                    .clears_in()
-                    .map(|secs| format!("  ·  copied, clears in {secs}s"))
-                    .unwrap_or_else(|| "  ·  copied".to_string()),
-                Err(e) => format!("  ·  clipboard refused the copy ({e})"),
-            },
-            None => "  ·  clipboard is not ready".to_string(),
-        };
         self.say(format!(
-            "generated {}  ·  {}  ·  ~{bits:.0} bits{copied}",
+            "generated {}  ·  {}  ·  ~{bits:.0} bits  ·  ^y copies it",
             settings.amount(),
             settings.describe()
         ));
     }
 
-    /* `^y` in the form: the password box onto the clipboard while the entry
-       is still unsaved — paste it into the site first, then Enter keeps it.
-       An empty box says so rather than wiping whatever the clipboard holds. */
+    // `^y`: copy the unsaved password box. An empty box says so instead of
+    // wiping the clipboard.
     pub fn form_copy_password(&mut self) {
         let password = match &self.form {
-            Some(form) => form.password.clone(),
+            Some(form) => zeroize::Zeroizing::new(form.password.clone()),
             None => return,
         };
         if password.is_empty() {
@@ -4666,11 +4624,7 @@ pub mod tests {
         assert_eq!(app.stage, "locked");
     }
 
-    /* A suspend is idleness the monotonic clock cannot see: it stops while
-       the machine is asleep on both platforms Sennel ships to, so a vault
-       unlocked before the lid closed used to come back open however long it
-       was shut. The wall clock is what notices, and either clock running out
-       is enough. */
+    // Monotonic clocks stop during suspend; the wall clock sees it.
     #[test]
     fn a_suspend_counts_as_idle_time() {
         let mut app = open_app();
@@ -5065,6 +5019,50 @@ pub mod tests {
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser, "unconfirmed path refused");
         assert!(app.vault.is_some());
+    }
+
+    // A path typed over a configured vault must replace it, not unlock the old one.
+    #[test]
+    fn a_typed_path_replaces_the_configured_vault() {
+        let (mut app, old) = locked_app_with_db("old");
+        let other = temp_path("other");
+        let mut seed = Vault::new();
+        seed.save_as(&other.0, "new", None).unwrap();
+        app.unlock_file = other.0.display().to_string();
+        let mut pw = "new".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Browser, "the old vault answered");
+        assert_eq!(
+            app.db_path.as_ref().and_then(|p| p.file_name()),
+            other.0.file_name()
+        );
+        drop(old);
+    }
+
+    /* Tabbing off a path that names a missing file must grow the confirm box. */
+    #[test]
+    fn tabbing_off_a_new_path_enters_create_mode() {
+        let (mut app, _tmp) = locked_app_with_db("pw");
+        assert!(!app.unlock_new);
+        let missing = temp_path("missing");
+        app.unlock_file = missing.0.display().to_string();
+        app.unlock_field = UnlockField::File;
+        app.next_unlock_field(true);
+        assert!(app.unlock_new, "a missing file still read as an existing vault");
+    }
+
+    /* Enter on the password box skips the file box's own check, so unlock
+       must refuse `~user` itself instead of opening the previous vault. */
+    #[test]
+    fn another_users_home_refuses_the_unlock() {
+        let (mut app, _tmp) = locked_app_with_db("pw");
+        app.unlock_file = "~octo/vault.kdbx".to_string();
+        let mut pw = "pw".to_owned().into_bytes();
+        app.try_unlock(&mut pw, None);
+        assert_eq!(app.view, View::Unlock);
+        assert!(app.vault.is_none());
+        assert!(app.stage.contains("another user"), "{}", app.stage);
+        assert!(pw.iter().all(|b| *b == 0), "password buffer survived");
     }
 
     /* With no configured vault the file box is focused first: the natural
@@ -7205,8 +7203,7 @@ pub mod tests {
         assert_eq!(app.mint.as_ref().unwrap().settings.kind, Kind::Complex);
     }
 
-    /* In a passphrase `-` and `+` move words, not characters, and stop at
-       the word bounds rather than the length ones. */
+    // In a passphrase `-` and `+` move words and stop at the word bounds.
     #[test]
     fn resizing_a_passphrase_moves_words() {
         use crate::generator::Kind;
@@ -7224,7 +7221,7 @@ pub mod tests {
             mint.password.split(crate::generator::WORD_SEPARATOR).count(),
             words + 1
         );
-        let (min, max) = crate::config::WORDS_RANGE;
+        let (_, max) = crate::config::WORDS_RANGE;
         for _ in 0..max {
             app.mint_resize(true);
         }
@@ -7236,11 +7233,9 @@ pub mod tests {
         app.mint_resize(true);
         assert!(app.stage.contains("words"), "{}", app.stage);
         assert_eq!(app.mint.as_ref().unwrap().settings.words, max);
-        let _ = min;
     }
 
-    /* Class knobs shape complex passwords only: on a passphrase they say so
-       and flip nothing, rather than relabelling a secret they did not draw. */
+    // Class knobs are refused outside complex and flip nothing.
     #[test]
     fn class_toggles_are_refused_outside_complex() {
         let mut app = open_app();
@@ -7271,13 +7266,25 @@ pub mod tests {
             "{password:?}"
         );
         assert!(app.stage.contains("words"), "{}", app.stage);
-        /* The copy is part of `^s`, not just the fill: with no board wired
-           (tests never touch the OS clipboard) the attempt must still be
-           visible in the flash rather than silently skipped. */
-        assert!(
-            app.stage.contains("clipboard is not ready"),
-            "{}",
-            app.stage
-        );
+        assert!(!app.stage.contains("copied"), "{}", app.stage);
+    }
+
+    /* A pin has its own length: the default 20 for complex passwords must not
+       make a 20-digit pin. */
+    #[test]
+    fn a_pin_uses_its_own_length() {
+        use crate::generator::Kind;
+        let mut app = open_app();
+        app.open_mint();
+        app.mint_cycle_kind();
+        app.mint_cycle_kind();
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.settings.kind, Kind::Pin);
+        assert_eq!(mint.password.len(), app.generator.pin_length);
+        let length = mint.settings.length;
+        app.mint_resize(true);
+        let mint = app.mint.as_ref().unwrap();
+        assert_eq!(mint.password.len(), app.generator.pin_length + 1);
+        assert_eq!(mint.settings.length, length, "a pin moved the length");
     }
 }
