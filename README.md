@@ -76,8 +76,8 @@ the session at another without a restart. [More](docs/keys.md).
 copy beside the original. [More](docs/kdbx3.md).
 
 **It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
-have it open, the next autosave refuses rather than quietly winning. `^s` keeps yours, `^r` takes
-theirs.
+have it open, the next autosave refuses rather than quietly winning. `^f` merges both sides' changes,
+`^s` keeps yours, `^r` takes theirs.
 
 **Tags and expiry dates it reads.** A needle starting with `#` filters by tag instead of fuzzy
 matching, and lists the tags you have while you type it. Expired rows are marked `⧖`, and `!` puts

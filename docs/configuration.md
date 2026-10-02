@@ -11,6 +11,10 @@ recent = ["~/vaults/main.kdbx", "~/vaults/work.kdbx"]
                                # newest first, ten at most
 clipboard_timeout = 30         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
+backups = 3                    # copies kept of the vault, newest is .1 (0 = none, 99 at most)
+backup_dir = "~/.local/state/sennel/backups"
+                               # where they go · never beside the vault, which a sync
+                               # client watches · XDG_STATE_HOME moves the default
 sort = "name"                  # entries order at startup: stored, name, recent, updated
 theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
 mouse = true                   # wheel scrolls, click selects; false gives the

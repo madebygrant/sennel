@@ -497,3 +497,29 @@ fn gen_kind_picks_the_shape_and_names_ignored_flags() {
     assert_eq!(code, 1, "an unknown kind was accepted");
     assert!(err.contains("none of"), "{err}");
 }
+
+// The key file is the other half of the key: `get` opens a vault with both, and refuses with one.
+#[test]
+fn get_opens_a_key_file_vault_only_with_its_key_file() {
+    let db = "tests/fixtures/keyfile4.kdbx";
+    let key = "tests/fixtures/keyfile4.key";
+    let (out, err, code) = run(&["get", "kf", "-p", "--stdout", "--db", db, "--key-file", key]);
+    assert_eq!((out.as_str(), code), ("keyfile-entry-pw\n", 0), "{err}");
+
+    let (out, err, code) = run(&["get", "kf", "-p", "--stdout", "--db", db]);
+    assert_eq!((out.as_str(), code), ("", 1));
+    assert!(err.contains("wrong password or key file"), "{err}");
+}
+
+// A file KeePassXC wrote, not only ones Sennel did, and the recycle bin stays out of `get`.
+#[test]
+fn get_reads_a_keepassxc_4_vault() {
+    let db = "tests/fixtures/keepassxc4.kdbx";
+    let (out, err, code) = run(&["get", "checking", "-u", "--stdout", "--db", db]);
+    assert_eq!((out.as_str(), code), ("octo\n", 0), "{err}");
+    let (out, err, code) = run(&["get", "checking", "-p", "--stdout", "--db", db]);
+    assert_eq!((out.as_str(), code), ("pw-two\n", 0), "{err}");
+    // `old-card` is in the recycle bin.
+    let (_, _, code) = run(&["get", "old-card", "-p", "--stdout", "--db", db]);
+    assert_eq!(code, 3);
+}

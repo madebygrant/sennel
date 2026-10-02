@@ -1894,7 +1894,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("find", "/", "fuzzy search · ^g narrows it to this group"),
             ("match", "n N", "next, previous match"),
             ("undo", "u", "one level"),
-            ("save", "^s  ^r", "save now · reload the file on disk"),
+            ("save", "^s  ^r  ^f", "save now · reload the file on disk · merge it in"),
             ("lock", "^l", "lock now"),
             ("master", "^p", "change the master password"),
             ("audit", "!", "reused, weak and empty passwords"),

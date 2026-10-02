@@ -197,6 +197,7 @@ fn main() -> Result<()> {
        loop must not stat: `refresh_db_state` runs here and after every save,
        and the cached `unlock_new` is all the draw ever reads. */
     app.set_db_path(cfg.db.clone());
+    app.set_key_file(cfg.key_file.as_deref());
     /* Where a chosen vault gets remembered, so the next launch opens it. */
     app.config_file = cfg.config_file.clone();
     app.configured_db = cfg.db.clone();
@@ -206,6 +207,7 @@ fn main() -> Result<()> {
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
+    app.set_backups(cfg.backups, cfg.backup_dir.clone());
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
     app.theme_overridden = cfg.theme_overridden;
@@ -331,6 +333,12 @@ fn check(cfg: &Config) -> Result<()> {
     say!("mouse     {}", if cfg.mouse { "on" } else { "off" });
     say!("clear in  {}s", cfg.clipboard_timeout);
     say!("lock in   {}s (0 = off)", cfg.lock_timeout);
+    say!("backups   {} kept in {} (0 = off)", cfg.backups, cfg.backup_dir.display());
+    if let Some(db) = &cfg.db {
+        for found in vault::backups_of(&cfg.backup_dir, db) {
+            say!("          {}", found.display());
+        }
+    }
     match arboard::Clipboard::new() {
         Ok(_) => {
             say!("clipboard ok");
@@ -545,7 +553,7 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
 
     if !vault.writable() {
         anyhow::bail!(
-            "{} is {} · Sennel writes KDBX 4 only · save a copy as KDBX 4 from KeePassXC first",
+            "{} is {} · Sennel writes KDBX 4.1 only · save a copy as KDBX 4.1 from KeePassXC first",
             path.display(),
             vault.format()
         );
@@ -579,6 +587,10 @@ fn unlock(cfg: &Config) -> Result<Vault> {
     };
     let mut password = ask_password("password: ")?;
     let opened = Vault::open(path, &password, key_bytes.as_deref())
+        .map(|mut v| {
+            v.set_backups(cfg.backups, &cfg.backup_dir);
+            v
+        })
         .map_err(|e| anyhow::anyhow!("{e}"));
     password.zeroize();
     if let Some(bytes) = key_bytes.as_mut() {
@@ -1002,6 +1014,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            and it is the retry when a save failed or was refused. */
         KeyCode::Char('s') if ctrl => app.save_now(),
         KeyCode::Char('r') if ctrl => app.reload_vault(),
+        // `^m` is Enter to a terminal, so the merge sits on `^f` for fuse.
+        KeyCode::Char('f') if ctrl => app.merge_vault(),
         /* `^t` walks the palettes: a theme is picked by looking at it, not by
            reading its name in a config file. */
         KeyCode::Char('t') if ctrl => app.cycle_theme(),

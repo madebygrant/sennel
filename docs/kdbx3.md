@@ -2,8 +2,8 @@
 
 [Back to the README](../README.md)
 
-Sennel **reads** KDBX 3.1 and older. It **writes** KDBX 4 only, so an older vault opens read-only,
-and says so at unlock rather than at the first failed save.
+Sennel **reads** KDBX 3.1 and older. It **writes** KDBX 4.1 only, so an older vault, or a KDBX 4.0
+one, opens read-only and says so at unlock rather than at the first failed save.
 
 ```sh
 sennel convert --db old.kdbx        # writes old-kdbx4.kdbx beside it
@@ -32,7 +32,7 @@ differs, the copy is deleted and you are told. A half-converted vault sitting be
 the worst of both.
 
 It refuses to write over the original, to write over any existing file, and to convert a vault that
-is already KDBX 4.
+is already KDBX 4.1.
 
 **No second password.** The copy is written with the key the vault was opened with, so it keeps the
 original's password and key file exactly. Asking for the same secret twice is how people end up

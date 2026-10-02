@@ -234,6 +234,9 @@ pub struct FileConfig {
     pub recent: Option<Vec<String>>,
     pub clipboard_timeout: Option<u64>,
     pub lock_timeout: Option<u64>,
+    pub backups: Option<usize>,
+    /// Where backups go. Never beside the vault, which a sync client watches.
+    pub backup_dir: Option<String>,
     /// stored · name · recent · updated. `o` cycles from here rather than
     /// from the built-in default, so the order survives a restart.
     pub sort: Option<String>,
@@ -380,6 +383,8 @@ pub const DEFAULT_CLIPBOARD_TIMEOUT: u64 = 30;
 /// Idle seconds before the vault locks and its secrets are wiped. Zero
 /// disables the lock, which is only sensible on a machine nobody else touches.
 pub const DEFAULT_LOCK_TIMEOUT: u64 = 300;
+/// Copies of the vault kept beside it. Zero turns them off.
+pub const DEFAULT_BACKUPS: usize = 3;
 /// How many vaults the library remembers. Long enough for every vault anyone
 /// juggles, short enough that the list is still a list and not a search.
 pub const RECENT_MAX: usize = 10;
@@ -401,6 +406,8 @@ pub struct Config {
     pub recent: Vec<PathBuf>,
     pub clipboard_timeout: u64,
     pub lock_timeout: u64,
+    pub backups: usize,
+    pub backup_dir: PathBuf,
     /// Where the entries pane starts. Session-only before this: pressing `o`
     /// four times after every restart is a setting nobody asked to retype.
     pub sort: crate::app::SortOrder,
@@ -468,6 +475,8 @@ impl Config {
                 .lock_timeout
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
+            backups: backups(file.backups)?,
+            backup_dir: file.backup_dir.as_deref().map_or_else(default_backup_dir, expand),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             theme: palette,
             theme_warnings: warnings,
@@ -497,6 +506,24 @@ impl Config {
             self.clipboard_timeout, self.lock_timeout
         )
     }
+}
+
+// State rather than config or cache: data worth keeping that the user never edits.
+pub fn default_backup_dir() -> PathBuf {
+    let base = std::env::var("XDG_STATE_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| expand("~/.local/state"), PathBuf::from);
+    base.join("sennel").join("backups")
+}
+
+// More than `BACKUPS_MAX` would not be found again by `--check` or deleted on a rekey.
+fn backups(keep: Option<usize>) -> Result<usize> {
+    let keep = keep.unwrap_or(DEFAULT_BACKUPS);
+    if keep > crate::vault::BACKUPS_MAX {
+        anyhow::bail!("backups = {keep} is outside 0–{}", crate::vault::BACKUPS_MAX);
+    }
+    Ok(keep)
 }
 
 /* A name Sennel does not know is a startup error, not a silent fallback to
@@ -898,6 +925,21 @@ mod tests {
             cfg.clipboard_timeout, DEFAULT_CLIPBOARD_TIMEOUT,
             "unmentioned keys keep the built-in default"
         );
+    }
+
+    #[test]
+    fn backups_default_to_three_and_zero_turns_them_off() {
+        assert_eq!(build("", &[]).backups, DEFAULT_BACKUPS);
+        assert_eq!(build("backups = 0\n", &[]).backups, 0);
+        assert_eq!(build("backups = 5\n", &[]).backups, 5);
+        assert!(backups(Some(crate::vault::BACKUPS_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn backups_go_to_a_state_folder_unless_told_otherwise() {
+        let dir = build("", &[]).backup_dir;
+        assert!(dir.ends_with("sennel/backups"), "{}", dir.display());
+        assert_eq!(build("backup_dir = \"/mnt/safe\"\n", &[]).backup_dir, PathBuf::from("/mnt/safe"));
     }
 
     #[test]

@@ -174,7 +174,7 @@ printf '%s\n' "$MASTER" | sennel convert --db OLD.kdbx [--to NEW.kdbx]
 ```
 
 - The output defaults to `<name>-kdbx4.kdbx` next to the original.
-- It refuses to overwrite an existing file, and refuses a vault that is already KDBX 4.
+- It refuses to overwrite an existing file, and refuses a vault that is already KDBX 4.1.
 - The copy is reopened and compared before success is reported. On a mismatch the copy is deleted
   and the command exits 1.
 

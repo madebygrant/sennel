@@ -792,6 +792,9 @@ pub struct App {
     /* Idle auto-lock. `None` is off. The deadline is checked once per frame
        in `run`, never in the draw, which must not mutate. */
     pub lock_after: Option<Duration>,
+    // Backups kept once a vault is open, and where; 0 is off.
+    backups: usize,
+    backup_dir: PathBuf,
     pub last_activity: Instant,
     // Wall-clock twin of `last_activity`: `Instant` stops during suspend on macOS
     // and Linux. `idle_expired` takes the longer of the two readings.
@@ -871,6 +874,8 @@ impl App {
             search_caret: 0,
             searcher: crate::search::Searcher::new(),
             lock_after: None,
+            backups: 0,
+            backup_dir: PathBuf::new(),
             last_activity: Instant::now(),
             last_activity_wall: std::time::SystemTime::now(),
         }
@@ -1152,6 +1157,11 @@ impl App {
     /* Seconds of idleness before the vault locks itself. Zero means off:
        a `Duration::ZERO` deadline would lock on the next frame, which reads
        as the unlock failing. `None` is the absence of a deadline. */
+    pub fn set_backups(&mut self, keep: usize, dir: PathBuf) {
+        self.backups = keep;
+        self.backup_dir = dir;
+    }
+
     pub fn set_lock_timeout(&mut self, secs: u64) {
         self.lock_after = (secs > 0).then(|| Duration::from_secs(secs));
     }
@@ -1218,7 +1228,6 @@ impl App {
            leaves the bytes in the allocation, and this is the path whose
            whole job is getting the typed password out of memory. */
         self.unlock_password.zeroize();
-        self.unlock_keyfile.zeroize();
         self.unlock_confirm.zeroize();
         self.unlock_reveal = false;
         self.caret = 0;
@@ -1370,6 +1379,15 @@ impl App {
         }
     }
 
+    /// Prefills the key-file box from `--key-file` or the config, once at startup.
+    pub fn set_key_file(&mut self, path: Option<&Path>) {
+        if self.unlock_keyfile.is_empty()
+            && let Some(p) = path
+        {
+            self.unlock_keyfile = p.display().to_string();
+        }
+    }
+
     /* Whether Enter will create rather than open. Cached on keypresses, not
        read per frame: the draw loop must not stat, and the answer only
        changes when the file does. */
@@ -1509,7 +1527,7 @@ impl App {
                 }
                 if let Some(what) = read_only {
                     self.error(format!(
-                        "{what}  ·  read-only  ·  Sennel writes KDBX 4 only, so edits cannot be saved"
+                        "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
                     ));
                 }
                 /* A vault that opened is a vault worth remembering: pointing
@@ -2177,7 +2195,11 @@ impl App {
     /// Opens a vault into the browser: cursor on the root, first entry (if
     /// any) selected, groups pane active. The single entry point so Wave 2's
     /// unlock path cannot leave half-initialised selection behind.
-    pub fn open_vault(&mut self, vault: Vault) {
+    pub fn open_vault(&mut self, mut vault: Vault) {
+        // Unset (empty) in tests, which must not write backups anywhere.
+        if !self.backup_dir.as_os_str().is_empty() {
+            vault.set_backups(self.backups, &self.backup_dir);
+        }
         let root = vault.root_id();
         self.group_cursor = Some(root);
         self.entry_cursor = vault.entries_in(&root).first().map(|e| e.id());
@@ -2848,7 +2870,7 @@ impl App {
             Err(VaultError::ChangedOnDisk) => {
                 self.dirty = true;
                 self.overwrite_armed = true;
-                self.error("vault changed on disk  ·  ^s overwrites  ·  ^r reloads theirs");
+                self.error("vault changed on disk  ·  ^f merges  ·  ^s overwrites  ·  ^r reloads theirs");
             }
             Err(e) => {
                 self.dirty = true;
@@ -2887,6 +2909,30 @@ impl App {
         self.persist();
         if !self.dirty {
             self.say("saved");
+        }
+    }
+
+    // `^f` on a conflict: keep both sides. Offered only after a save was refused, like `^r`.
+    // A merge the crate cannot make leaves the file and the session untouched.
+    pub fn merge_vault(&mut self) {
+        if !self.overwrite_armed {
+            self.say("nothing to merge  ·  the file has not changed");
+            return;
+        }
+        let Some(vault) = &mut self.vault else {
+            return;
+        };
+        match vault.merge_from_disk() {
+            Ok(summary) => {
+                self.dirty = false;
+                self.overwrite_armed = false;
+                // The tree changed under every snapshot, as it does on a reload.
+                self.undo.clear();
+                self.cut = None;
+                self.snap();
+                self.say(format!("merged with the file on disk  ·  {}", summary.describe()));
+            }
+            Err(e) => self.error(format!("{e}  ·  ^s overwrites  ·  ^r reloads theirs")),
         }
     }
 
@@ -3543,15 +3589,20 @@ impl App {
             b.zeroize();
         }
         match done {
-            Ok(()) => {
+            Ok(removed) => {
                 /* The file on disk is now the new password's, so anything the
                    session had pending is written too. Nothing is left dirty. */
                 self.dirty = false;
                 self.overwrite_armed = false;
-                self.say(match key_path.is_empty() {
+                let mut said = match key_path.is_empty() {
                     true => "master password changed".to_string(),
                     false => format!("master password changed  ·  key file {key_path} kept"),
-                });
+                };
+                if removed > 0 {
+                    let plural = if removed == 1 { "backup" } else { "backups" };
+                    said.push_str(&format!("  ·  {removed} {plural} under the old password deleted"));
+                }
+                self.say(said);
             }
             Err(e) => {
                 /* The vault still opens with the old password: `rekey` writes
@@ -5267,6 +5318,39 @@ pub mod tests {
         assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
     }
 
+    // `^f` keeps both: theirs is merged into the work that was refused a save.
+    #[test]
+    fn merge_keeps_the_refused_work_and_the_other_writers() {
+        let (mut app, tmp) = locked_app_with_db("pw");
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+
+        app.expire_now();
+        app.merge_vault();
+        assert!(app.stage.contains("nothing to merge"), "{}", app.stage);
+
+        let mut theirs = Vault::open(&tmp.0, "pw", None).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs.save().unwrap();
+        app.expire_now();
+        app.open_add_form();
+        app.form.as_mut().unwrap().title = "mine".into();
+        app.submit_form();
+        assert!(app.overwrite_armed);
+        assert!(app.stage.contains("^f merges"), "{}", app.stage);
+
+        // Messages queue behind each other; let the earlier ones go by.
+        while app.flash_until.is_some() {
+            app.expire_now();
+        }
+        app.merge_vault();
+        assert!(!app.overwrite_armed && !app.working(), "{}", app.stage);
+        assert!(app.stage.contains("merged"), "{}", app.stage);
+        assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 2);
+        assert_eq!(app.vault.as_ref().unwrap().entry_count(), 2);
+    }
+
     /* `^s` with nothing to do says so rather than going quiet — it is the key
        every hand presses, so it must always answer. */
     #[test]
@@ -5479,7 +5563,7 @@ pub mod tests {
     /* The claim in the README, pinned: a lock leaves no typed secret behind,
        and `String::clear` — which only moves the length — is not enough.
 
-       `App` still owns these three after the lock, so this reads a live
+       `App` still owns these two after the lock, so this reads a live
        buffer rather than a freed one. That is why this test has always
        worked where the form's did not: zeroize empties the String but keeps
        the capacity, and nothing else is writing to it. */
@@ -5488,11 +5572,9 @@ pub mod tests {
         let mut app = open_app();
         app.unlock_password = "master-secret".repeat(4);
         app.unlock_confirm = "master-secret".repeat(4);
-        app.unlock_keyfile = "/keys/secret.key".repeat(4);
         let boxes = [
             (app.unlock_password.as_ptr(), app.unlock_password.capacity(), "password"),
             (app.unlock_confirm.as_ptr(), app.unlock_confirm.capacity(), "confirm"),
-            (app.unlock_keyfile.as_ptr(), app.unlock_keyfile.capacity(), "key file"),
         ];
         app.lock_now();
         for (ptr, cap, which) in boxes {
@@ -5502,7 +5584,26 @@ pub mod tests {
         }
         assert!(app.unlock_password.is_empty());
         assert!(app.unlock_confirm.is_empty());
-        assert!(app.unlock_keyfile.is_empty());
+    }
+
+    #[test]
+    fn a_configured_key_file_prefills_the_box_unless_one_is_typed() {
+        let mut app = open_app();
+        app.set_key_file(Some(Path::new("/keys/k")));
+        assert_eq!(app.unlock_keyfile, "/keys/k");
+        app.set_key_file(Some(Path::new("/keys/other")));
+        assert_eq!(app.unlock_keyfile, "/keys/k");
+        app.set_key_file(None);
+        assert_eq!(app.unlock_keyfile, "/keys/k");
+    }
+
+    // The key-file box holds a path, not a secret, so a lock keeps it for the next unlock.
+    #[test]
+    fn locking_keeps_the_key_file_path() {
+        let mut app = open_app();
+        app.unlock_keyfile = "/keys/secret.key".into();
+        app.lock_now();
+        assert_eq!(app.unlock_keyfile, "/keys/secret.key");
     }
 
     /* Same promise for the three modal boxes that hold typed secrets: the

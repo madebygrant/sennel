@@ -22,7 +22,7 @@ what a path with nothing behind it is, and `enter` would create one. Confirm, th
 twice.
 
 The path field is editable every time the app locks. An idle auto-lock drops the secrets and the
-editor state but not the vault path, so switching vaults after a lock is `esc`, edit the file box,
+editor state but not the vault path or the key-file path, so switching vaults after a lock is `esc`, edit the file box,
 `enter`.
 
 Every printable key on this screen is text, so a `*` in a password types as `*`. The reveal is `^r`,
@@ -64,6 +64,7 @@ not the browser's `*`.
 | `H`                 | old versions of the entry · `D` clears them                   |
 | `^t`                | next palette, remembered for next launch                      |
 | `^s`                | save now (every change already autosaves)                     |
+| `^f`                | merge the file on disk into your changes (when it changed)    |
 | `^r`                | reload from disk (offered when the file changed under you)    |
 | `P`                 | generate a password with no entry to put it in                |
 | `^s` (in a form)    | generate a password into the edit form                       |

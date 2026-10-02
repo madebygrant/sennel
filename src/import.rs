@@ -191,17 +191,21 @@ pub fn into_vault(
     let mut added = 0usize;
     let mut skipped = Vec::new();
     for row in rows {
-        let parent = match row.group.trim() {
-            "" => top,
-            name => match made.get(name) {
+        // KeePassXC writes a nested group as "Root/Bank"; each part is its own group.
+        let mut parent = top;
+        let mut path = String::new();
+        for part in row.group.split('/').map(str::trim).filter(|p| !p.is_empty()) {
+            path.push('/');
+            path.push_str(part);
+            parent = match made.get(&path) {
                 Some(id) => *id,
                 None => {
-                    let id = vault.create_group(&top, name).map_err(|e| e.to_string())?;
-                    made.insert(name.to_string(), id);
+                    let id = vault.create_group(&parent, part).map_err(|e| e.to_string())?;
+                    made.insert(path.clone(), id);
                     id
                 }
-            },
-        };
+            };
+        }
         let id = vault
             .create_entry(&parent, &row.title, &row.username, &row.password, &row.url, &row.notes)
             .map_err(|e| e.to_string())?;
@@ -331,6 +335,28 @@ mod tests {
         assert_eq!(entry.title(), "jira");
         assert_eq!(entry.password(), "pw");
         assert!(crate::vault::totp_now(&entry).is_some(), "the seed did not become a code");
+    }
+
+    #[test]
+    fn a_group_path_becomes_nested_groups() {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        let found = read_csv(
+            "group,title\nA/B,one\nA/B,two\nA,three\n A / C ,four\nA//D,five\n",
+        )
+        .unwrap();
+        into_vault(&mut vault, &found.rows, "Imported").unwrap();
+
+        let names = |v: &crate::vault::Vault, id| -> Vec<String> {
+            v.groups_in(id).iter().map(|g| g.name.clone()).collect()
+        };
+        let imported = vault.groups_in(&root)[0].id();
+        assert_eq!(names(&vault, &imported), vec!["A"], "A was made more than once");
+        let a = vault.groups_in(&imported)[0].id();
+        assert_eq!(names(&vault, &a), vec!["B", "C", "D"]);
+        assert_eq!(vault.entries_in(&a).len(), 1);
+        let b = vault.groups_in(&a)[0].id();
+        assert_eq!(vault.entries_in(&b).len(), 2);
     }
 
     /* Every row holds a password in the clear. The file it came from is

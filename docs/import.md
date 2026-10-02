@@ -19,7 +19,7 @@ by name. A tool nobody here has heard of works too if it names its columns like 
 | password     | `password`, `login_password`                          |
 | url          | `url`, `login_uri`, `website`, `login url`            |
 | notes        | `notes`, `note`, `comments`                           |
-| one-time seed| `totp`, `login_totp`, `otpauth`, `otp`                |
+| one-time seed| `totp`, `login_totp`, `otpauth`, `otp`, `onetimepassword` |
 
 Case, spaces, underscores and hyphens are ignored when matching, so `Login Name` and `login_name`
 are the same column. Columns nothing is done with are named on stderr rather than dropped in
@@ -29,7 +29,8 @@ instead.
 ## Where it lands
 
 Everything goes under one new group, `Imported <date>` unless `--group` names another, and the
-file's own group column becomes a subgroup of that. One group rather than a merge into the tree the
+file's own group column becomes a subgroup of that. A path like `Root/Bank` becomes `Bank` inside
+`Root`. One group rather than a merge into the tree the
 file describes, because an import is the operation most likely to be regretted, and one group is one
 thing to delete when it is.
 
@@ -47,5 +48,5 @@ and the line names it. Failing a whole import over one bad column would strand y
 ## KDBX 3.1
 
 Sennel reads older KDBX files but writes KDBX 4 only, so importing into a 3.1 vault is refused
-before anything is read. Open it in KeePassXC and save a copy as KDBX 4 first, or run
-[`sennel convert`](kdbx3.md).
+after the password is checked and before anything is written. Open it in KeePassXC and save a copy
+as KDBX 4 first, or run [`sennel convert`](kdbx3.md).

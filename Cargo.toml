@@ -28,7 +28,10 @@ unicode-width = "0.2"
 # opens them and is maintained. save_kdbx4 is what lets us write vaults back.
 # totp: KeePassXC writes `otp` on entries, and an entry whose code Sennel
 # cannot show is an entry the user has to open another app for.
-keepass = { version = "0.14", features = ["save_kdbx4", "totp"] }
+# _merge: the crate's own merge, matched by uuid and modification time. The
+# underscore marks it unstable, so the version is pinned and any bump has to
+# rerun the merge tests in vault.rs before it lands.
+keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge"] }
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

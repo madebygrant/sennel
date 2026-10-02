@@ -38,21 +38,37 @@ cannot land on top of somebody else's. A key file stays part of the key and is r
 you unlocked with, because a re-key that forgot it would write a vault you could not open. Nothing
 can recover the new password if you forget it, and the prompt says so.
 
+**Backups.** The first save of a session keeps the file as it was opened, and older copies shift up,
+`backups` of them in all (3 by default, 0 for none). They live in `~/.local/state/sennel/backups`
+(`XDG_STATE_HOME`, or `backup_dir`), named for the vault's full path so two `vault.kdbx` files do not
+share them. Never beside the vault: that folder is usually the one Dropbox, Drive or iCloud watches,
+and a backup there would be uploaded, old passwords and all. One per session, not one per save,
+because autosave writes after every edit and a copy per save would only ever hold the last few
+keystrokes. A session that starts within six hours of the newest backup takes none, because every
+unlock is a session and a day of locking would otherwise replace every copy with one from today. Each
+is a real copy of the whole vault, secrets included, `0600` in a `0700` folder, so a program that
+rewrites the vault in place cannot change it. The `^s` overwrite and a merge always keep the file
+they replace, since that is somebody else's work. A rekey deletes every backup and says how many,
+because they still open with the old password. If a backup cannot be written the save is refused
+rather than going ahead without one. Nothing else deletes them: they outlive a quit, a deleted entry
+and a cleared history, and `sennel --check` lists them.
+
 **Idle auto-lock.** After the idle timeout, 300 seconds by default and `0` to disable, the vault
 locks and the in-memory secrets are zeroized. `^l` does the same on demand. Time the machine spent
 suspended counts: neither platform's monotonic clock advances across a suspend, so the wall clock is
 read alongside it and the longer answer wins. A vault unlocked before the lid closed is locked when
 it opens. Keeping both clocks is also what stops one set backwards from holding a vault open.
 
-**Zeroized in memory.** The typed password, key-file and one-time-seed boxes are overwritten, not
+**Zeroized in memory.** The typed password, confirmation and one-time-seed boxes are overwritten, not
 merely emptied, whenever they are cleared, locked or thrown away. So are the decrypted values the
 `F` and `H` screens hold, since a custom field is a recovery code as often as not and every row of
 the history screen is a password somebody used to have. So are the rows an import parses out of a
 CSV. The retained database key and the undo snapshots wipe on drop, and so does a field on its way
 to the clipboard: `p` and `sennel get -p` wipe their copy rather than leaving it for the allocator.
 The boxes you type into are given room for a password up front, because a `String` that grows
-reallocates, and the block it leaves behind is freed with your keystrokes still in it. The status
-bar names what was copied, never the secret itself.
+reallocates, and the block it leaves behind is freed with your keystrokes still in it. The key-file
+box holds a path, not the file's contents, so a lock keeps it. The status bar names what was copied,
+never the secret itself.
 
 **Deletes go to the recycle bin.** `D` moves an entry or a group, subtree and all, into the same
 `Recycle Bin` group KeePassXC uses, recorded in the file's own metadata. Nothing is destroyed, the
@@ -64,9 +80,23 @@ for it.
 
 **It will not overwrite somebody else's write.** Sennel remembers the modification time and length
 of the file it opened. If KeePassXC, a sync client or a second Sennel writes the vault meanwhile,
-the next autosave refuses rather than silently winning. `^s` overwrites theirs, `^r` takes theirs.
-Two writes inside one filesystem timestamp tick that leave the file exactly the same length would
-slip past, but every real edit changes one or the other.
+the next autosave refuses rather than silently winning. `^f` merges, `^s` overwrites theirs, `^r`
+takes theirs. Two writes inside one filesystem timestamp tick that leave the file exactly the same
+length would slip past, but every real edit changes one or the other.
+
+**Merging.** `^f` reads the file on disk with the key already held, folds it into this session entry
+by entry (matched by id, the newer edit wins, adds, moves and deletes from both sides are kept), and
+writes the result. The file it replaces is backed up first. It goes into a copy and replaces the
+session's vault only when it succeeds, and the file is checked again just before the write, so a
+third writer in between is a conflict again. It is refused, changing nothing, when two different
+edits to one entry carry the same timestamp (they are whole seconds) and nothing can order them.
+It is also refused when it would have to carry an attachment across: an entry the other side
+created with files, or whose files they changed after you. The merge code it uses copies entries
+between the two files as whole records, and an attachment in one file is a number into that file's
+own table, so carried over it would open as the wrong file. `^s` and `^r` are still there. Deletes
+only survive a merge because Sennel now records them in the file's deleted-objects list, so a vault
+last written by an older Sennel may bring back an entry deleted there. The merge is the `keepass`
+crate's, whose `_merge` feature is marked unstable, so that version is pinned.
 
 **One-time codes, not their seeds.** `t` copies the six digits an entry's code is showing. The seed
 is never copied, because that would put a permanent credential on the clipboard to save typing six
