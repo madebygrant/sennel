@@ -810,6 +810,10 @@ pub struct App {
     // Backups kept once a vault is open, and where; 0 is off.
     backups: usize,
     backup_dir: PathBuf,
+    // Keys given to ssh-agent for this vault, so they can be taken back out.
+    ssh_agent: bool,
+    ssh_lifetime: u32,
+    agent_keys: Vec<crate::agent::Loaded>,
     // The configured YubiKey slot, and whether the next unlock uses it (`^y`).
     yubikey: Option<YubiSpec>,
     use_yubikey: bool,
@@ -899,6 +903,9 @@ impl App {
             backup_dir: PathBuf::new(),
             yubikey: None,
             use_yubikey: false,
+            ssh_agent: false,
+            ssh_lifetime: 3600,
+            agent_keys: Vec::new(),
             pending: None,
             flushing: false,
             last_activity: Instant::now(),
@@ -1182,6 +1189,57 @@ impl App {
     /* Seconds of idleness before the vault locks itself. Zero means off:
        a `Duration::ZERO` deadline would lock on the next frame, which reads
        as the unlock failing. `None` is the absence of a deadline. */
+    pub fn set_ssh_agent(&mut self, on: bool, lifetime: u32) {
+        self.ssh_agent = on;
+        self.ssh_lifetime = lifetime;
+    }
+
+    /* The SSH keys the vault's KeeAgent entries ask for, given to the agent on unlock. Opt-in, since
+       it hands keys to a process outside this one. A missing agent or a wrong passphrase is a
+       warning, never a failed unlock. */
+    fn agent_load(&mut self) {
+        let Some(vault) = self.vault.as_ref().filter(|_| self.ssh_agent) else {
+            return;
+        };
+        let mut agent = match crate::agent::Agent::connect() {
+            Ok(agent) => agent,
+            Err(why) => return self.warn(format!("ssh agent: {why}")),
+        };
+        let outcome = crate::agent::load_vault(&mut agent, vault, self.ssh_lifetime);
+        let added = outcome.added.len();
+        for key in outcome.added {
+            if !self.agent_keys.contains(&key) {
+                self.agent_keys.push(key);
+            }
+        }
+        match outcome.problems.split_first() {
+            Some((first, [])) => self.warn(format!("ssh agent: {first}")),
+            Some((first, rest)) => self.warn(format!("ssh agent: {first} (+{} more)", rest.len())),
+            None if added > 0 => {
+                let plural = if added == 1 { "key" } else { "keys" };
+                self.say(format!("{added} ssh {plural} added to the agent for {}s", self.ssh_lifetime));
+            }
+            None => {}
+        }
+    }
+
+    /* Takes back the keys this session gave out, except any whose settings say to leave them. The
+       agent forgets those by itself when their lifetime is up, which is also what bounds a crash. */
+    pub fn agent_release(&mut self) {
+        let (remove, _kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.agent_keys).into_iter().partition(|k| k.remove_at_close);
+        if remove.is_empty() {
+            return;
+        }
+        let failed = match crate::agent::Agent::connect() {
+            Ok(mut agent) => remove.iter().filter(|k| agent.remove(&k.blob).is_err()).count(),
+            Err(_) => remove.len(),
+        };
+        if failed > 0 {
+            self.warn(format!("ssh agent: {failed} key(s) not removed · they expire on their own"));
+        }
+    }
+
     /// The YubiKey slot from the config, used for unlocks until `^y` turns it off.
     pub fn set_yubikey(&mut self, spec: Option<YubiSpec>) {
         self.use_yubikey = spec.is_some();
@@ -1275,6 +1333,7 @@ impl App {
        wipe: secrets live in `ProtectedString` and the retained key, both of
        which zeroize on drop, so nothing may be copied out first. */
     fn lock(&mut self) {
+        self.agent_release();
         self.vault = None;
         self.group_cursor = None;
         self.entry_cursor = None;
@@ -2303,6 +2362,7 @@ impl App {
         self.entry_scroll = 0;
         self.vault = Some(vault);
         self.view = View::Browser;
+        self.agent_load();
     }
 
     /* Pre-order walk of the whole tree as (id, depth) pairs. The groups pane

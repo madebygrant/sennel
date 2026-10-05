@@ -271,6 +271,9 @@ pub struct FileConfig {
     pub backups: Option<usize>,
     /// `2` or `2:<serial>`: a YubiKey slot every vault is opened with by default.
     pub yubikey: Option<String>,
+    /// Add the SSH keys a vault's KeeAgent settings name to ssh-agent when it unlocks.
+    pub ssh_agent: Option<bool>,
+    pub ssh_agent_lifetime: Option<u32>,
     /// Where backups go. Never beside the vault, which a sync client watches.
     pub backup_dir: Option<String>,
     /// stored · name · recent · updated. `o` cycles from here rather than
@@ -445,6 +448,8 @@ pub struct Config {
     pub backups: usize,
     pub backup_dir: PathBuf,
     pub yubikey: Option<crate::vault::YubiSpec>,
+    pub ssh_agent: bool,
+    pub ssh_agent_lifetime: u32,
     /// Where the entries pane starts. Session-only before this: pressing `o`
     /// four times after every restart is a setting nobody asked to retype.
     pub sort: crate::app::SortOrder,
@@ -513,6 +518,8 @@ impl Config {
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             backups: backups(file.backups)?,
+            ssh_agent: file.ssh_agent.unwrap_or(false),
+            ssh_agent_lifetime: lifetime(file.ssh_agent_lifetime)?,
             yubikey: cli
                 .yubikey
                 .as_deref()
@@ -558,6 +565,15 @@ pub fn default_backup_dir() -> PathBuf {
         .filter(|v| !v.is_empty())
         .map_or_else(|| expand("~/.local/state"), PathBuf::from);
     base.join("sennel").join("backups")
+}
+
+// A key left in the agent must expire, so the lifetime cannot be zero or forever.
+fn lifetime(seconds: Option<u32>) -> Result<u32> {
+    let seconds = seconds.unwrap_or(3600);
+    if !(1..=604_800).contains(&seconds) {
+        anyhow::bail!("ssh_agent_lifetime = {seconds} is outside 1–604800 seconds");
+    }
+    Ok(seconds)
 }
 
 // More than `BACKUPS_MAX` would not be found again by `--check` or deleted on a rekey.

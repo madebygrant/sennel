@@ -243,8 +243,13 @@ pub fn add_entry_key(
         format!("{title}: {attachment} is not an OpenSSH private key (PuTTY and old PEM keys are not supported)")
     })?;
     let key = if key.is_encrypted() {
-        key.decrypt(entry.password())
-            .map_err(|_| format!("{title}: the entry's password does not open {attachment}"))?
+        key.decrypt(entry.password()).map_err(|why| match why {
+            // ssh-key 0.6.7 cannot read some valid ECDSA keys (a short private scalar), which is not a wrong password.
+            ssh_key::Error::Encoding(_) => {
+                format!("{title}: {attachment} is a key the library cannot read (some ECDSA keys) · try ed25519 or RSA")
+            }
+            _ => format!("{title}: the entry's password does not open {attachment}"),
+        })?
     } else {
         key
     };
@@ -394,7 +399,10 @@ mod tests {
 
         let mut client = Agent::connect_to(&sock).unwrap();
         for (kind, bits) in [("ed25519", "256"), ("rsa", "2048"), ("ecdsa", "256"), ("ecdsa", "384"), ("ecdsa", "521")] {
-            let key = PrivateKey::from_openssh(make(kind, bits, "pass phrase")).unwrap().decrypt("pass phrase").unwrap();
+            // ssh-key 0.6.7 cannot read about 1 in 20 ECDSA keys, so make another until one reads.
+            let key = (0..30)
+                .find_map(|_| PrivateKey::from_openssh(make(kind, bits, "pass phrase")).ok()?.decrypt("pass phrase").ok())
+                .expect("no key of this type could be read");
             client.add(&key, Some(60), false).unwrap();
             let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
             assert!(listing().contains(&fingerprint), "{kind} {bits} is not in:\n{}", listing());
@@ -420,6 +428,16 @@ mod tests {
         vault.set_field(&id, "x", "y", false).unwrap();
         let bad = Vault::new();
         assert!(load_vault(&mut client, &bad, 3600).added.is_empty());
+
+        // The wrong passphrase is named as such and nothing is added.
+        let mut wrong = Vault::new();
+        let root = wrong.root_id();
+        let entry = wrong.create_entry(&root, "locked", "git", "not the passphrase", "", "").unwrap();
+        wrong.add_attachment(&entry, "id_ed25519", make("ed25519", "256", "entry pw").into_bytes()).unwrap();
+        wrong.add_attachment(&entry, SETTINGS, KEEPASSXC.as_bytes().to_vec()).unwrap();
+        let outcome = load_vault(&mut client, &wrong, 3600);
+        assert!(outcome.added.is_empty() && outcome.problems[0].contains("does not open id_ed25519"), "{:?}", outcome.problems);
+        assert_eq!(client.count().unwrap(), 0);
 
         assert!(Agent::connect_to(&dir.join("none.sock")).err().unwrap().contains("cannot reach the agent"));
         let _ = child.kill();

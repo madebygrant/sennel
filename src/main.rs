@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod clipboard;
 mod config;
@@ -207,6 +208,7 @@ fn main() -> Result<()> {
     app.set_db_path(cfg.db.clone());
     app.set_key_file(cfg.key_file.as_deref());
     app.set_yubikey(cfg.yubikey.clone());
+    app.set_ssh_agent(cfg.ssh_agent, cfg.ssh_agent_lifetime);
     /* Where a chosen vault gets remembered, so the next launch opens it. */
     app.config_file = cfg.config_file.clone();
     app.configured_db = cfg.db.clone();
@@ -234,6 +236,7 @@ fn main() -> Result<()> {
        that dies with this process, so quitting three seconds after a copy
        used to leave the password sitting on the clipboard. */
     app.clear_clipboard();
+    app.agent_release();
     if cfg.mouse {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
@@ -344,6 +347,11 @@ fn check(cfg: &Config) -> Result<()> {
     say!("clear in  {}s", cfg.clipboard_timeout);
     say!("lock in   {}s (0 = off)", cfg.lock_timeout);
     say!("backups   {} kept in {} (0 = off)", cfg.backups, cfg.backup_dir.display());
+    let state = if cfg.ssh_agent { "on" } else { "off" };
+    match agent::Agent::connect().and_then(|mut a| a.count()) {
+        Ok(n) => say!("ssh agent {state} · reachable, holding {n} keys · lifetime {}s", cfg.ssh_agent_lifetime),
+        Err(why) => say!("ssh agent {state} · {why}"),
+    }
     if let Some(spec) = &cfg.yubikey {
         match keepass::ChallengeResponseKey::get_available_yubikeys() {
             Ok(keys) if keys.is_empty() => say!("yubikey   {spec} · no key connected"),

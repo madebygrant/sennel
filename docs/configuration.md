@@ -11,6 +11,8 @@ recent = ["~/vaults/main.kdbx", "~/vaults/work.kdbx"]
                                # newest first, ten at most
 clipboard_timeout = 30         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
+ssh_agent = false              # give the SSH keys a vault's KeeAgent entries name to ssh-agent on unlock
+ssh_agent_lifetime = 3600      # seconds the agent keeps them (1-604800) · see docs/security.md
 yubikey = "2"                 # YubiKey slot (or "2:<serial>") vaults are unlocked with · ^y turns it
                                # off per unlock for a vault that has none · see docs/security.md
 backups = 3                    # copies kept of the vault, newest is .1 (0 = none, 99 at most)

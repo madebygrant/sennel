@@ -74,6 +74,20 @@ clear: it refuses a terminal, refuses to overwrite, creates the file `0600`, and
 one buffer that is wiped when it drops. The file it leaves is yours to delete, and `docs/export.md`
 says what is left out.
 
+**SSH keys for the agent.** With `ssh_agent = true`, unlocking a vault gives `ssh-agent` the keys that
+KeePassXC's KeeAgent settings mark "add at database open": an entry with a `KeeAgent.settings`
+attachment naming the key attachment, whose password is the key's passphrase. It is off by default
+because it hands keys to a process outside Sennel. The key goes from the vault's memory to the agent's
+socket and is never written to disk. Every key is sent with a lifetime (`ssh_agent_lifetime`, 3600
+seconds, or the entry's own if shorter), so a crash or a kill cannot leave it there for good: the agent
+forgets it by itself. A clean lock, idle lock or quit takes the keys back out, except any whose
+settings say not to remove them at close, and those still expire. The entry's "confirm" setting is
+passed on. Only OpenSSH-format keys in an attachment are read: not PuTTY `.ppk`, not old PEM, not a
+file path. ed25519 and RSA are reliable. The key library cannot read about one valid ECDSA key in
+twenty (P-521 more often), and says so instead of calling it a wrong passphrase. A forwarded agent
+(`ssh -A`) is whatever `SSH_AUTH_SOCK` points at, so it receives the keys too. `sennel --check` says
+whether the agent answers.
+
 **Idle auto-lock.** After the idle timeout, 300 seconds by default and `0` to disable, the vault
 locks and the in-memory secrets are zeroized. `^l` does the same on demand. Time the machine spent
 suspended counts: neither platform's monotonic clock advances across a suspend, so the wall clock is

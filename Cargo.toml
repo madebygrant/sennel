@@ -43,6 +43,11 @@ challenge_response = { version = "=0.5.38", default-features = false, features =
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Reads the OpenSSH private keys stored beside KeeAgent settings (bcrypt-pbkdf and
+# AES for the passphrase) so they can be handed to ssh-agent. Without `rsa` and
+# `ed25519`: they only add conversions to signing crates, and Sennel never signs.
+# The curve features are what make an ECDSA key a type at all. Pure Rust.
+ssh-key = { version = "0.6", default-features = false, features = ["std", "encryption", "p256", "p384", "p521"] }
 rpassword = "7"
 # wayland-data-control: without it arboard only speaks X11, so on a Wayland
 # session (no X11 clipboard manager) a copy reports success yet nothing
