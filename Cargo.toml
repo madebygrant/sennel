@@ -31,7 +31,15 @@ unicode-width = "0.2"
 # _merge: the crate's own merge, matched by uuid and modification time. The
 # underscore marks it unstable, so the version is pinned and any bump has to
 # rerun the merge tests in vault.rs before it lands.
-keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge"] }
+# challenge_response: a YubiKey (or OnlyKey) HMAC-SHA1 slot as part of the key,
+# which is how KeePassXC vaults protected by a hardware key are opened. It pulls
+# in the `challenge_response` crate over `nusb`, pure Rust with no libusb.
+keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge", "challenge_response"] }
+# Named only to pin it. 0.5.39 and later call a `nusb` method that exists on
+# Linux alone, so they do not build on macOS, and `cargo install` ignores the
+# lockfile. Unused here; keepass is what links it. Lift the pin once a release
+# builds on macOS again.
+challenge_response = { version = "=0.5.38", default-features = false, features = ["nusb"] }
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

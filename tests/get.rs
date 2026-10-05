@@ -523,3 +523,44 @@ fn get_reads_a_keepassxc_4_vault() {
     let (_, _, code) = run(&["get", "old-card", "-p", "--stdout", "--db", db]);
     assert_eq!(code, 3);
 }
+
+// The CSV `export` writes is what `import` reads, and what it leaves out it says so.
+#[test]
+fn export_prints_csv_and_leaves_the_recycle_bin_out() {
+    let db = "tests/fixtures/keepassxc4.kdbx";
+    let (out, err, code) = run(&["export", "--stdout", "--db", db]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Group,Title,Username,Password,URL,Notes,TOTP\n"), "{out}");
+    assert!(out.contains("Banks,checking,octo,pw-two,https://bank.example,edited,"), "{out}");
+    assert!(!out.contains("old-card"), "the recycle bin was exported");
+    assert!(err.contains("exported 1 entry") && err.contains("1 attachments"), "{err}");
+}
+
+#[test]
+fn export_refuses_before_the_password_when_it_has_nowhere_to_go() {
+    let (_, err, code) = run(&["export", "--db", "tests/fixtures/keepassxc4.kdbx"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("--out FILE, or --stdout"), "{err}");
+}
+
+#[test]
+fn export_writes_an_owner_only_file_and_never_over_another() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("sennel-export-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let target = path.to_str().unwrap();
+    let db = "tests/fixtures/keepassxc4.kdbx";
+
+    let (out, err, code) = run(&["export", "--format", "json", "--out", target, "--db", db]);
+    assert_eq!((out.as_str(), code), ("", 0), "{err}");
+    assert!(err.contains("is plaintext"), "{err}");
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"title\": \"checking\"") && text.contains("\"files\": [\"blob.txt\"]"), "{text}");
+
+    let (_, err, code) = run(&["export", "--out", target, "--db", db]);
+    assert_eq!(code, 1);
+    assert!(err.contains("is already there"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the file was overwritten");
+    std::fs::remove_file(&path).unwrap();
+}

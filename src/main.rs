@@ -1,8 +1,10 @@
 mod app;
 mod clipboard;
 mod config;
+mod export;
 mod generator;
 mod import;
+mod migration;
 mod pwned;
 mod search;
 mod theme;
@@ -15,7 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
@@ -169,6 +172,9 @@ fn main() -> Result<()> {
         let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
         return import_csv(&cfg, &file, group.as_deref(), dry_run);
     }
+    if let Some(Command::Export { format, out, stdout, force, group }) = &cfg.command {
+        return export_vault(&cfg, *format, out.as_deref(), *stdout, *force, group.as_deref());
+    }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
        or in CI, crossterm's raw mode fails with an OS error about a device
        that tells nobody which of the two is wrong or what does work here. */
@@ -183,7 +189,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture, SetTitle(""));
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, SetTitle(""));
         previous(info);
     }));
     /* Wheel and click, unless the config turned them off: capture takes the
@@ -192,12 +198,15 @@ fn main() -> Result<()> {
     if cfg.mouse {
         let _ = execute!(std::io::stdout(), EnableMouseCapture);
     }
+    // Without this a paste arrives as keystrokes, and its last newline presses Enter.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let mut app = App::new();
     /* Which file the lock screen is for, resolved once at startup. The draw
        loop must not stat: `refresh_db_state` runs here and after every save,
        and the cached `unlock_new` is all the draw ever reads. */
     app.set_db_path(cfg.db.clone());
     app.set_key_file(cfg.key_file.as_deref());
+    app.set_yubikey(cfg.yubikey.clone());
     /* Where a chosen vault gets remembered, so the next launch opens it. */
     app.config_file = cfg.config_file.clone();
     app.configured_db = cfg.db.clone();
@@ -228,6 +237,7 @@ fn main() -> Result<()> {
     if cfg.mouse {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     // The vault's name must not outlive the session in the window title.
     let _ = execute!(std::io::stdout(), SetTitle(""));
@@ -334,6 +344,16 @@ fn check(cfg: &Config) -> Result<()> {
     say!("clear in  {}s", cfg.clipboard_timeout);
     say!("lock in   {}s (0 = off)", cfg.lock_timeout);
     say!("backups   {} kept in {} (0 = off)", cfg.backups, cfg.backup_dir.display());
+    if let Some(spec) = &cfg.yubikey {
+        match keepass::ChallengeResponseKey::get_available_yubikeys() {
+            Ok(keys) if keys.is_empty() => say!("yubikey   {spec} · no key connected"),
+            Ok(keys) => {
+                let serials: Vec<String> = keys.iter().map(|k| k.serial_number.to_string()).collect();
+                say!("yubikey   {spec} · connected: {}", serials.join(", "));
+            }
+            Err(e) => say!("yubikey   {spec} · cannot look: {e}"),
+        }
+    }
     if let Some(db) = &cfg.db {
         for found in vault::backups_of(&cfg.backup_dir, db) {
             say!("          {}", found.display());
@@ -501,6 +521,57 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
    an import is the one operation most likely to be regretted, and one
    group is one thing to delete when it is. The file's own group column
    becomes a subgroup, so the shape survives without colonising the vault. */
+/* `sennel export`: everything, in plaintext, to a file or a pipe. Every refusal
+   comes before the password prompt, so nobody types a master password to be
+   told the output has nowhere safe to go. */
+fn export_vault(
+    cfg: &Config,
+    format: config::ExportFormat,
+    out: Option<&str>,
+    to_stdout: bool,
+    force: bool,
+    group: Option<&str>,
+) -> Result<()> {
+    use std::io::Write;
+    if out.is_none() && !to_stdout {
+        anyhow::bail!("say where it goes · --out FILE, or --stdout");
+    }
+    if to_stdout && std::io::stdout().is_terminal() && !force {
+        anyhow::bail!(
+            "--stdout into a terminal would leave every password in your scrollback · pipe it, or --force"
+        );
+    }
+    let target = out.map(config::expand);
+    if let Some(path) = &target
+        && path.exists()
+    {
+        anyhow::bail!("{} is already there · move it or pick another --out", path.display());
+    }
+    let vault = unlock(cfg)?;
+    let exported = export::render(&vault, format, group).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match &target {
+        Some(path) => vault::write_owner_only(path, exported.text.as_bytes())
+            .map_err(|e| anyhow::anyhow!("cannot write {} · {e}", path.display()))?,
+        None => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(exported.text.as_bytes())?;
+            stdout.flush()?;
+        }
+    }
+    let plural = if exported.entries == 1 { "entry" } else { "entries" };
+    eprintln!("exported {} {plural}", exported.entries);
+    if exported.left_out_fields + exported.left_out_files > 0 {
+        eprintln!(
+            "left out: {} custom fields, {} attachments · --format json keeps the fields and names the files",
+            exported.left_out_fields, exported.left_out_files
+        );
+    }
+    if let Some(path) = &target {
+        eprintln!("{} is plaintext · delete it when you are done", path.display());
+    }
+    Ok(())
+}
+
 fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> Result<()> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
@@ -586,7 +657,10 @@ fn unlock(cfg: &Config) -> Result<Vault> {
         None => None,
     };
     let mut password = ask_password("password: ")?;
-    let opened = Vault::open(path, &password, key_bytes.as_deref())
+    if let Some(spec) = &cfg.yubikey {
+        eprintln!("yubikey {spec} · touch the key if it blinks");
+    }
+    let opened = Vault::open_with(path, &password, key_bytes.as_deref(), cfg.yubikey.as_ref())
         .map(|mut v| {
             v.set_backups(cfg.backups, &cfg.backup_dir);
             v
@@ -807,6 +881,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
             unlock_now(app);
             terminal.draw(|frame| ui::draw(frame, app))?;
         }
+        // Same for a save that waits on the hardware key.
+        if app.has_pending() {
+            app.flush_pending();
+            terminal.draw(|frame| ui::draw(frame, app))?;
+        }
         /* Sanitised: the title is a file name, and a file name may hold an
            escape — which would go straight into the terminal's OSC. */
         let title = printable(&app.window_title());
@@ -822,6 +901,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
                     handle_key(app, key.code, key.modifiers);
                 }
                 Event::Mouse(mouse) => handle_mouse(app, mouse),
+                Event::Paste(text) => handle_paste(app, text),
                 _ => {}
             }
         }
@@ -863,6 +943,29 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => app.click(mouse.column, mouse.row),
         _ => {}
     }
+}
+
+/* A paste is the keystrokes it would have been, fed to whichever box has focus
+   and nowhere else: line breaks are dropped (so a trailing newline cannot press
+   Enter), except in the notes box, where they are text. The pasted string is
+   wiped; it may be a password or a seed. */
+fn handle_paste(app: &mut App, mut text: String) {
+    const LIMIT: usize = 16 * 1024;
+    app.touch();
+    if !app.takes_text() {
+        app.say("nothing here takes pasted text");
+    } else if text.len() > LIMIT {
+        app.warn("that paste is too long to be a field  ·  ignored");
+    } else {
+        for c in text.chars() {
+            match c {
+                '\n' if app.in_notes() => app.form_newline(),
+                c if c.is_control() => {}
+                c => handle_key(app, KeyCode::Char(c), KeyModifiers::NONE),
+            }
+        }
+    }
+    text.zeroize();
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -1394,6 +1497,8 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         /* `^o`: pick the vault from a list instead of typing its path. */
         KeyCode::Char('o') if ctrl => app.open_browse(),
+        // The library mixes vaults with and without a hardware key, so it is chosen here.
+        KeyCode::Char('y') if ctrl => app.toggle_yubikey(),
         /* `^v`: the vaults this machine has opened before, which is a shorter
            list than the disk and the one a second vault lives on. */
         KeyCode::Char('v') if ctrl => app.open_library(),
@@ -1644,6 +1749,53 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
         assert!(!app.show_help, "h opened the overlay over the lock");
         assert_eq!(app.unlock_password, "qh");
+    }
+
+    // A paste is typing: it fills the focused box and its trailing newline does not press Enter.
+    #[test]
+    fn a_paste_fills_the_lock_screen_without_unlocking_it() {
+        let mut app = App::new();
+        handle_paste(&mut app, "hunter2 with spaces\r\n".to_string());
+        assert_eq!(app.unlock_password, "hunter2 with spaces");
+        assert!(!app.unlocking, "the trailing newline pressed Enter");
+    }
+
+    // In the browser every character would be a command, `D` among them.
+    #[test]
+    fn a_paste_into_the_browser_does_nothing() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "keep", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        handle_paste(&mut app, "DDDD/qq".to_string());
+        assert!(app.confirm.is_none() && !app.band && !app.quit);
+        assert_eq!(app.vault.as_ref().unwrap().entry_count(), 1);
+        assert!(app.stage.contains("nothing here takes pasted text"), "{}", app.stage);
+    }
+
+    #[test]
+    fn a_paste_into_the_form_keeps_line_breaks_only_in_notes() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "x", "", "", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.open_add_form();
+        handle_paste(&mut app, "a title\n".to_string());
+        assert_eq!(app.form.as_ref().unwrap().title, "a title");
+        assert!(app.form.is_some(), "the newline submitted the form");
+
+        app.form.as_mut().unwrap().field = crate::app::FormField::Notes;
+        handle_paste(&mut app, "line one\nline two\r\n".to_string());
+        assert_eq!(app.form.as_ref().unwrap().notes, "line one\nline two\n");
+    }
+
+    #[test]
+    fn a_huge_paste_is_refused_not_typed() {
+        let mut app = App::new();
+        handle_paste(&mut app, "x".repeat(100_000));
+        assert!(app.unlock_password.is_empty());
     }
 
     /* `^r` on the lock flips the password box to plain text like the

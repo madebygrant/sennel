@@ -21,6 +21,8 @@ by name. A tool nobody here has heard of works too if it names its columns like 
 | notes        | `notes`, `note`, `comments`                           |
 | one-time seed| `totp`, `login_totp`, `otpauth`, `otp`, `onetimepassword` |
 
+Going the other way is [`sennel export`](export.md).
+
 Case, spaces, underscores and hyphens are ignored when matching, so `Login Name` and `login_name`
 are the same column. Columns nothing is done with are named on stderr rather than dropped in
 silence. A file with no title column is refused, and the message lists the header it found

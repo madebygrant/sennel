@@ -53,6 +53,27 @@ because they still open with the old password. If a backup cannot be written the
 rather than going ahead without one. Nothing else deletes them: they outlive a quit, a deleted entry
 and a cleared history, and `sennel --check` lists them.
 
+**A YubiKey as part of the key.** `yubikey = "2"` (or `--yubikey 2`, or `"2:<serial>"` to name one of
+several) opens vaults that KeePassXC protects with a YubiKey's HMAC-SHA1 challenge-response slot. The
+challenge is the file's own fresh KDF seed, which changes on every write, so **every save asks the
+key again**, and a key that needs a touch needs one per save. Sennel draws "touch your key to save…"
+first, then writes, and edits made before that frame share the one write. An unplugged key is
+reported as a missing key and the edit stays in memory, never as a wrong password. Nothing in the
+file says a vault uses a key, so the setting is a default and `^y` on the lock screen turns it off for
+a vault that has none. A new vault made while it is on is keyed to the slot. Adding a key to an
+existing vault is not done here: do it in KeePassXC. The hardware path is untested against a real key
+by this project's suite, which covers the same code with a software HMAC secret. On Linux the
+udev rules for the key (`yubikey-personalization` ships them) must let your user open it.
+
+**Paste and export.** A paste is bracketed by the terminal and fed to the focused box only: in the
+entry list it does nothing, because each character there is a command. It is dropped past 16 KiB, its
+line breaks are dropped except in notes, and the pasted string is wiped after use. An authenticator
+export link in the seed box is decoded by hand, its buffers wiped, and refused when it holds more
+than one account, a counter-based code or an MD5 code. `sennel export` writes every password in the
+clear: it refuses a terminal, refuses to overwrite, creates the file `0600`, and builds the text in
+one buffer that is wiped when it drops. The file it leaves is yours to delete, and `docs/export.md`
+says what is left out.
+
 **Idle auto-lock.** After the idle timeout, 300 seconds by default and `0` to disable, the vault
 locks and the in-memory secrets are zeroized. `^l` does the same on demand. Time the machine spent
 suspended counts: neither platform's monotonic clock advances across a suspend, so the wall clock is

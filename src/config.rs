@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub key_file: Option<String>,
 
+    /// YubiKey slot the database also needs: `2`, or `2:<serial>` to name the key
+    #[arg(long, value_name = "SLOT[:SERIAL]", global = true)]
+    pub yubikey: Option<String>,
+
     /// Seconds a copied secret stays on the clipboard before it is cleared
     #[arg(long, value_name = "SECS")]
     pub clipboard_timeout: Option<u64>,
@@ -180,6 +184,36 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Write every entry out as plaintext CSV or JSON. The file holds every password.
+    Export {
+        /// csv is what `sennel import` and other managers read; json also keeps fields and tags
+        #[arg(long, value_enum, default_value = "csv")]
+        format: ExportFormat,
+
+        /// Write here, created owner-only and never over an existing file
+        #[arg(long, value_name = "FILE", conflicts_with = "stdout")]
+        out: Option<String>,
+
+        /// Print instead of writing a file. Refused into a terminal.
+        #[arg(long)]
+        stdout: bool,
+
+        /// Print to a terminal anyway, scrollback and all
+        #[arg(long, requires = "stdout")]
+        force: bool,
+
+        /// Only this group and what is under it, as a path like `Banks/Savings`
+        #[arg(long, value_name = "PATH")]
+        group: Option<String>,
+    },
+}
+
+/// What `export` writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum ExportFormat {
+    Csv,
+    Json,
 }
 
 /// Which field `get` was asked for.
@@ -235,6 +269,8 @@ pub struct FileConfig {
     pub clipboard_timeout: Option<u64>,
     pub lock_timeout: Option<u64>,
     pub backups: Option<usize>,
+    /// `2` or `2:<serial>`: a YubiKey slot every vault is opened with by default.
+    pub yubikey: Option<String>,
     /// Where backups go. Never beside the vault, which a sync client watches.
     pub backup_dir: Option<String>,
     /// stored · name · recent · updated. `o` cycles from here rather than
@@ -408,6 +444,7 @@ pub struct Config {
     pub lock_timeout: u64,
     pub backups: usize,
     pub backup_dir: PathBuf,
+    pub yubikey: Option<crate::vault::YubiSpec>,
     /// Where the entries pane starts. Session-only before this: pressing `o`
     /// four times after every restart is a setting nobody asked to retype.
     pub sort: crate::app::SortOrder,
@@ -476,6 +513,12 @@ impl Config {
                 .or(file.lock_timeout)
                 .unwrap_or(DEFAULT_LOCK_TIMEOUT),
             backups: backups(file.backups)?,
+            yubikey: cli
+                .yubikey
+                .as_deref()
+                .or(file.yubikey.as_deref())
+                .map(|spec| spec.parse().map_err(|why: String| anyhow::anyhow!("{why}")))
+                .transpose()?,
             backup_dir: file.backup_dir.as_deref().map_or_else(default_backup_dir, expand),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             theme: palette,
@@ -933,6 +976,14 @@ mod tests {
         assert_eq!(build("backups = 0\n", &[]).backups, 0);
         assert_eq!(build("backups = 5\n", &[]).backups, 5);
         assert!(backups(Some(crate::vault::BACKUPS_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn a_yubikey_comes_from_the_flag_or_the_file() {
+        assert_eq!(build("", &[]).yubikey, None);
+        assert_eq!(build("yubikey = \"2\"\n", &[]).yubikey.map(|y| y.slot), Some(2));
+        let flagged = build("yubikey = \"2\"\n", &["--yubikey", "1:77"]).yubikey.unwrap();
+        assert_eq!((flagged.slot, flagged.serial), (1, Some(77)));
     }
 
     #[test]

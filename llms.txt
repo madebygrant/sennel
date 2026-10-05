@@ -1,8 +1,8 @@
 # Sennel
 
 > Terminal KeePass (KDBX4) password manager. Bare `sennel` is an interactive TUI that needs a TTY.
-> Agents should use the non-interactive subcommands: `get`, `gen`, `audit`, `import`, `convert`,
-> `--list` and `--check`. Pass `--stdout` to get a value back, and send the master password as the
+> Agents should use the non-interactive subcommands: `get`, `gen`, `audit`, `import`, `export`,
+> `convert`, `--list` and `--check`. Pass `--stdout` to get a value back, and send the master password as the
 > first line of stdin.
 
 ## For agents
@@ -16,6 +16,7 @@
 - [Generating passwords](docs/generate.md): `sennel gen`, complex, passphrase and pin
 - [Auditing](docs/audit.md): `sennel audit` and the `--pwned` breach check
 - [Importing](docs/import.md): CSV from KeePassXC, Bitwarden or 1Password
+- [Exporting](docs/export.md): `sennel export`, CSV or JSON, plaintext
 - [Older KDBX files](docs/kdbx3.md): `sennel convert`
 - [Configuration](docs/configuration.md): config file keys and defaults
 - [Security](docs/security.md): what is wiped, when, and why

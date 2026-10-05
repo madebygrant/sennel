@@ -18,10 +18,10 @@ use zeroize::{Zeroize, Zeroizing};
 use keepass::{
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
-        CryptographyError, DatabaseKeyError, DatabaseOpenError, DestinationGroupNotFoundError,
-        DuplicateEntryIdError, MoveGroupError,
+        ChallengeResponseKeyError, CryptographyError, DatabaseKeyError, DatabaseOpenError,
+        DatabaseSaveError, DestinationGroupNotFoundError, DuplicateEntryIdError, MoveGroupError,
     },
-    Database, DatabaseKey,
+    ChallengeResponseKey, Database, DatabaseKey,
 };
 
 /* The five standard field names. Strings rather than the crate's constants:
@@ -103,6 +103,11 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
     if input.is_empty() {
         return Err("nothing to read".into());
     }
+    // An authenticator app's "export accounts" link holds the secret inside it.
+    if let Some(rest) = input.strip_prefix("otpauth-migration://") {
+        let one = crate::migration::account(rest)?;
+        return totp_url(&one, title, username);
+    }
     if let Some(rest) = input.strip_prefix("otpauth://") {
         // keepass parses any host as TOTP, so an hotp seed would show wrong codes.
         let kind = rest.split(['/', '?']).next().unwrap_or("");
@@ -168,7 +173,7 @@ fn with_digits(url: &str) -> String {
 
 /// Percent-encodes what a label may hold. Small by hand: the only characters
 /// a title realistically brings are spaces, slashes and the odd accent.
-fn urlish(text: &str) -> String {
+pub(crate) fn urlish(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
         match byte {
@@ -477,6 +482,8 @@ pub enum VaultError {
     /// Opened fine, cannot be written: an older KDBX than this can save.
     ReadOnlyFormat(String),
     Merge(String),
+    /// The hardware key was missing, unplugged, or never touched.
+    Challenge(String),
     CannotDeleteRoot,
     CannotMoveRoot,
     WouldCycle,
@@ -502,6 +509,7 @@ impl std::fmt::Display for VaultError {
                 "{what} files can be read but not written · save a copy as KDBX 4.1 from KeePassXC"
             ),
             VaultError::Merge(why) => write!(f, "cannot merge · {why}"),
+            VaultError::Challenge(why) => write!(f, "YubiKey · {why}"),
             VaultError::CannotDeleteRoot => write!(f, "cannot delete the root group"),
             VaultError::CannotMoveRoot => write!(f, "cannot move the root group"),
             VaultError::WouldCycle => write!(f, "cannot move a group into itself"),
@@ -516,6 +524,55 @@ impl std::fmt::Display for VaultError {
 
 impl std::error::Error for VaultError {}
 
+/// A YubiKey slot that is part of a vault's key, and optionally which key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YubiSpec {
+    pub slot: u8,
+    pub serial: Option<u32>,
+}
+
+impl std::str::FromStr for YubiSpec {
+    type Err = String;
+
+    /// `2` for slot 2 of the only key connected, `2:7370001` to name the key.
+    fn from_str(text: &str) -> Result<Self, String> {
+        let (slot, serial) = match text.trim().split_once(':') {
+            Some((slot, serial)) => (slot, Some(serial)),
+            None => (text.trim(), None),
+        };
+        let slot = match slot.trim() {
+            "1" => 1,
+            "2" => 2,
+            other => return Err(format!("yubikey slot {other:?} is not 1 or 2")),
+        };
+        let serial = serial
+            .map(|n| n.trim().parse::<u32>().map_err(|_| format!("yubikey serial {n:?} is not a number")))
+            .transpose()?;
+        Ok(YubiSpec { slot, serial })
+    }
+}
+
+impl std::fmt::Display for YubiSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.serial {
+            Some(serial) => write!(f, "slot {} of key {serial}", self.slot),
+            None => write!(f, "slot {}", self.slot),
+        }
+    }
+}
+
+// A missing or unplugged key is not a wrong password, and must not read like one.
+fn challenge_failure(why: &ChallengeResponseKeyError) -> VaultError {
+    VaultError::Challenge(match why {
+        ChallengeResponseKeyError::NoKeys => "no key is connected".to_string(),
+        ChallengeResponseKeyError::AmbiguousKeys => {
+            "several keys are connected · name one as yubikey = \"2:<serial>\"".to_string()
+        }
+        ChallengeResponseKeyError::KeyNotFound(serial) => format!("key {serial} is not connected"),
+        other => other.to_string(),
+    })
+}
+
 pub struct Vault {
     db: Database,
     /* The key stays with the vault so `save` needs no password prompt:
@@ -523,6 +580,8 @@ pub struct Vault {
        DatabaseKey zeroizes on drop, so holding it is holding secrets right.
        It is held by value: `save` consumes a clone of it. */
     key: Option<DatabaseKey>,
+    // The hardware key inside `key`, kept so a re-key can include it again.
+    challenge: Option<ChallengeResponseKey>,
     path: Option<PathBuf>,
     /* What the file looked like when this vault last agreed with it. Sennel
        autosaves after every change, so without this a KeePassXC edit (or a
@@ -719,6 +778,7 @@ impl Vault {
         Vault {
             db,
             key: None,
+            challenge: None,
             path: None,
             stamp: None,
             backups: 0,
@@ -744,6 +804,9 @@ impl Vault {
             {
                 VaultError::WrongPassword
             }
+            DatabaseOpenError::Key(DatabaseKeyError::ChallengeResponse(ref why)) => {
+                challenge_failure(why)
+            }
             DatabaseOpenError::Cryptography(ref crypto_err) => {
                 if matches!(crypto_err, CryptographyError::InvalidPadding(_)) {
                     VaultError::WrongPassword
@@ -755,8 +818,15 @@ impl Vault {
         }
     }
 
-    fn build_key(password: &str, key_file: Option<&[u8]>) -> Result<DatabaseKey, VaultError> {
+    fn build_key(
+        password: &str,
+        key_file: Option<&[u8]>,
+        challenge: Option<&ChallengeResponseKey>,
+    ) -> Result<DatabaseKey, VaultError> {
         let mut key = DatabaseKey::new().with_password(password);
+        if let Some(challenge) = challenge {
+            key = key.with_challenge_response_key(challenge.clone());
+        }
         if let Some(data) = key_file {
             /* with_keyfile wants a reader, not bytes. */
             key = key
@@ -768,17 +838,46 @@ impl Vault {
 
     /// Open an existing `.kdbx` file. The password string is copied into the
     /// retained key; the caller zeroizes its own buffer.
+    #[cfg(test)]
     pub fn open(
         path: &Path,
         password: &str,
         key_file: Option<&[u8]>,
     ) -> Result<Self, VaultError> {
+        Self::open_with(path, password, key_file, None)
+    }
+
+    /// `open` for a vault whose key includes a YubiKey slot. Reads the key
+    /// now, and again for every later save (the challenge is the file's own
+    /// fresh KDF seed), so the key has to stay connected.
+    pub fn open_with(
+        path: &Path,
+        password: &str,
+        key_file: Option<&[u8]>,
+        yubikey: Option<&YubiSpec>,
+    ) -> Result<Self, VaultError> {
+        let challenge = yubikey.map(Self::resolve_yubikey).transpose()?;
+        Self::open_keyed(path, password, key_file, challenge)
+    }
+
+    fn resolve_yubikey(spec: &YubiSpec) -> Result<ChallengeResponseKey, VaultError> {
+        let key = ChallengeResponseKey::get_yubikey(spec.serial).map_err(|e| challenge_failure(&e))?;
+        Ok(ChallengeResponseKey::YubikeyChallenge(key, spec.slot.to_string()))
+    }
+
+    pub(crate) fn open_keyed(
+        path: &Path,
+        password: &str,
+        key_file: Option<&[u8]>,
+        challenge: Option<ChallengeResponseKey>,
+    ) -> Result<Self, VaultError> {
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
-        let key = Self::build_key(password, key_file)?;
+        let key = Self::build_key(password, key_file, challenge.as_ref())?;
         let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
         Ok(Vault {
             db,
             key: Some(key),
+            challenge,
             path: Some(path.to_path_buf()),
             stamp: Stamp::of(path),
             backups: 0,
@@ -786,6 +885,11 @@ impl Vault {
             backed_up: false,
             backup_gap: BACKUP_GAP,
         })
+    }
+
+    /// Whether every save has to ask a hardware key, which can need a touch.
+    pub fn has_challenge(&self) -> bool {
+        self.challenge.is_some()
     }
 
     // keepass saves KDBX 4.1 only. Anything else opens, so without this check
@@ -964,6 +1068,7 @@ impl Vault {
         Ok(Vault {
             db,
             key: Some(key),
+            challenge: self.challenge.clone(),
             path: Some(path.to_path_buf()),
             stamp: Stamp::of(path),
             backups: 0,
@@ -975,15 +1080,39 @@ impl Vault {
 
     /// First save of a new vault: records the path and key, so later `save`
     /// calls need neither.
+    #[cfg(test)]
     pub fn save_as(
         &mut self,
         path: &Path,
         password: &str,
         key_file: Option<&[u8]>,
     ) -> Result<(), VaultError> {
-        let key = Self::build_key(password, key_file)?;
+        self.save_as_with(path, password, key_file, None)
+    }
+
+    /// `save_as` for a new vault that should need a YubiKey slot to open.
+    pub fn save_as_with(
+        &mut self,
+        path: &Path,
+        password: &str,
+        key_file: Option<&[u8]>,
+        yubikey: Option<&YubiSpec>,
+    ) -> Result<(), VaultError> {
+        let challenge = yubikey.map(Self::resolve_yubikey).transpose()?;
+        self.save_as_keyed(path, password, key_file, challenge)
+    }
+
+    pub(crate) fn save_as_keyed(
+        &mut self,
+        path: &Path,
+        password: &str,
+        key_file: Option<&[u8]>,
+        challenge: Option<ChallengeResponseKey>,
+    ) -> Result<(), VaultError> {
+        let key = Self::build_key(password, key_file, challenge.as_ref())?;
         Self::write_file(&self.db, &key, path)?;
         self.key = Some(key);
+        self.challenge = challenge;
         self.path = Some(path.to_path_buf());
         self.stamp = Stamp::of(path);
         // A file that has just been created holds nothing worth keeping.
@@ -1030,7 +1159,7 @@ impl Vault {
         if self.changed_on_disk() {
             return Err(VaultError::ChangedOnDisk);
         }
-        let key = Self::build_key(password, key_file)?;
+        let key = Self::build_key(password, key_file, self.challenge.as_ref())?;
         // KeePassXC shows this, and a vault that never records it reads as one
         // whose password has never been changed.
         let was = self.db.meta.master_key_changed;
@@ -1086,7 +1215,12 @@ impl Vault {
         if let Err(e) = db.save(&mut out, key.clone()) {
             drop(out);
             let _ = std::fs::remove_file(&temp);
-            return Err(VaultError::Db(e.to_string()));
+            return Err(match e {
+                DatabaseSaveError::Key(DatabaseKeyError::ChallengeResponse(ref why)) => {
+                    challenge_failure(why)
+                }
+                other => VaultError::Db(other.to_string()),
+            });
         }
         // Bytes before name: rename is atomic only about the name, so without this a
         // power loss can leave the path pointing at a file whose blocks never landed.
@@ -2591,6 +2725,95 @@ mod tests {
         theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
         theirs.save().unwrap();
         ours.merge_from_disk().unwrap();
+    }
+
+    // An HMAC-SHA1 secret held in software: the same code path as a YubiKey slot, with no device.
+    const SECRET: &str = "00112233445566778899aabbccddeeff00112233";
+
+    fn local(secret: &str) -> Option<ChallengeResponseKey> {
+        Some(ChallengeResponseKey::LocalChallenge(secret.to_string()))
+    }
+
+    // The challenge is the file's fresh KDF seed, so every save asks the key again.
+    #[test]
+    fn a_challenge_key_is_part_of_the_key_and_survives_saves() {
+        let file = Temp::new("challenge");
+        let mut v = vault();
+        let root = v.root_id();
+        v.create_entry(&root, "first", "", "", "", "").unwrap();
+        v.save_as_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+
+        assert_eq!(Vault::open(&file.path, "pw", None).err(), Some(VaultError::WrongPassword));
+        let other = Vault::open_keyed(&file.path, "pw", None, local("ff112233445566778899aabbccddeeff00112233"));
+        assert_eq!(other.err(), Some(VaultError::WrongPassword));
+
+        let mut back = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        let root = back.root_id();
+        back.create_entry(&root, "second", "", "", "", "").unwrap();
+        back.save().unwrap();
+        back.save_over().unwrap();
+        let again = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        assert_eq!(again.entry_count(), 2);
+    }
+
+    // The key file and the hardware key are both halves of the key.
+    #[test]
+    fn a_challenge_key_works_beside_a_key_file() {
+        let file = Temp::new("challenge-keyfile");
+        let mut v = vault();
+        v.save_as_keyed(&file.path, "pw", Some(KEY_FILE), local(SECRET)).unwrap();
+        assert!(Vault::open_keyed(&file.path, "pw", Some(KEY_FILE), local(SECRET)).is_ok());
+        assert!(Vault::open_keyed(&file.path, "pw", None, local(SECRET)).is_err());
+        assert!(Vault::open_keyed(&file.path, "pw", Some(KEY_FILE), None).is_err());
+    }
+
+    #[test]
+    fn a_rekey_and_a_reload_keep_the_challenge_key() {
+        let file = Temp::new("challenge-rekey");
+        let mut v = vault();
+        v.save_as_keyed(&file.path, "old", None, local(SECRET)).unwrap();
+        v.challenge = local(SECRET);
+        v.rekey("new", None).unwrap();
+        assert!(Vault::open_keyed(&file.path, "new", None, local(SECRET)).is_ok());
+        assert!(Vault::open(&file.path, "new", None).is_err(), "the rekey dropped the key");
+        v.reload().unwrap();
+    }
+
+    #[test]
+    fn a_merge_keeps_the_challenge_key() {
+        let file = Temp::new("challenge-merge");
+        let mut base = vault();
+        base.save_as_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        let mut ours = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        let mut theirs = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        let root = theirs.root_id();
+        theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
+        theirs.save().unwrap();
+        ours.merge_from_disk().unwrap();
+        assert_eq!(Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap().entry_count(), 1);
+    }
+
+    /* No key connected is not a wrong password: the user would retype a
+       correct master password until they gave up. Serial 1 is never real,
+       so this holds with or without a key plugged into the test machine. */
+    #[test]
+    fn a_missing_hardware_key_is_named_not_reported_as_a_wrong_password() {
+        let file = Temp::new("challenge-missing");
+        saved_vault(&file);
+        let spec = YubiSpec { slot: 2, serial: Some(1) };
+        let err = Vault::open_with(&file.path, "correct horse", None, Some(&spec)).err().unwrap();
+        assert!(matches!(err, VaultError::Challenge(_)), "{err:?}");
+        assert!(err.to_string().starts_with("YubiKey"), "{err}");
+    }
+
+    #[test]
+    fn a_yubikey_setting_is_a_slot_and_maybe_a_serial() {
+        assert_eq!("2".parse::<YubiSpec>(), Ok(YubiSpec { slot: 2, serial: None }));
+        assert_eq!("1:7370001".parse::<YubiSpec>(), Ok(YubiSpec { slot: 1, serial: Some(7370001) }));
+        assert!("3".parse::<YubiSpec>().is_err());
+        assert!("2:abc".parse::<YubiSpec>().is_err());
+        assert!("".parse::<YubiSpec>().is_err());
+        assert_eq!(YubiSpec { slot: 2, serial: Some(5) }.to_string(), "slot 2 of key 5");
     }
 
     const KEY_FILE: &[u8] = b"not a keepass key file, just bytes the vault is keyed on";

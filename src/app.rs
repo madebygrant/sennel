@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
-use crate::vault::{EntryExt, Vault, VaultError};
+use crate::vault::{EntryExt, Vault, VaultError, YubiSpec};
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
    the browser has nothing to act on, so it is a screen and not a prompt. */
@@ -134,6 +134,13 @@ const SECRET_BOX: usize = 512;
 
 pub fn secret_box() -> String {
     String::with_capacity(SECRET_BOX)
+}
+
+// A pasted authenticator export runs to a few hundred characters, so the seed box gets more room.
+const SEED_BOX: usize = 4096;
+
+pub fn seed_box() -> String {
+    String::with_capacity(SEED_BOX)
 }
 
 pub struct Form {
@@ -358,6 +365,14 @@ const GLOW: Duration = Duration::from_millis(700);
 pub enum Cut {
     Entry(EntryId),
     Group(GroupId),
+}
+
+/// A write that waits for the hardware key, so the screen can ask for the touch first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pending {
+    Save,
+    Overwrite,
+    Merge,
 }
 
 /* One step of work, undone. The snapshot carries the whole entry — secrets
@@ -795,6 +810,12 @@ pub struct App {
     // Backups kept once a vault is open, and where; 0 is off.
     backups: usize,
     backup_dir: PathBuf,
+    // The configured YubiKey slot, and whether the next unlock uses it (`^y`).
+    yubikey: Option<YubiSpec>,
+    use_yubikey: bool,
+    // A write waiting for a frame that says "touch your key" before it blocks.
+    pending: Option<Pending>,
+    flushing: bool,
     pub last_activity: Instant,
     // Wall-clock twin of `last_activity`: `Instant` stops during suspend on macOS
     // and Linux. `idle_expired` takes the longer of the two readings.
@@ -876,6 +897,10 @@ impl App {
             lock_after: None,
             backups: 0,
             backup_dir: PathBuf::new(),
+            yubikey: None,
+            use_yubikey: false,
+            pending: None,
+            flushing: false,
             last_activity: Instant::now(),
             last_activity_wall: std::time::SystemTime::now(),
         }
@@ -1157,6 +1182,35 @@ impl App {
     /* Seconds of idleness before the vault locks itself. Zero means off:
        a `Duration::ZERO` deadline would lock on the next frame, which reads
        as the unlock failing. `None` is the absence of a deadline. */
+    /// The YubiKey slot from the config, used for unlocks until `^y` turns it off.
+    pub fn set_yubikey(&mut self, spec: Option<YubiSpec>) {
+        self.use_yubikey = spec.is_some();
+        self.yubikey = spec;
+    }
+
+    /// "slot 2: on" for the lock screen, or nothing when no key is configured.
+    pub fn yubikey_label(&self) -> Option<String> {
+        let spec = self.yubikey.as_ref()?;
+        Some(format!("{spec}: {}", if self.use_yubikey { "on" } else { "off" }))
+    }
+
+    fn active_yubikey(&self) -> Option<&YubiSpec> {
+        self.yubikey.as_ref().filter(|_| self.use_yubikey)
+    }
+
+    /* `^y` on the lock screen. One setting for every vault would break any
+       vault that has no hardware key, and the library mixes both, so the
+       choice is made at the door. */
+    pub fn toggle_yubikey(&mut self) {
+        let Some(spec) = self.yubikey.clone() else {
+            self.say("no yubikey configured  ·  set yubikey = \"2\" in the config");
+            return;
+        };
+        self.use_yubikey = !self.use_yubikey;
+        let state = if self.use_yubikey { "on" } else { "off" };
+        self.say(format!("yubikey {spec} {state} for the next unlock"));
+    }
+
     pub fn set_backups(&mut self, keep: usize, dir: PathBuf) {
         self.backups = keep;
         self.backup_dir = dir;
@@ -1233,6 +1287,7 @@ impl App {
         self.caret = 0;
         self.dirty = false;
         self.overwrite_armed = false;
+        self.pending = None;
         /* Nothing that was about the open vault may outlive it: a form, a
            kept filter or an armed cut would come back over the next one. */
         self.detail = false;
@@ -1379,6 +1434,42 @@ impl App {
         }
     }
 
+    /* Whether a pasted string has a box to land in. Mirrors the order the key
+       handler routes in: pasted into the browser, each character would be a
+       command, and `D` is one of them. */
+    pub fn takes_text(&self) -> bool {
+        if self.confirm.is_some() {
+            return false;
+        }
+        if self.form.is_some() || self.group_prompt.is_some() {
+            return true;
+        }
+        if self.history.is_some() {
+            return false;
+        }
+        if let Some(fields) = &self.fields {
+            return fields.adding.is_some();
+        }
+        if self.audit.is_some() {
+            return false;
+        }
+        if self.rekey.is_some() || self.band {
+            return true;
+        }
+        if self.detail || self.show_help || self.browse.is_some() || self.library.is_some() {
+            return false;
+        }
+        if self.mint.is_some() {
+            return false;
+        }
+        self.view == View::Unlock
+    }
+
+    /// Whether the notes box has focus, the one box where a pasted line break is text.
+    pub fn in_notes(&self) -> bool {
+        self.form.as_ref().is_some_and(|f| f.field == FormField::Notes)
+    }
+
     /// Prefills the key-file box from `--key-file` or the config, once at startup.
     pub fn set_key_file(&mut self, path: Option<&Path>) {
         if self.unlock_keyfile.is_empty()
@@ -1425,7 +1516,10 @@ impl App {
        reads as a hang. */
     pub fn begin_unlock(&mut self) {
         self.unlocking = true;
-        self.stage = "unlocking…".into();
+        self.stage = match self.active_yubikey() {
+            Some(_) => "unlocking…  touch your key".into(),
+            None => "unlocking…".into(),
+        };
         self.level = Level::Info;
         self.flash_until = None;
         self.waiting.clear();
@@ -1474,6 +1568,7 @@ impl App {
             password.zeroize();
             return;
         };
+        let yubikey = self.active_yubikey().cloned();
         let result = if self.unlock_new {
             if self.unlock_confirm.as_bytes() != password.as_slice() {
                 self.warn("passwords differ  ·  retype both fields");
@@ -1483,9 +1578,9 @@ impl App {
                 return;
             }
             let mut vault = Vault::new();
-            vault.save_as(&path, pw, key_file).map(|()| vault)
+            vault.save_as_with(&path, pw, key_file, yubikey.as_ref()).map(|()| vault)
         } else {
-            Vault::open(&path, pw, key_file)
+            Vault::open_with(&path, pw, key_file, yubikey.as_ref())
         };
         // The typed bytes have served: the key inside the vault is a copy.
         password.zeroize();
@@ -2843,6 +2938,35 @@ impl App {
 
     /* ---- Entry form (Wave 5.1) ---- */
 
+    /* A save to a vault with a hardware key waits on the key, which can mean a
+       touch. The loop draws this message first and then calls `flush_pending`,
+       the way an unlock draws "unlocking…" before Argon2. Edits made before
+       the frame is drawn share the one write. */
+    fn defer_for_touch(&mut self, what: Pending) {
+        self.pending = Some(what);
+        self.stage = "touch your key to save…".into();
+        self.level = Level::Info;
+        self.flash_until = None;
+        self.waiting.clear();
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn flush_pending(&mut self) {
+        let Some(what) = self.pending.take() else {
+            return;
+        };
+        self.flushing = true;
+        match what {
+            Pending::Save => self.persist(),
+            Pending::Overwrite => self.save_now(),
+            Pending::Merge => self.merge_vault(),
+        }
+        self.flushing = false;
+    }
+
     /* Autosave after every mutation. Dirty is set before the attempt and
        cleared on success, so a failed save leaves the quit guard armed and
        the flash names the problem instead of pretending nothing happened.
@@ -2860,10 +2984,18 @@ impl App {
             self.dirty = true;
             return;
         }
+        if vault.has_challenge() && !self.flushing {
+            self.dirty = true;
+            self.defer_for_touch(Pending::Save);
+            return;
+        }
         match vault.save() {
             Ok(()) => {
                 self.dirty = false;
                 self.overwrite_armed = false;
+                if self.flushing {
+                    self.say("saved");
+                }
             }
             /* Somebody else wrote the file. Refusing is the whole point: the
                alternative is this session quietly winning every race. */
@@ -2892,6 +3024,10 @@ impl App {
             return;
         }
         if self.overwrite_armed {
+            if vault.has_challenge() && !self.flushing {
+                self.defer_for_touch(Pending::Overwrite);
+                return;
+            }
             match vault.save_over() {
                 Ok(()) => {
                     self.dirty = false;
@@ -2922,6 +3058,10 @@ impl App {
         let Some(vault) = &mut self.vault else {
             return;
         };
+        if vault.has_challenge() && !self.flushing {
+            self.defer_for_touch(Pending::Merge);
+            return;
+        }
         match vault.merge_from_disk() {
             Ok(summary) => {
                 self.dirty = false;
@@ -2982,7 +3122,7 @@ impl App {
             notes: String::new(),
             caret: 0,
             password_touched: false,
-            otp: secret_box(),
+            otp: seed_box(),
             otp_touched: false,
             had_otp: false,
             reveal: false,
@@ -3021,7 +3161,7 @@ impl App {
             /* The stored seed never prefills the box: it is a secret, and a
                masked run of bullets forty characters long teaches nobody
                anything. Empty-and-untouched keeps it, the password's rule. */
-            otp: secret_box(),
+            otp: seed_box(),
             otp_touched: false,
             had_otp: crate::vault::raw_otp(&entry).is_some(),
             reveal: false,
@@ -5316,6 +5456,78 @@ pub mod tests {
         assert!(!app.working(), "the override did not save");
         assert!(!app.overwrite_armed);
         assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
+    }
+
+    fn keyed(_vault: &std::path::Path) -> Option<keepass::ChallengeResponseKey> {
+        Some(keepass::ChallengeResponseKey::LocalChallenge(
+            "00112233445566778899aabbccddeeff00112233".into(),
+        ))
+    }
+
+    // A save that waits on the key draws "touch your key" first, and writes once.
+    #[test]
+    fn a_save_to_a_hardware_keyed_vault_waits_for_the_frame_that_asks_for_the_touch() {
+        let tmp = temp_path("keyed");
+        Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
+        let mut app = open_app();
+        app.vault = Some(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        let root = app.vault.as_ref().unwrap().root_id();
+        let vault = app.vault.as_mut().unwrap();
+        vault.create_entry(&root, "one", "", "", "", "").unwrap();
+        vault.create_entry(&root, "two", "", "", "", "").unwrap();
+
+        app.persist();
+        app.persist();
+        assert!(app.has_pending());
+        assert!(app.stage.contains("touch your key"), "{}", app.stage);
+        let on_disk = || Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap().entry_count();
+        assert_eq!(on_disk(), 0, "written before the touch was asked for");
+
+        app.flush_pending();
+        assert!(!app.has_pending() && !app.working(), "{}", app.stage);
+        assert_eq!(on_disk(), 2, "both edits share the one write");
+    }
+
+    // A vault with no hardware key saves where it always did.
+    #[test]
+    fn a_vault_without_a_hardware_key_saves_at_once() {
+        let (mut app, tmp) = locked_app_with_db("pw");
+        let mut password = b"pw".to_vec();
+        app.try_unlock(&mut password, None);
+        app.open_add_form();
+        app.form.as_mut().unwrap().title = "mine".into();
+        app.submit_form();
+        assert!(!app.has_pending());
+        assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
+    }
+
+    #[test]
+    fn the_yubikey_is_a_choice_made_at_the_door() {
+        let mut app = App::new();
+        app.toggle_yubikey();
+        assert!(app.stage.contains("no yubikey configured"), "{}", app.stage);
+        assert_eq!(app.yubikey_label(), None);
+
+        app.set_yubikey(Some("2".parse().unwrap()));
+        assert_eq!(app.yubikey_label().as_deref(), Some("slot 2: on"));
+        app.begin_unlock();
+        assert!(app.stage.contains("touch your key"), "{}", app.stage);
+        app.toggle_yubikey();
+        assert_eq!(app.yubikey_label().as_deref(), Some("slot 2: off"));
+        app.begin_unlock();
+        assert_eq!(app.stage, "unlocking…");
+    }
+
+    #[test]
+    fn locking_drops_a_save_that_was_waiting_for_the_key() {
+        let tmp = temp_path("keyed-lock");
+        Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
+        let mut app = open_app();
+        app.vault = Some(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        app.persist();
+        assert!(app.has_pending());
+        app.lock_now();
+        assert!(!app.has_pending());
     }
 
     // `^f` keeps both: theirs is merged into the work that was refused a save.

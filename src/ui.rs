@@ -1118,6 +1118,9 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             " ^v  {n} {plural} opened before"
         ))));
     }
+    if let Some(label) = app.yubikey_label() {
+        rows.push(Line::from(p.faint(format!(" ^y  yubikey {label}"))));
+    }
     let width = rows.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     popup(frame, &title, rows, width.max(20), &p);
 }
@@ -1722,7 +1725,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
                 if form.had_otp {
                     "(leave empty to keep)".to_string()
                 } else {
-                    "(otpauth:// url or the printed secret)".to_string()
+                    "(otpauth:// url, export link or secret)".to_string()
                 }
             }
             FormField::Otp if form.reveal => value.to_string(),

@@ -72,6 +72,9 @@ to print into a terminal where it would sit in your scrollback. [More](docs/get.
 only ever held one. `^v` lists every vault this machine has opened, newest first, and `enter` points
 the session at another without a restart. [More](docs/keys.md).
 
+**A YubiKey, if the vault has one.** `yubikey = "2"` opens KeePassXC vaults keyed to a challenge-response
+slot. Each save asks the key again, so Sennel says when to touch it. [More](docs/security.md).
+
 **Older vaults are welcome.** KDBX 3.1 opens read-only. `sennel convert` writes a verified KDBX 4
 copy beside the original. [More](docs/kdbx3.md).
 
@@ -85,7 +88,13 @@ them above the merely weak ones, because an expiry is a decision its owner alrea
 
 **One-time codes without handing over the seed.** Entries with a code are marked `⊙` and show the
 digits with a countdown. `t` copies them. The seed stays in the vault, because putting a permanent
-credential on the clipboard to save typing six digits is a bad trade.
+credential on the clipboard to save typing six digits is a bad trade. The seed box takes an
+`otpauth://` URL, the printed secret, or a Google Authenticator "export accounts" link with one
+account in it.
+
+**Pasting works.** Terminals that support it paste into the focused box as text, without the final
+newline pressing Enter. Pasted into the entry list it does nothing, so a clipboard full of letters
+cannot run commands.
 
 **Themes you pick by looking at them.** `^t` walks four palettes with the screen in front of you and
 keeps the one you stop on. Every colour clears WCAG 4.5:1 before it ships, and `NO_COLOR` still
@@ -108,6 +117,7 @@ working rather than a vault nobody can open.
 - [`sennel get`](docs/get.md), the non-interactive path
 - [Generating passwords](docs/generate.md), in the TUI and from a script
 - [Importing](docs/import.md) from KeePassXC, Bitwarden or 1Password
+- [Exporting](docs/export.md) to CSV or JSON
 - [Auditing](docs/audit.md), including the breach check
 - [Older KDBX files](docs/kdbx3.md) and `sennel convert`
 - [Keys and the unlock screen](docs/keys.md)

@@ -35,6 +35,8 @@ not the browser's `*`.
 | `tab ↑ ↓`           | move between boxes on prompt screens (unlock, forms)          |
 | `^o`                | pick the vault file from a list (unlock screen)               |
 | `^v`                | the vault library · `^d` forgets a row (unlock screen)        |
+| `^y`                | use the configured YubiKey for this unlock, or not            |
+| paste               | into the focused box, minus its final newline (nowhere else)  |
 | `enter`             | unlock, or save the form                                      |
 | `j k ↑ ↓`           | move within the pane                                          |
 | `^d ^u` `PgUp PgDn` | move a screen at a time                                       |

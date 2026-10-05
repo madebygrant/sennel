@@ -23,10 +23,11 @@ TTY. Use the subcommands below instead. Each one runs, prints and exits.
 | `--db PATH`              | the vault. Wins over the config                                |
 | `db = "..."` in config   | the vault when `--db` is absent                                |
 | `--key-file PATH`        | key file, when the vault needs one                             |
+| `--yubikey SLOT[:SERIAL]` | YubiKey slot, when the vault needs one. Touch the key if it blinks |
 | `--config PATH`          | config file. Default `$XDG_CONFIG_HOME/sennel/config.toml`, else `~/.config/sennel/config.toml` |
 | `--no-config`            | ignore the config file. Use for reproducible runs              |
 
-`--db`, `--key-file`, `--config` and `--no-config` are global: they work before or after the
+`--db`, `--key-file`, `--yubikey`, `--config` and `--no-config` are global: they work before or after the
 subcommand. All other top-level flags (`--clipboard-timeout`, `--lock-timeout`, `--sort`,
 `--theme`, `--check`, `--list`) must come before it.
 
@@ -164,6 +165,23 @@ printf '%s\n' "$MASTER" | sennel import export.csv --db VAULT  # imports for rea
 - A KDBX 3.1 vault is refused. Convert it first.
 - Always run `--dry-run` first and confirm with the user before the real import. The CSV holds
   plaintext passwords: suggest deleting it afterwards.
+
+### `sennel export`
+
+Write every entry as plaintext. Reads the vault; writes nothing back.
+
+```sh
+printf '%s\n' "$MASTER" | sennel export --stdout --db VAULT [--format csv|json] [--group PATH]
+printf '%s\n' "$MASTER" | sennel export --out FILE --db VAULT
+```
+
+- One of `--out FILE` or `--stdout` is required, or exit 1 before the password is read. `--stdout`
+  is refused into a terminal unless `--force`. `--out` is created `0600` and never over a file.
+- CSV is `Group,Title,Username,Password,URL,Notes,TOTP`, readable by `sennel import`. JSON adds
+  `tags`, `expires`, `fields` and `files`.
+- The recycle bin is left out. Custom fields (CSV only) and attachments are counted on stderr.
+- The output is every password in the clear. Do not log it or echo it, and tell the user to delete
+  any file you write. Confirm with the user before exporting.
 
 ### `sennel convert`
 

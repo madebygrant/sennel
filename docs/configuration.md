@@ -11,6 +11,8 @@ recent = ["~/vaults/main.kdbx", "~/vaults/work.kdbx"]
                                # newest first, ten at most
 clipboard_timeout = 30         # seconds before the clipboard clears (0 = leave it)
 lock_timeout = 300             # seconds idle before auto-lock (0 = never)
+yubikey = "2"                 # YubiKey slot (or "2:<serial>") vaults are unlocked with · ^y turns it
+                               # off per unlock for a vault that has none · see docs/security.md
 backups = 3                    # copies kept of the vault, newest is .1 (0 = none, 99 at most)
 backup_dir = "~/.local/state/sennel/backups"
                                # where they go · never beside the vault, which a sync
@@ -63,6 +65,7 @@ sennel import e.csv        # read another manager's export · see docs/import.md
 sennel audit               # reused, weak and empty passwords · see docs/audit.md
 sennel convert             # rewrite an older KDBX 3.1 vault as KDBX 4 · see docs/kdbx3.md
 sennel get x --key-file k  # every subcommand takes --key-file when the vault has one
+sennel get x --yubikey 2   # ... and --yubikey SLOT[:SERIAL] when it needs a YubiKey slot
 sennel completions zsh     # completion script · bash, zsh, fish, elvish
 sennel man                 # the man page, as roff
 sennel --no-config         # ignore the config file and write nothing back
