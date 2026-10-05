@@ -215,6 +215,14 @@ fn main() -> Result<()> {
     /* And the vaults opened before this one, which `^v` picks from. */
     app.set_recent(cfg.recent.clone());
     app.refresh_db_state();
+    // Nothing to unlock yet, so start on a picker.
+    if cfg.db.is_none() {
+        if cfg.recent.is_empty() {
+            app.open_browse();
+        } else {
+            app.open_library();
+        }
+    }
     /* Armed once from config: 0 means the user asked for no lock, and the
        mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
