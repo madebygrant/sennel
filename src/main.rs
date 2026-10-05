@@ -529,9 +529,8 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
    an import is the one operation most likely to be regretted, and one
    group is one thing to delete when it is. The file's own group column
    becomes a subgroup, so the shape survives without colonising the vault. */
-/* `sennel export`: everything, in plaintext, to a file or a pipe. Every refusal
-   comes before the password prompt, so nobody types a master password to be
-   told the output has nowhere safe to go. */
+// `sennel export`: everything, in plaintext. Every refusal comes before the password prompt, so nobody
+// types a master password to be told the output has nowhere safe to go.
 fn export_vault(
     cfg: &Config,
     format: config::ExportFormat,
@@ -953,10 +952,8 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
     }
 }
 
-/* A paste is the keystrokes it would have been, fed to whichever box has focus
-   and nowhere else: line breaks are dropped (so a trailing newline cannot press
-   Enter), except in the notes box, where they are text. The pasted string is
-   wiped; it may be a password or a seed. */
+// A paste is fed as keystrokes to the focused box only. Line breaks are dropped (so the last one cannot
+// press Enter) except in notes, and the pasted string is wiped, since it may be a password or a seed.
 fn handle_paste(app: &mut App, mut text: String) {
     const LIMIT: usize = 16 * 1024;
     app.touch();
@@ -1353,6 +1350,7 @@ fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('*') => app.fields_reveal(),
         KeyCode::Char('y') => app.fields_copy(),
         KeyCode::Char('s') => app.fields_save(),
+        KeyCode::Char('g') => app.fields_to_agent(),
         KeyCode::Char('a') => app.fields_add(false),
         KeyCode::Char('f') => app.fields_add(true),
         KeyCode::Char('D') => app.fields_remove(),

@@ -416,7 +416,7 @@ fn backup_path(dir: &Path, path: &Path, n: usize) -> PathBuf {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    dir.join(format!("{stem}-{:08x}.kdbx.{n}", hash as u32))
+    dir.join(format!("{stem}-{hash:016x}.kdbx.{n}"))
 }
 
 /// The backups of `path` held in `dir`, newest first.
@@ -426,7 +426,9 @@ pub fn backups_of(dir: &Path, path: &Path) -> Vec<PathBuf> {
 
 /// Deletes every backup of `path` in `dir` and returns how many there were.
 pub fn forget_backups(dir: &Path, path: &Path) -> usize {
-    backups_of(dir, path).into_iter().filter(|p| std::fs::remove_file(p).is_ok()).count()
+    // `.0` is the staging copy, which a crash mid-backup can leave behind.
+    let staged = usize::from(std::fs::remove_file(backup_path(dir, path, 0)).is_ok());
+    staged + backups_of(dir, path).into_iter().filter(|p| std::fs::remove_file(p).is_ok()).count()
 }
 
 /* An attachment on its way out of the vault, written the way the vault
@@ -640,7 +642,7 @@ fn attachment_hazard(ours: &Database, theirs: &Database) -> Option<String> {
                     .iter()
                     .any(|(at, files)| *files && !ours_stamps.contains(at));
                 // Equal stamps are skipped whole by the crate; older theirs keeps ours.
-                let newer = b > a && current_files && !same_files(&o, &t);
+                let newer = b > a && !same_files(&o, &t);
                 a != b && (imported_files || newer)
             }
         };
@@ -957,6 +959,22 @@ impl Vault {
 
 // `^f` on a conflict. Merges into a clone and swaps it in only on success, and re-checks the file
 // stamp before writing so a third writer is a conflict again. The replaced file is backed up.
+    // The crate names an entry by uuid, which means nothing to the person reading the status line.
+    fn merge_failure(&self, why: &keepass::db::merge::MergeError) -> String {
+        use keepass::db::merge::MergeError as E;
+        match why {
+            E::EntryModificationTimeNotUpdated(id) | E::DuplicateHistoryEntries(_, id) => {
+                let title = self.db.entry(*id).map_or("an entry".to_string(), |e| format!("\"{}\"", e.title()));
+                format!("{title} was changed on both sides within the same second, so neither is newer")
+            }
+            E::GroupModificationTimeNotUpdated(id) => {
+                let name = self.db.group(*id).map_or("a group".to_string(), |g| format!("the group \"{}\"", g.name));
+                format!("{name} was changed on both sides within the same second, so neither is newer")
+            }
+            other => other.to_string(),
+        }
+    }
+
     pub fn merge_from_disk(&mut self) -> Result<MergeSummary, VaultError> {
         if !self.writable() {
             return Err(VaultError::ReadOnlyFormat(self.format()));
@@ -974,7 +992,7 @@ impl Vault {
         }
         let mut merged = self.db.clone();
         settle_ties(&mut merged, &theirs);
-        let log = merged.merge(&theirs).map_err(|e| VaultError::Merge(e.to_string()))?;
+        let log = merged.merge(&theirs).map_err(|e| VaultError::Merge(self.merge_failure(&e)))?;
         if Stamp::of(&path) != seen {
             return Err(VaultError::ChangedOnDisk);
         }
@@ -1015,8 +1033,11 @@ impl Vault {
         }
         let fail = |e: std::io::Error| VaultError::Io(format!("backup failed · {e}"));
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
-        // Read first, so a failure leaves the existing backups as they were.
+        // Written under a staging name first, so a failure leaves the existing backups as they were.
         let bytes = Zeroizing::new(std::fs::read(path).map_err(fail)?);
+        let staging = backup_path(dir, path, 0);
+        let _ = std::fs::remove_file(&staging);
+        write_owner_only(&staging, &bytes)?;
         let _ = std::fs::remove_file(backup_path(dir, path, self.backups));
         for n in (1..self.backups).rev() {
             if backup_path(dir, path, n).exists() {
@@ -1024,7 +1045,7 @@ impl Vault {
                     .map_err(fail)?;
             }
         }
-        write_owner_only(&first, &bytes)?;
+        std::fs::rename(&staging, &first).map_err(fail)?;
         self.backed_up = true;
         Ok(())
     }
@@ -2378,6 +2399,19 @@ mod tests {
         assert_eq!(Vault::open(&found[0], "pw", None).unwrap().entry_count(), 1);
     }
 
+    // A crash between writing the staging copy and renaming it leaves `.0`, which also opens with the old password.
+    #[test]
+    fn a_rekey_also_deletes_a_staging_copy_left_by_a_crash() {
+        let file = Temp::new("backup-staged");
+        let mut v = saved_vault(&file);
+        v.set_backups(3, &file.backups);
+        std::fs::create_dir_all(&file.backups).unwrap();
+        let staged = backup_path(&file.backups, &file.path, 0);
+        std::fs::copy(&file.path, &staged).unwrap();
+        assert_eq!(v.rekey("new horse", None).unwrap(), 1);
+        assert!(!staged.exists());
+    }
+
     #[test]
     fn a_rekey_deletes_the_backups_that_open_with_the_old_password() {
         let file = Temp::new("backup-rekey");
@@ -2536,6 +2570,7 @@ mod tests {
         let err = ours.merge_from_disk().unwrap_err();
         assert!(matches!(err, VaultError::Merge(_)), "{err:?}");
         assert!(err.to_string().starts_with("cannot merge"), "{err}");
+        assert!(err.to_string().contains("\"e1\""), "the entry was not named: {err}");
         assert_eq!(std::fs::read(&file.path).unwrap(), on_disk, "the file was written");
         assert_eq!(note(&ours, &ids[0]).as_deref(), Some("ours"), "the session was changed");
         assert!(ours.changed_on_disk());
@@ -2602,6 +2637,10 @@ mod tests {
             t.remove_attachment(&ids[1], "kept.txt").unwrap();
             t.add_attachment(&ids[1], "kept.txt", b"new".to_vec()).unwrap();
         });
+        assert!(matches!(result, Err(VaultError::Merge(_))) && untouched, "{result:?}");
+
+        // A newer entry whose file the other side removed, which would otherwise not carry over.
+        let (result, untouched) = attempt(&|t| t.remove_attachment(&ids[1], "kept.txt").unwrap());
         assert!(matches!(result, Err(VaultError::Merge(_))) && untouched, "{result:?}");
     }
 
@@ -2793,9 +2832,8 @@ mod tests {
         assert_eq!(Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap().entry_count(), 1);
     }
 
-    /* No key connected is not a wrong password: the user would retype a
-       correct master password until they gave up. Serial 1 is never real,
-       so this holds with or without a key plugged into the test machine. */
+    // No key connected must not read as a wrong password, or the user retypes a correct one. Serial 1 is
+    // never real, so this holds with or without a key plugged in.
     #[test]
     fn a_missing_hardware_key_is_named_not_reported_as_a_wrong_password() {
         let file = Temp::new("challenge-missing");

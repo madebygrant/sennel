@@ -84,7 +84,8 @@ forgets it by itself. A clean lock, idle lock or quit takes the keys back out, e
 settings say not to remove them at close, and those still expire. The entry's "confirm" setting is
 passed on. Only OpenSSH-format keys in an attachment are read: not PuTTY `.ppk`, not old PEM, not a
 file path. ed25519 and RSA are reliable. The key library cannot read about one valid ECDSA key in
-twenty (P-521 more often), and says so instead of calling it a wrong passphrase. A forwarded agent
+twenty (P-521 more often), and says so instead of calling it a wrong passphrase. `g` on an attachment in the `F` screen gives that one key to the agent even with
+`ssh_agent` off, and it is taken back out on lock like the others. A forwarded agent
 (`ssh -A`) is whatever `SSH_AUTH_SOCK` points at, so it receives the keys too. `sennel --check` says
 whether the agent answers.
 

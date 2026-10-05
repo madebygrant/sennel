@@ -2111,6 +2111,8 @@ fn draw_fields(frame: &mut Frame, app: &App) {
             p.faint(" copy   "),
             Span::styled("s", Style::new().fg(p.accent)),
             p.faint(" write out   "),
+            Span::styled("g", Style::new().fg(p.accent)),
+            p.faint(" ssh agent   "),
             Span::styled("*", Style::new().fg(p.accent)),
             p.faint(" reveal   "),
             Span::styled("a f", Style::new().fg(p.accent)),
@@ -2549,6 +2551,20 @@ mod tests {
            without reading as the form's ^s. */
         assert!(joined.contains("save now"), "{joined}");
         assert!(joined.contains("generate a password"), "{joined}");
+    }
+
+    // The save row grew a key for the merge, and an 80-column terminal is the one that would clip it.
+    #[test]
+    fn the_overlay_keeps_the_save_row_whole_at_80_columns() {
+        use crate::vault::Vault;
+        let mut t = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        app.show_help = true;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("^s  ^r  ^f"), "{joined}");
+        assert!(joined.contains("merge it in"), "the save row is clipped: {joined}");
     }
 
     /* Enter means three things on the lock screen, and the hint names the one

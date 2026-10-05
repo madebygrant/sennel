@@ -146,7 +146,8 @@ when the entry has expired. Use this to find exact titles before calling `get`.
 
 ### `sennel --check`
 
-Reports what Sennel sees: config file, vault path, generator defaults, timeouts and clipboard. Needs
+Reports what Sennel sees: config file, vault path, generator defaults, timeouts, backups, whether an
+SSH agent answers, a configured YubiKey, and the clipboard. Needs
 no password and no TTY. Exit 1 when no clipboard backend is available, otherwise 0. Run it first
 when diagnosing setup problems.
 
@@ -232,4 +233,4 @@ sennel gen --stdout --count 10 --no-config           # ten, ignoring user defaul
 The CLI can't create, edit or delete entries, move them, set custom fields or change the master
 password. Those are TUI-only. When a user asks for one of them, tell them the key: `a` add, `e`
 edit, `D` delete, `F` fields, `^p` change master password. Run `h` inside the TUI for the full key
-map. There is no JSON output mode, so parse the line formats above.
+map. The commands above print lines, not JSON, so parse the line formats above. Only `export --format json` writes JSON.

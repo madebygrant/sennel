@@ -94,6 +94,7 @@ attachments.
 | `j k` | move                                                                |
 | `y`   | copy a field's value, through the same clipboard wipe as a password |
 | `s`   | write an attachment out beside the vault, owner-only                |
+| `g`   | give an attachment to ssh-agent as a key, for `ssh_agent_lifetime`  |
 | `*`   | reveal the protected fields                                         |
 | `a`   | add a custom field (name, then value)                               |
 | `f`   | attach a file (name, then the path to read)                         |

@@ -1194,9 +1194,8 @@ impl App {
         self.ssh_lifetime = lifetime;
     }
 
-    /* The SSH keys the vault's KeeAgent entries ask for, given to the agent on unlock. Opt-in, since
-       it hands keys to a process outside this one. A missing agent or a wrong passphrase is a
-       warning, never a failed unlock. */
+    // Gives the agent the keys this vault's KeeAgent entries ask for at unlock. Opt-in, since it hands keys
+    // to another process. A missing agent or wrong passphrase is a warning, never a failed unlock.
     fn agent_load(&mut self) {
         let Some(vault) = self.vault.as_ref().filter(|_| self.ssh_agent) else {
             return;
@@ -1208,7 +1207,7 @@ impl App {
         let outcome = crate::agent::load_vault(&mut agent, vault, self.ssh_lifetime);
         let added = outcome.added.len();
         for key in outcome.added {
-            if !self.agent_keys.contains(&key) {
+            if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
                 self.agent_keys.push(key);
             }
         }
@@ -1223,8 +1222,8 @@ impl App {
         }
     }
 
-    /* Takes back the keys this session gave out, except any whose settings say to leave them. The
-       agent forgets those by itself when their lifetime is up, which is also what bounds a crash. */
+    // Takes back the keys this session gave out, except those whose settings say to leave them. Those
+    // expire on their own, as every key would after a crash.
     pub fn agent_release(&mut self) {
         let (remove, _kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.agent_keys).into_iter().partition(|k| k.remove_at_close);
@@ -1256,9 +1255,8 @@ impl App {
         self.yubikey.as_ref().filter(|_| self.use_yubikey)
     }
 
-    /* `^y` on the lock screen. One setting for every vault would break any
-       vault that has no hardware key, and the library mixes both, so the
-       choice is made at the door. */
+    // `^y` on the lock screen. Nothing in a file says it needs a key and the library mixes vaults with and
+    // without one, so the choice is made per unlock.
     pub fn toggle_yubikey(&mut self) {
         let Some(spec) = self.yubikey.clone() else {
             self.say("no yubikey configured  ·  set yubikey = \"2\" in the config");
@@ -1493,9 +1491,8 @@ impl App {
         }
     }
 
-    /* Whether a pasted string has a box to land in. Mirrors the order the key
-       handler routes in: pasted into the browser, each character would be a
-       command, and `D` is one of them. */
+    // Whether a paste has a box to land in. Mirrors the key handler's routing: in the browser every
+    // pasted character would be a command, `D` among them.
     pub fn takes_text(&self) -> bool {
         if self.confirm.is_some() {
             return false;
@@ -2998,16 +2995,21 @@ impl App {
 
     /* ---- Entry form (Wave 5.1) ---- */
 
-    /* A save to a vault with a hardware key waits on the key, which can mean a
-       touch. The loop draws this message first and then calls `flush_pending`,
-       the way an unlock draws "unlocking…" before Argon2. Edits made before
-       the frame is drawn share the one write. */
+    // A save that waits on a hardware key, which can need a touch. The loop draws this message first and
+    // then calls `flush_pending`, as an unlock draws "unlocking…". Edits before that frame share one write.
     fn defer_for_touch(&mut self, what: Pending) {
         self.pending = Some(what);
-        self.stage = "touch your key to save…".into();
+        // A message still on screen goes back in the queue rather than being lost to this one.
+        if self.flash_until.take().is_some() {
+            let showing = std::mem::take(&mut self.stage);
+            self.waiting.push_front((showing, self.level));
+        }
+        // A merge reads the other file and writes the result, and each one asks the key.
+        self.stage = match what {
+            Pending::Merge => "touch your key twice: to read the file, then to save…".into(),
+            Pending::Save | Pending::Overwrite => "touch your key to save…".into(),
+        };
         self.level = Level::Info;
-        self.flash_until = None;
-        self.waiting.clear();
     }
 
     pub fn has_pending(&self) -> bool {
@@ -3901,6 +3903,41 @@ impl App {
     /* `s` on an attachment writes it beside the vault, owner-only. The file
        leaves the vault's protection the moment it lands, so the mode is set
        from the first byte and the message says where it went. */
+    // `g` on an attachment: hands it to ssh-agent with the entry's password as the passphrase. Explicit, so
+    // it works without `ssh_agent = true`, and it is taken back out on lock.
+    pub fn fields_to_agent(&mut self) {
+        let Some(crate::vault::Extra::File { name, .. }) = self.fields_selected() else {
+            self.say("that is a field  ·  only an attachment can be a key");
+            return;
+        };
+        let name = name.clone();
+        let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
+            return;
+        };
+        let lifetime = self.ssh_lifetime;
+        let result = match (crate::agent::Agent::connect(), self.vault.as_ref()) {
+            (Ok(mut agent), Some(vault)) => {
+                let settings = vault
+                    .attachment_bytes(&id, crate::agent::SETTINGS)
+                    .and_then(|bytes| crate::agent::parse_settings(&bytes));
+                crate::agent::add_entry_key(&mut agent, vault, &id, &name, settings.as_ref(), lifetime)
+            }
+            (Err(why), _) => Err(why),
+            (_, None) => return,
+        };
+        match result {
+            // Already loaded at unlock: its own settings still decide whether lock removes it.
+            Ok(mut key) => {
+                key.remove_at_close = true;
+                if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
+                    self.agent_keys.push(key);
+                }
+                self.say(format!("{name} given to the agent for {lifetime}s"));
+            }
+            Err(why) => self.warn(format!("ssh agent: {why}")),
+        }
+    }
+
     pub fn fields_save(&mut self) {
         let Some(crate::vault::Extra::File { name, .. }) = self.fields_selected() else {
             self.say("that is a field  ·  y copies it");
@@ -5546,6 +5583,20 @@ pub mod tests {
         app.flush_pending();
         assert!(!app.has_pending() && !app.working(), "{}", app.stage);
         assert_eq!(on_disk(), 2, "both edits share the one write");
+    }
+
+    // The touch prompt takes the screen, but a message that was showing waits behind it.
+    #[test]
+    fn the_touch_prompt_queues_the_message_it_covers_and_names_two_touches_for_a_merge() {
+        let mut app = App::new();
+        app.expire_now();
+        app.say("copied username");
+        app.defer_for_touch(Pending::Save);
+        assert_eq!(app.stage, "touch your key to save…");
+        assert_eq!(app.waiting.front().map(|(m, _)| m.as_str()), Some("copied username"));
+
+        app.defer_for_touch(Pending::Merge);
+        assert!(app.stage.contains("twice"), "{}", app.stage);
     }
 
     // A vault with no hardware key saves where it always did.

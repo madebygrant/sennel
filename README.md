@@ -12,11 +12,12 @@ Your vault, in your terminal. Real KeePass files. A clipboard that cleans up aft
 - **One key per secret.** `y p U t` copy the username, password, url or one-time code.
 - **A clipboard with a timer.** Every copy wipes after 30 seconds, and the status bar counts it down.
 - **Fuzzy search that shows its work.** The matched characters light up in each row, so you can see why it is there. Titles, usernames, urls and group paths. Never your notes.
-- **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group.
+- **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group. `sennel export` takes everything back out as CSV or JSON.
 - **A generator on call.** `P` shows a password, passphrase or PIN (`t` switches), what it is worth in bits, and one key per class for whatever rule the site has this week. `^s` in the entry form fills the password box, and `^y` copies it before you save.
 - **It audits itself.** `!` lists every reused, weak, expired or empty password, worst first, and puts the cursor two keys from the fix.
 - **Deletes are never losses.** `D` moves to the same recycle bin KeePassXC uses. One `u` brings it back.
-- **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped.
+- **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped. Any SSH keys it gave your agent are taken back out.
+- **It keeps a copy.** The first save of a session keeps the file as it was, outside the folder your sync client watches.
 
 macOS and Linux.
 
@@ -74,6 +75,14 @@ the session at another without a restart. [More](docs/keys.md).
 
 **A YubiKey, if the vault has one.** `yubikey = "2"` opens KeePassXC vaults keyed to a challenge-response
 slot. Each save asks the key again, so Sennel says when to touch it. [More](docs/security.md).
+
+**SSH keys for your agent.** Off until you set `ssh_agent = true`. Then unlocking a vault gives `ssh-agent`
+the keys that KeePassXC's KeeAgent settings mark "add at database open", each with a lifetime so a crash
+cannot leave one there, and locking takes them back. [More](docs/security.md).
+
+**Backups that stay home.** `backups = 3` keeps copies in `~/.local/state/sennel/backups`, never beside the
+vault where Dropbox or Drive would upload them. A password change deletes them, because they still open with
+the old one. [More](docs/security.md).
 
 **Older vaults are welcome.** KDBX 3.1 opens read-only. `sennel convert` writes a verified KDBX 4
 copy beside the original. [More](docs/kdbx3.md).

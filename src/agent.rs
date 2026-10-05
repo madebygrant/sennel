@@ -41,8 +41,8 @@ impl Agent {
     pub fn connect_to(path: &Path) -> Result<Self, String> {
         let stream = UnixStream::connect(path)
             .map_err(|e| format!("cannot reach the agent at {} · {e}", path.display()))?;
-        // A confirm constraint waits on a person, so the wait is long but not endless.
-        let wait = Some(Duration::from_secs(30));
+        // These calls run on the UI thread, so an agent that never answers must not hold the screen.
+        let wait = Some(Duration::from_secs(3));
         let _ = stream.set_read_timeout(wait);
         let _ = stream.set_write_timeout(wait);
         Ok(Agent { stream })
@@ -173,14 +173,23 @@ pub fn parse_settings(bytes: &[u8]) -> Option<Settings> {
     let xml = decode_text(bytes)?;
     let tag = |name: &str| -> Option<String> {
         let open = format!("<{name}");
-        let at = xml.find(&open)? + open.len();
-        let rest = &xml[at..];
-        // `<Name/>` is an empty value, `<Name>text</Name>` is the text.
-        if rest.starts_with('/') {
-            return Some(String::new());
+        let mut from = 0;
+        loop {
+            let at = from + xml[from..].find(&open)? + open.len();
+            let rest = &xml[at..];
+            // `<NameMore>` is another tag: the name must end at a space, `/` or `>`.
+            if !rest.starts_with(|c: char| c == '>' || c == '/' || c.is_whitespace()) {
+                from = at;
+                continue;
+            }
+            let end = rest.find('>')?;
+            // `<Name/>` and `<Name />` are empty; attributes before `>` are skipped.
+            if rest[..end].trim_end().ends_with('/') {
+                return Some(String::new());
+            }
+            let body = &rest[end + 1..];
+            return Some(body[..body.find("</")?].trim().to_string());
         }
-        let rest = rest.strip_prefix('>')?;
-        Some(rest[..rest.find("</")?].trim().to_string())
     };
     let flag = |name: &str| tag(name).is_some_and(|v| v.eq_ignore_ascii_case("true"));
     xml.contains("<EntrySettings").then_some(())?;
@@ -223,9 +232,8 @@ pub struct Outcome {
     pub problems: Vec<String>,
 }
 
-/* The key in one attachment of one entry, decrypted with the entry's password and
-   given to the agent. The longest the agent may keep it is `max_lifetime`, or the
-   entry's own shorter one: a crash then cannot leave it there for good. */
+// One attachment's key, decrypted with the entry's password and handed to the agent for at most
+// `max_lifetime`, or the entry's own shorter lifetime, so a crash cannot leave it there for good.
 pub fn add_entry_key(
     agent: &mut Agent,
     vault: &Vault,
@@ -328,6 +336,18 @@ mod tests {
     }
 
     #[test]
+    fn tags_with_spaces_or_attributes_are_still_read() {
+        let odd = KEEPASSXC
+            .replace("<AllowUseOfSshKey>", "<AllowUseOfSshKey >")
+            .replace("<SelectedType>", "<SelectedType kind=\"x\">")
+            .replace("<FileName/>", "<FileName />");
+        assert_eq!(parse_settings(odd.as_bytes()).unwrap(), parse_settings(KEEPASSXC.as_bytes()).unwrap());
+        // A longer tag that starts with the same name is not the tag.
+        let prefixed = KEEPASSXC.replace("<EntrySettings>", "<EntrySettings>\n <AllowUseOfSshKeyX>false</AllowUseOfSshKeyX>");
+        assert!(parse_settings(prefixed.as_bytes()).unwrap().allow);
+    }
+
+    #[test]
     fn keeagent_writes_utf16_and_a_file_location_is_not_an_attachment() {
         let xml = KEEPASSXC.replace("attachment</Sel", "file</Sel").replace("<FileName/>", "<FileName>/k</FileName>");
         let mut utf16 = vec![0xff, 0xfe];
@@ -359,9 +379,8 @@ mod tests {
         assert_eq!(out, [0, 0, 0, 0]);
     }
 
-    /* The one check that the wire format is right: a real ssh-agent on a private socket takes every
-       key type, lists it by fingerprint, honours the remove, and obeys a vault's KeeAgent entry.
-       Does nothing on a machine without OpenSSH's tools. */
+    // Checks the wire format against a real ssh-agent on a private socket: every key type, removal, and a
+    // vault's KeeAgent entry. Does nothing on a machine without OpenSSH's tools.
     #[test]
     fn a_real_agent_takes_every_key_type_and_a_vaults_keeagent_entry() {
         use std::process::{Command, Stdio};

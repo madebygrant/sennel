@@ -55,8 +55,8 @@ pub fn render(vault: &Vault, format: ExportFormat, group: Option<&str>) -> Resul
             out.push_str("Group,Title,Username,Password,URL,Notes,TOTP\n");
             for row in &rows {
                 let e = &row.entry;
-                let otp = raw_otp(e).unwrap_or_default();
-                for (i, cell) in [&row.group, e.title(), e.username(), e.password(), e.url(), e.notes(), &otp]
+                let otp = Zeroizing::new(raw_otp(e).unwrap_or_default());
+                for (i, cell) in [row.group.as_str(), e.title(), e.username(), e.password(), e.url(), e.notes(), otp.as_str()]
                     .into_iter()
                     .enumerate()
                 {
@@ -79,7 +79,7 @@ pub fn render(vault: &Vault, format: ExportFormat, group: Option<&str>) -> Resul
             for (i, row) in rows.iter().enumerate() {
                 let e = &row.entry;
                 out.push_str(if i == 0 { "    {" } else { ",\n    {" });
-                let otp = raw_otp(e);
+                let otp = raw_otp(e).map(Zeroizing::new);
                 let mut first = true;
                 let mut key = |out: &mut String, name: &str| {
                     out.push_str(if first { "\n      " } else { ",\n      " });
@@ -100,7 +100,7 @@ pub fn render(vault: &Vault, format: ExportFormat, group: Option<&str>) -> Resul
                 }
                 key(&mut out, "totp");
                 match &otp {
-                    Some(url) => push_json(&mut out, url),
+                    Some(url) => push_json(&mut out, url.as_str()),
                     None => out.push_str("null"),
                 }
                 key(&mut out, "tags");
