@@ -89,3 +89,13 @@ mod imp {
         }
     }
 }
+
+impl crate::session::Seal for Sealed {
+    fn seal(secret: &[u8]) -> Result<Self, String> {
+        seal(secret)
+    }
+
+    fn open(&self) -> Result<zeroize::Zeroizing<Vec<u8>>, Refused> {
+        Sealed::open(self)
+    }
+}

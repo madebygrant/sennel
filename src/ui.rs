@@ -277,7 +277,7 @@ const PREVIEW_FROM: u16 = 100;
 
 fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
-    if app.vault.is_none() {
+    if !app.session.is_open() {
         frame.render_widget(Paragraph::new(Line::from(p.faint(" no vault open"))), area);
         return;
     }
@@ -562,16 +562,16 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|(id, depth)| {
             let selected = Some(*id) == app.group_cursor;
             let (name, expanded) = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .and_then(|v| v.get_group(id))
                 .map(|g| (g.name.clone(), g.is_expanded))
                 .unwrap_or_default();
             /* ▸/▾ only where folding means something: a leaf gets blanks so
                names still line up down the pane. */
             let has_children = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .is_some_and(|v| !v.groups_in(id).is_empty());
             let branch = if !has_children {
                 "  "
@@ -581,8 +581,8 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 "▸ "
             };
             let binned = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .is_some_and(|v| v.in_recycle_bin(id));
             /* A glyph as well as the dimming, for the same reason the pane
                marker is a glyph: under NO_COLOR every shade collapses to the
@@ -671,18 +671,18 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|id| {
             let selected = Some(*id) == app.entry_cursor;
             let has_code = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .and_then(|v| v.get_entry(id))
                 .is_some_and(|e| crate::vault::raw_otp(&e).is_some());
             let expired = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .and_then(|v| v.get_entry(id))
                 .is_some_and(|e| crate::vault::expired(&e));
             let (title, user, group) = app
-                .vault
-                .as_ref()
+                .session
+                .vault()
                 .and_then(|v| {
                     let entry = v.get_entry(id)?;
                     let path = v
@@ -1254,7 +1254,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::new().fg(p.accent),
         ));
     }
-    if let Some(vault) = &app.vault {
+    if let Some(vault) = app.session.vault() {
         let groups = app.group_tree().len();
         let entries = vault.entry_count();
         let g = if groups == 1 { "group" } else { "groups" };
@@ -1316,8 +1316,8 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         p.faint(match crate::vault::tag_needle(needle) {
             Some(prefix) => {
                 let known: Vec<String> = app
-                    .vault
-                    .as_ref()
+                    .session
+                    .vault()
                     .map(crate::vault::all_tags)
                     .unwrap_or_default()
                     .into_iter()
@@ -2116,8 +2116,8 @@ fn draw_history(frame: &mut Frame, app: &App) {
         return;
     };
     let title = app
-        .vault
-        .as_ref()
+        .session
+        .vault()
         .and_then(|v| v.get_entry(&history.entry).map(|e| e.title().to_string()))
         .unwrap_or_default();
     let area = frame.area();
@@ -2175,8 +2175,8 @@ fn draw_fields(frame: &mut Frame, app: &App) {
         return;
     };
     let title = app
-        .vault
-        .as_ref()
+        .session
+        .vault()
         .and_then(|v| v.get_entry(&fields.entry).map(|e| e.title().to_string()))
         .unwrap_or_default();
     let area = frame.area();
@@ -2313,8 +2313,8 @@ fn draw_audit(frame: &mut Frame, app: &App) {
     for (n, (id, issue)) in audit.rows.iter().enumerate().skip(first).take(room) {
         let live = n == audit.cursor;
         let title = app
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .and_then(|v| v.get_entry(id).map(|e| e.title().to_string()))
             .unwrap_or_default();
         let say = issue.say();
@@ -2369,8 +2369,8 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
         return;
     };
     let file = app
-        .vault
-        .as_ref()
+        .session
+        .vault()
         .and_then(|v| v.path())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
@@ -3104,7 +3104,7 @@ mod tests {
         /* An entry with no url has no url target, and the password row moves
            up — which is the whole reason the map is rebuilt by the draw. */
         let bare = {
-            let vault = app.vault.as_mut().unwrap();
+            let vault = app.session.vault_mut().unwrap();
             vault.create_entry(&root, "bare", "u", "p", "", "").unwrap()
         };
         app.snap();

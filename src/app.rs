@@ -2,12 +2,17 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use keepass::db::{Entry, EntryId, GroupId};
+use keepass::db::{EntryId, GroupId};
 use ratatui::layout::{Position, Rect};
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
-use crate::vault::{EntryExt, Vault, VaultError, YubiSpec};
+use crate::vault::{EntryExt, Vault, YubiSpec};
+use sennel_core::session::{
+    AgentReport, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent, Resolve,
+    SaveNow, Saved, Sealing, Session, UnlockError, Undone, Unlocked,
+};
+use sennel_core::touchid::Refused;
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
    the browser has nothing to act on, so it is a screen and not a prompt. */
@@ -266,36 +271,6 @@ pub struct Form {
     pub reveal: bool,
 }
 
-/* `YYYY-MM-DD`, or empty for "does not expire". One spelling, because a box
-   that guesses between 03/04 and 04/03 will eventually guess wrong about
-   somebody's certificate.
-
-   The stored stamp is a datetime and this is a date, so it lands at the end
-   of the day named: an expiry of "2026-09-16" should not go off at midnight
-   that morning, which is what taking the date alone would do. */
-fn parse_expiry(text: &str) -> Result<Option<chrono::NaiveDateTime>, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-        .map_err(|_| format!("{text:?} is not a date · use YYYY-MM-DD, or leave it empty"))?;
-    let at = date
-        .and_hms_opt(23, 59, 59)
-        .ok_or_else(|| "that date has no end".to_string())?;
-    Ok(Some(at))
-}
-
-/* Commas, because that is how a person writes a short list. Whitespace round
-   each one is trimmed and empties are dropped, so "work, , urgent," is two
-   tags rather than four. */
-fn split_tags(text: &str) -> Vec<String> {
-    text.split(',')
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect()
-}
-
 /* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
    so unlike the entry form there is no field cycling — just a value, a caret
    and the same char-index rule as every other box. */
@@ -448,51 +423,7 @@ pub enum CopyRow {
    having to schedule a redraw. */
 const GLOW: Duration = Duration::from_millis(700);
 
-/* Something sitting on the shelf between `X` and `V`. The id travels alone:
-   the title is looked up fresh wherever it is shown, so a rename between the
-   cut and the paste still reads right, and a deleted source disarms itself
-   rather than pasting a ghost. */
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Cut {
-    Entry(EntryId),
-    Group(GroupId),
-}
-
-/// A write that waits for the hardware key, so the screen can ask for the touch first.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Pending {
-    Save,
-    Overwrite,
-    Merge,
-}
-
-/* One step of work, undone. The snapshot carries the whole entry — secrets
-   included, zeroized on drop like every other copy — because a field-by-field
-   restore would miss the timestamps the form never touches. */
-pub enum Undo {
-    /// Before-state of an edited entry; restore swaps it wholesale.
-    Edit { id: EntryId, before: Entry },
-    /// An entry destroyed inside the bin, which only a snapshot brings back.
-    Delete {
-        id: EntryId,
-        parent: GroupId,
-        before: Entry,
-    },
-    /* An entry moved to the bin. It still exists, so undo is a move home and
-       the snapshot rides along only to name it in the status bar. */
-    Recycle {
-        id: EntryId,
-        parent: GroupId,
-        before: Entry,
-    },
-    /// A group moved to the bin, with everything under it.
-    RecycleGroup { id: GroupId, parent: GroupId, title: String },
-    /// An added entry that `u` removes again.
-    AddEntry { id: EntryId, title: String },
-    /// A group rename that `u` turns back.
-    Rename { id: GroupId, before: String },
-}
-
+pub use sennel_core::session::{Cut, Pending, Undo};
 pub use sennel_core::sort::SortOrder;
 
 /* A flash is timed by its length: four fixed seconds fits "saved" and not a
@@ -679,6 +610,8 @@ struct RowsKey {
 }
 
 pub struct App {
+    /// The open vault and what the session keeps about it.
+    pub session: Session<crate::touchid::Sealed>,
     pub tick: usize,
     pub view: View,
     pub show_help: bool,
@@ -705,8 +638,6 @@ pub struct App {
     /* Selection state. Cursors hold ids, never row positions: rows shift
        under every mutation and under the Wave 5/6 sort and filter views, while
        an id still names the same group or entry. */
-    /// The open vault. None while locked; `try_unlock` opens real KDBX here.
-    pub vault: Option<Vault>,
     /// Selected group. Always valid once a vault is open (`snap` keeps it so).
     pub group_cursor: Option<GroupId>,
     /// Selected entry within the cursor group. None when the group is empty.
@@ -796,20 +727,11 @@ pub struct App {
     /// Plain-text password on the unlock screen. `^r` flips it, the way the
     /// browser's `*` flips the detail pane; a fresh unlock starts hidden.
     pub unlock_reveal: bool,
-    /// Unsaved changes. Set by every vault mutation; quitting while set asks.
-    dirty: bool,
-    /* Bumped by `persist`, which every mutation calls. The row cache keys on
-       it, so a cache can never outlive the vault it described. */
-    revision: u64,
     /* The last answer `entry_rows` gave, and what it was an answer to.
        Ranking the whole vault took 45ms on five thousand entries and ran two
        or three times a frame, so typing in the search band redrew at about
        twelve frames a second. */
     rows_cache: Option<(RowsKey, Vec<EntryId>)>,
-    /// A save was refused because the file changed underneath. The next `^s`
-    /// means "overwrite theirs", which is a thing to do on purpose or not at
-    /// all.
-    overwrite_armed: bool,
     /* The modal entry editor. None when closed; the browser hands its keys
        over while Some, the way the unlock screen does. */
     pub form: Option<Form>,
@@ -825,15 +747,6 @@ pub struct App {
     pub fields: Option<Fields>,
     /// Old versions of an entry, when that screen is open.
     pub history: Option<History>,
-    /* Armed cut waiting for V. None when the shelf is empty; Esc unwinds it
-       before its usual report so a mis-cut is one press from undone. */
-    pub cut: Option<Cut>,
-    /* A stack, newest last, pushed by every mutation and popped by `u`.
-       Bounded, because each Delete carries a whole entry and an unbounded
-       stack is an unbounded pile of plaintext passwords in memory — the
-       snapshots zeroize on drop, so dropping the oldest is also the thing
-       that wipes it. */
-    pub undo: Vec<Undo>,
     /* Live fuzzy search. None when the band is closed; Some holds the typed
        needle and filters the entries pane as a predicate — the vault itself
        is never touched. `enter` closes the band keeping the filter; Esc
@@ -852,31 +765,10 @@ pub struct App {
     /// Ranks the current needle against every entry's haystack, reusing its
     /// scratch buffers. Lives here so the band and `entry_rows` share one.
     pub searcher: crate::search::Searcher,
-    /* Idle auto-lock. `None` is off. The deadline is checked once per frame
-       in `run`, never in the draw, which must not mutate. */
-    pub lock_after: Option<Duration>,
-    // Backups kept once a vault is open, and where; 0 is off.
-    backups: usize,
-    backup_dir: PathBuf,
-    // Keys given to ssh-agent for this vault, so they can be taken back out.
-    ssh_agent: bool,
-    ssh_lifetime: u32,
-    agent_keys: Vec<crate::agent::Loaded>,
     // The configured YubiKey slot, and whether the next unlock uses it (`^y`).
     yubikey: Option<YubiSpec>,
     use_yubikey: bool,
-    // `touch_id` from the config. A lock keeps `quick`: it is what the lock screen opens with.
-    pub touch_id: bool,
-    quick: Option<(PathBuf, crate::touchid::Sealed)>,
-    // Whether `db_path` is the vault `quick` was sealed for, kept by `refresh_db_state`.
-    quick_here: bool,
-    // A write waiting for a frame that says "touch your key" before it blocks.
-    pending: Option<Pending>,
     flushing: bool,
-    pub last_activity: Instant,
-    // Wall-clock twin of `last_activity`: `Instant` stops during suspend on macOS
-    // and Linux. `idle_expired` takes the longer of the two readings.
-    pub last_activity_wall: std::time::SystemTime,
     /* The OS clipboard with its auto-clear timer. `None` until startup wires
        it from the config: `App::new` must stay callable in tests without
        touching platform clipboard state. */
@@ -886,6 +778,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         App {
+            session: Session::new(),
             tick: 0,
             view: View::Unlock,
             show_help: false,
@@ -898,7 +791,6 @@ impl App {
             waiting: VecDeque::new(),
             confirm: None,
             quit: false,
-            vault: None,
             group_cursor: None,
             entry_cursor: None,
             active_pane: Pane::Groups,
@@ -942,38 +834,21 @@ impl App {
             unlock_confirm: secret_box(),
             caret: 0,
             unlock_reveal: false,
-            dirty: false,
-            revision: 0,
             rows_cache: None,
-            overwrite_armed: false,
             form: None,
             group_prompt: None,
             rekey: None,
             audit: None,
             fields: None,
             history: None,
-            cut: None,
-            undo: Vec::new(),
             search: None,
             band: false,
             search_global: true,
             search_caret: 0,
             searcher: crate::search::Searcher::new(),
-            lock_after: None,
-            backups: 0,
-            backup_dir: PathBuf::new(),
             yubikey: None,
             use_yubikey: false,
-            touch_id: false,
-            quick: None,
-            quick_here: false,
-            ssh_agent: false,
-            ssh_lifetime: 3600,
-            agent_keys: Vec::new(),
-            pending: None,
             flushing: false,
-            last_activity: Instant::now(),
-            last_activity_wall: std::time::SystemTime::now(),
         }
     }
 
@@ -1067,7 +942,7 @@ impl App {
     /// reporting and `q` asking, so the safe key is safe on the same set of
     /// screens that ask about it.
     pub fn working(&self) -> bool {
-        self.dirty
+        self.session.is_dirty()
     }
 
     /// Mark the vault as holding unsaved changes. Called by every mutation
@@ -1077,7 +952,7 @@ impl App {
        pub so tests can arm the quit guard directly. */
     #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.session.mark_dirty();
     }
 
     /* Flip the detail pane between bullets and the real password. Showing
@@ -1254,33 +1129,17 @@ impl App {
        a `Duration::ZERO` deadline would lock on the next frame, which reads
        as the unlock failing. `None` is the absence of a deadline. */
     pub fn set_ssh_agent(&mut self, on: bool, lifetime: u32) {
-        self.ssh_agent = on;
-        self.ssh_lifetime = lifetime;
+        self.session.set_ssh_agent(on, lifetime);
     }
 
-    // Gives the agent the keys this vault's KeeAgent entries ask for at unlock. Opt-in, since it hands keys
-    // to another process. A missing agent or wrong passphrase is a warning, never a failed unlock.
-    fn agent_load(&mut self) {
-        let Some(vault) = self.vault.as_ref().filter(|_| self.ssh_agent) else {
-            return;
-        };
-        let mut agent = match crate::agent::Agent::connect() {
-            Ok(agent) => agent,
-            Err(why) => return self.warn(format!("ssh agent: {why}")),
-        };
-        let outcome = crate::agent::load_vault(&mut agent, vault, self.ssh_lifetime);
-        let added = outcome.added.len();
-        for key in outcome.added {
-            if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
-                self.agent_keys.push(key);
-            }
-        }
-        match outcome.problems.split_first() {
+    // A missing agent or a wrong passphrase is a warning, never a failed unlock.
+    fn report_agent(&mut self, report: AgentReport) {
+        match report.problems.split_first() {
             Some((first, [])) => self.warn(format!("ssh agent: {first}")),
             Some((first, rest)) => self.warn(format!("ssh agent: {first} (+{} more)", rest.len())),
-            None if added > 0 => {
-                let plural = if added == 1 { "key" } else { "keys" };
-                self.say(format!("{added} ssh {plural} added to the agent for {}s", self.ssh_lifetime));
+            None if report.added > 0 => {
+                let plural = if report.added == 1 { "key" } else { "keys" };
+                self.say(format!("{} ssh {plural} added to the agent for {}s", report.added, report.lifetime));
             }
             None => {}
         }
@@ -1289,15 +1148,11 @@ impl App {
     // Takes back the keys this session gave out, except those whose settings say to leave them. Those
     // expire on their own, as every key would after a crash.
     pub fn agent_release(&mut self) {
-        let (remove, _kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.agent_keys).into_iter().partition(|k| k.remove_at_close);
-        if remove.is_empty() {
-            return;
-        }
-        let failed = match crate::agent::Agent::connect() {
-            Ok(mut agent) => remove.iter().filter(|k| agent.remove(&k.blob).is_err()).count(),
-            Err(_) => remove.len(),
-        };
+        let failed = self.session.agent_release();
+        self.report_released(failed);
+    }
+
+    fn report_released(&mut self, failed: usize) {
         if failed > 0 {
             self.warn(format!("ssh agent: {failed} key(s) not removed · they expire on their own"));
         }
@@ -1333,7 +1188,7 @@ impl App {
 
     // Whether Enter on the lock screen asks for a fingerprint instead of the box.
     pub fn quick_ready(&self) -> bool {
-        self.quick_here && self.quick.is_some() && self.unlock_password.is_empty() && !self.unlock_new
+        self.session.quick_here() && self.unlock_password.is_empty() && !self.unlock_new
     }
 
     // The fingerprint prompt, then the unlock. False when this vault has nothing sealed.
@@ -1341,42 +1196,36 @@ impl App {
         if !self.sync_db_path_from_file_box() || !self.quick_ready() {
             return false;
         }
-        let Some((_, sealed)) = &self.quick else {
-            return false;
-        };
-        match sealed.open() {
-            // Changed somewhere else since it was sealed, so it would fail the same way every time.
-            Ok(mut password) => {
-                if self.unlock_with(&mut password, key_file, true) {
-                    self.quick = None;
-                }
-            }
-            Err(crate::touchid::Refused::Again(why)) => {
+        // Absolute, as a typed unlock leaves it, so the library and the header name the same file.
+        self.db_path = self.db_path.as_deref().map(crate::config::absolute);
+        let yubikey = self.active_yubikey().cloned();
+        match self.session.quick_unlock(key_file, yubikey.as_ref()) {
+            Ok(unlocked) => self.unlocked(unlocked),
+            Err(QuickError::Nothing) => return false,
+            Err(QuickError::Refused(Refused::Again(why))) => {
                 self.warn(format!("Touch ID {why}  ·  enter asks again, or type the password"));
             }
-            Err(crate::touchid::Refused::Void(why)) => {
-                self.quick = None;
+            Err(QuickError::Refused(Refused::Void(why))) => {
                 self.warn(format!("Touch ID cannot open this any more  ·  {why}  ·  type the password"));
             }
+            Err(QuickError::Unlock(e)) => self.unlock_failed(e),
         }
         true
     }
 
     pub fn set_backups(&mut self, keep: usize, dir: PathBuf) {
-        self.backups = keep;
-        self.backup_dir = dir;
+        self.session.set_backups(keep, dir);
     }
 
     pub fn set_lock_timeout(&mut self, secs: u64) {
-        self.lock_after = (secs > 0).then(|| Duration::from_secs(secs));
+        self.session.set_lock_timeout(secs);
     }
 
     /// A keypress happened, so the idle clock restarts. Called at the top of
     /// key handling rather than per frame, or every redraw would defer the
     /// lock and an idle vault would never close.
     pub fn touch(&mut self) {
-        self.last_activity = Instant::now();
-        self.last_activity_wall = std::time::SystemTime::now();
+        self.session.touch();
     }
 
     /* Whether the vault has sat untouched past the deadline. Takes the clock
@@ -1388,14 +1237,7 @@ impl App {
        suspend, and the wall reading alone would be steerable by anything that
        sets the clock back. */
     pub fn idle_expired(&self, now: Instant) -> bool {
-        let Some(after) = self.lock_after else {
-            return false;
-        };
-        let idle = now
-            .duration_since(self.last_activity)
-            // A backwards jump reads as no time passed, not as negative time.
-            .max(self.last_activity_wall.elapsed().unwrap_or_default());
-        self.view == View::Browser && self.vault.is_some() && idle >= after
+        self.view == View::Browser && self.session.idle_expired(now)
     }
 
     /* Drop the vault and go back behind the password prompt. Dropping is the
@@ -1406,7 +1248,7 @@ impl App {
         if !self.idle_expired(Instant::now()) {
             return;
         }
-        let secs = self.lock_after.map_or(0, |d| d.as_secs());
+        let secs = self.session.lock_after.map_or(0, |d| d.as_secs());
         self.lock();
         let hint = if self.quick_ready() { "  ·  enter for Touch ID" } else { "" };
         self.warn(format!("locked after {secs} seconds idle{hint}"));
@@ -1415,7 +1257,7 @@ impl App {
     /* `^l`: the same wipe on purpose rather than on a timer. Locking used to
        mean quitting, which is a strange thing to have to do to step away. */
     pub fn lock_now(&mut self) {
-        if self.vault.is_none() {
+        if !self.session.is_open() {
             self.say("already locked");
             return;
         }
@@ -1430,8 +1272,8 @@ impl App {
        wipe: secrets live in `ProtectedString` and the retained key, both of
        which zeroize on drop, so nothing may be copied out first. */
     fn lock(&mut self) {
-        self.agent_release();
-        self.vault = None;
+        let failed = self.session.lock();
+        self.report_released(failed);
         self.group_cursor = None;
         self.entry_cursor = None;
         /* Zeroized, not cleared: `String::clear` sets the length to zero and
@@ -1441,9 +1283,6 @@ impl App {
         self.unlock_confirm.zeroize();
         self.unlock_reveal = false;
         self.caret = 0;
-        self.dirty = false;
-        self.overwrite_armed = false;
-        self.pending = None;
         /* Nothing that was about the open vault may outlive it: a form, a
            kept filter or an armed cut would come back over the next one. */
         self.detail = false;
@@ -1462,12 +1301,8 @@ impl App {
         // A generated password on screen is a secret on screen. Dropping wipes it.
         self.mint = None;
         self.confirm = None;
-        self.cut = None;
         self.close_menu();
         self.commands = None;
-        /* Dropping the snapshots zeroizes them: an undo stack that outlived a
-           lock would be a pile of plaintext passwords behind a locked screen. */
-        self.undo.clear();
         self.search = None;
         self.band = false;
         self.view = View::Unlock;
@@ -1491,7 +1326,7 @@ impl App {
     /// The open vault's file name, or empty while locked. The header's
     /// right-hand end, so identity survives a flash.
     pub fn vault_name(&self) -> String {
-        match (&self.vault, &self.db_path) {
+        match (self.session.vault(), &self.db_path) {
             (Some(_), Some(path)) => vault_name(path),
             _ => String::new(),
         }
@@ -1526,7 +1361,7 @@ impl App {
     /// What the terminal window is called. The vault while one is open, so a
     /// tab strip of terminals says which is which.
     pub fn window_title(&self) -> String {
-        match (&self.vault, &self.db_path) {
+        match (self.session.vault(), &self.db_path) {
             (Some(_), Some(path)) => format!("Sennel — {}", vault_name(path)),
             _ => "Sennel".to_string(),
         }
@@ -1644,11 +1479,7 @@ impl App {
        changes when the file does. */
     pub fn refresh_db_state(&mut self) {
         self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
-        // Through `absolute`: ^o and the file box spell the same vault differently.
-        self.quick_here = match (&self.quick, &self.db_path) {
-            (Some((db, _)), Some(path)) => crate::config::absolute(path) == *db,
-            _ => false,
-        };
+        self.session.aim(self.db_path.as_deref());
     }
 
     // Point `db_path` at the file box when it names a different vault, so Tab-past
@@ -1692,141 +1523,103 @@ impl App {
     }
 
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
-        self.unlock_with(password, key_file, false);
-    }
-
-    // True when the vault refused the password or key file, rather than failing to open.
-    fn unlock_with(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>, from_sealed: bool) -> bool {
         self.unlocking = false;
         /* A path typed in the file box but never confirmed with Enter (Tab
            jumped to the password instead) is still the vault the user means:
            apply it here so unlock reads the path off the box it was typed in
-           rather than opening the previous vault. This used to apply only
-           when no vault was configured, so switching files via the file box
-           silently unlocked the old database — and a stale `unlock_new`
-           either forced a confirm on an existing vault or skipped it for a
-           new one. */
+           rather than opening the previous vault. */
         if !self.sync_db_path_from_file_box() {
             // Enter on the password box skips the file box's own check.
             self.warn("another user's ~ cannot be resolved  ·  type the full path");
             password.zeroize();
-            return false;
+            return;
         }
         let Some(path) = self.db_path.clone() else {
             self.warn("no database configured  ·  run `Sennel --help` for --db");
             password.zeroize();
-            return false;
+            return;
         };
         /* Made absolute here, once, so everything downstream agrees on what
            this vault is called: `--db vault.kdbx` is relative to the
-           directory it was typed in, and a library row spelled that way names
-           a different file from anywhere else — or nothing at all, which
-           would offer to create an empty vault over the top of it. */
+           directory it was typed in. */
         let path = crate::config::absolute(&path);
         self.db_path = Some(path.clone());
-        if password.is_empty() {
-            self.warn("empty password  ·  type one or ^c quits");
-            password.zeroize();
-            return false;
-        }
-        /* Borrow, do not copy: a lossy into_owned() would leave an extra
-           plaintext master password that nothing zeroizes, and it would
-           silently rewrite non-UTF8 bytes into a different (wrong) password.
-           keepass 0.13's DatabaseKey speaks &str, so refuse raw-byte
-           passwords honestly instead of guessing at them. */
-        let Ok(pw) = std::str::from_utf8(password) else {
-            self.error("password has bytes that are not text · keepass cannot use it");
-            password.zeroize();
-            return false;
-        };
         let yubikey = self.active_yubikey().cloned();
-        let result = if self.unlock_new {
-            if self.unlock_confirm.as_bytes() != password.as_slice() {
+        // Borrowed, not copied: the confirm box is the new password when the two match.
+        let confirm = self.unlock_new.then_some(self.unlock_confirm.as_bytes());
+        let result = self.session.unlock(&path, password, key_file, yubikey.as_ref(), confirm);
+        match result {
+            Ok(unlocked) => self.unlocked(unlocked),
+            Err(e) => self.unlock_failed(e),
+        }
+    }
+
+    fn unlocked(&mut self, unlocked: Unlocked) {
+        let path = self.db_path.clone().unwrap_or_default();
+        /* Typed secrets do not linger behind the browser. The key-file
+           path stays: it names a file, not a secret, and prefills the
+           next unlock after an auto-lock. */
+        self.unlock_password.zeroize();
+        self.unlock_confirm.zeroize();
+        /* The next screen opens on bullets again: a reveal is for
+           reading the box you are on, never a browser-side default. */
+        self.unlock_reveal = false;
+        self.unlock_field = UnlockField::Password;
+        self.caret = 0;
+        self.unlock_new = false;
+        self.enter_browser();
+        self.report_agent(unlocked.agent);
+        /* Which vault is open, for the rest of the session: pointing
+           one session at any vault is the app's headline feature, and
+           "ready" made two vaults look identical. */
+        self.resting = vault_name(&path);
+        if unlocked.created {
+            // The first screen of an empty vault, which has nothing to show.
+            self.say(format!("created {}  ·  a adds your first entry", vault_name(&path)));
+        } else {
+            let n = unlocked.entries;
+            let plural = if n == 1 { "entry" } else { "entries" };
+            self.say(format!("unlocked {n} {plural}"));
+        }
+        if let Sealing::Off(why) = unlocked.sealing {
+            self.warn(format!("Touch ID off this session  ·  {why}"));
+        }
+        /* Said at unlock, not at the first failed autosave: an older
+           KDBX opens fine and can never be written, and finding that
+           out ten minutes into editing means ten minutes of work with
+           nowhere to go. */
+        if let Some(what) = unlocked.read_only {
+            self.error(format!(
+                "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
+            ));
+        }
+        /* A vault that opened is a vault worth remembering. Written after
+           the unlock, never before, so a mistyped path cannot become the
+           default. */
+        self.remember_vault(&path);
+        self.remember_recent(&path);
+    }
+
+    fn unlock_failed(&mut self, e: UnlockError) {
+        match e {
+            UnlockError::Empty => self.warn("empty password  ·  type one or ^c quits"),
+            UnlockError::NotText => {
+                self.error("password has bytes that are not text · keepass cannot use it")
+            }
+            UnlockError::Mismatch => {
                 self.warn("passwords differ  ·  retype both fields");
                 self.unlock_confirm.zeroize();
                 self.caret = 0;
-                password.zeroize();
-                return false;
             }
-            let mut vault = Vault::new();
-            vault.save_as_with(&path, pw, key_file, yubikey.as_ref()).map(|()| vault)
-        } else {
-            Vault::open_with(&path, pw, key_file, yubikey.as_ref())
-        };
-        // Sealed before the wipe, while these bytes are still the password.
-        let sealed = (result.is_ok() && self.touch_id && !from_sealed)
-            .then(|| crate::touchid::seal(password));
-        let refused = matches!(result, Err(VaultError::WrongPassword));
-        // The typed bytes have served: the key inside the vault is a copy.
-        password.zeroize();
-        match result {
-            Ok(vault) => {
-                let n = vault.entry_count();
-                /* Typed secrets do not linger behind the browser. The key-file
-                   path stays: it names a file, not a secret, and prefills the
-                   next unlock after an auto-lock. */
-                self.unlock_password.zeroize();
-                self.unlock_confirm.zeroize();
-                /* The next screen opens on bullets again: a reveal is for
-                   reading the box you are on, never a browser-side default. */
-                self.unlock_reveal = false;
-                self.unlock_field = UnlockField::Password;
-                self.caret = 0;
-                /* Read before it is cleared. It used to be cleared first and
-                   read after, so `created` was always false and the line
-                   telling a brand-new vault's owner what to press next had
-                   never once been shown. */
-                let created = self.unlock_new;
-                self.unlock_new = false;
-                /* Said at unlock, not at the first failed autosave: an older
-                   KDBX opens fine and can never be written, and finding that
-                   out ten minutes into editing means ten minutes of work with
-                   nowhere to go. */
-                let read_only = (!vault.writable()).then(|| vault.format());
-                self.open_vault(vault);
-                /* Which vault is open, for the rest of the session: pointing
-                   one session at any vault is the app's headline feature, and
-                   "ready" made two vaults look identical. */
-                self.resting = vault_name(&path);
-                if created {
-                    // The first screen of an empty vault, which has nothing to show.
-                    self.say(format!("created {}  ·  a adds your first entry", vault_name(&path)));
-                } else {
-                    let plural = if n == 1 { "entry" } else { "entries" };
-                    self.say(format!("unlocked {n} {plural}"));
-                }
-                match sealed {
-                    Some(Ok(sealed)) => {
-                        self.quick = Some((path.clone(), sealed));
-                        self.quick_here = true;
-                    }
-                    // Off for the session, so a Mac without a sensor warns once, not per unlock.
-                    Some(Err(why)) => {
-                        self.quick = None;
-                        self.touch_id = false;
-                        self.warn(format!("Touch ID off this session  ·  {why}"));
-                    }
-                    None => {}
-                }
-                if let Some(what) = read_only {
-                    self.error(format!(
-                        "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
-                    ));
-                }
-                /* A vault that opened is a vault worth remembering: pointing
-                   the session somewhere new used to last exactly as long as
-                   the session. Written after the unlock, never before, so a
-                   mistyped path cannot become the default. */
-                self.remember_vault(&path);
-                self.remember_recent(&path);
-            }
-            Err(VaultError::WrongPassword) => {
+            UnlockError::WrongPassword => {
                 self.unlock_reveal = false;
                 self.error("wrong password or key file  ·  try again");
             }
-            Err(e) => self.error(format!("cannot open {}  ·  {e}", path.display())),
+            UnlockError::Open(e) => {
+                let path = self.db_path.clone().unwrap_or_default();
+                self.error(format!("cannot open {}  ·  {e}", path.display()));
+            }
         }
-        refused
     }
 
     /// Tab and shift-Tab through the unlock boxes, wrapping. Three boxes, or
@@ -2476,23 +2269,27 @@ impl App {
         self.caret = self.active_unlock_value()[..start].chars().count();
     }
 
-    /// Opens a vault into the browser: cursor on the root, first entry (if
-    /// any) selected, groups pane active. The single entry point so Wave 2's
-    /// unlock path cannot leave half-initialised selection behind.
-    pub fn open_vault(&mut self, mut vault: Vault) {
-        // Unset (empty) in tests, which must not write backups anywhere.
-        if !self.backup_dir.as_os_str().is_empty() {
-            vault.set_backups(self.backups, &self.backup_dir);
-        }
+    // Tests open an in-memory vault this way; the unlock screen goes through `try_unlock`.
+    #[cfg(test)]
+    pub fn open_vault(&mut self, vault: Vault) {
+        let report = self.session.open(vault);
+        self.enter_browser();
+        self.report_agent(report);
+    }
+
+    // Cursor on the root, first entry (if any) selected, groups pane active, so no unlock
+    // path can leave half-initialised selection behind.
+    fn enter_browser(&mut self) {
+        let Some(vault) = self.session.vault() else {
+            return;
+        };
         let root = vault.root_id();
         self.group_cursor = Some(root);
         self.entry_cursor = vault.entries_in(&root).first().map(|e| e.id());
         self.active_pane = Pane::Groups;
         self.group_scroll = 0;
         self.entry_scroll = 0;
-        self.vault = Some(vault);
         self.view = View::Browser;
-        self.agent_load();
     }
 
     /* Pre-order walk of the whole tree as (id, depth) pairs. The groups pane
@@ -2500,7 +2297,7 @@ impl App {
        one scroll, and collapse (Wave 5) prunes it without touching the vault.
        Root is always first, so an empty tree still shows one row. */
     pub fn group_tree(&self) -> Vec<(GroupId, usize)> {
-        let Some(vault) = &self.vault else {
+        let Some(vault) = self.session.vault() else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -2546,7 +2343,7 @@ impl App {
 
     fn rows_key(&self) -> RowsKey {
         RowsKey {
-            revision: self.revision,
+            revision: self.session.revision(),
             needle: self.search.clone(),
             global: self.search_global,
             order: self.order,
@@ -2563,7 +2360,7 @@ impl App {
                 .search
                 .as_deref()
                 .is_some_and(|n| !n.is_empty());
-        let Some(vault) = &self.vault else {
+        let Some(vault) = self.session.vault() else {
             return Vec::new();
         };
         let mut entries: Vec<keepass::db::EntryRef<'_>> = if global {
@@ -2634,7 +2431,7 @@ impl App {
     /// The folder the cursor is in, as a path. What the tree cannot say once
     /// it starts truncating names.
     pub fn here(&self) -> String {
-        let (Some(vault), Some(id)) = (&self.vault, self.group_cursor) else {
+        let (Some(vault), Some(id)) = (self.session.vault(), self.group_cursor) else {
             return "no group".to_string();
         };
         vault
@@ -2645,14 +2442,14 @@ impl App {
 
     /// How many entries a group holds, for the counts in the tree.
     pub fn entries_in(&self, id: &GroupId) -> usize {
-        self.vault.as_ref().map_or(0, |v| v.count_in(id))
+        self.session.vault().map_or(0, |v| v.count_in(id))
     }
 
     pub fn entry_total(&self) -> usize {
         if !self.search_global {
             return self.group_cursor.map_or(0, |id| self.entries_in(&id));
         }
-        self.vault.as_ref().map_or(0, Vault::entry_count)
+        self.session.vault().map_or(0, Vault::entry_count)
     }
 
     /// How many rows the filter leaves visible, across the whole vault. The
@@ -2686,7 +2483,7 @@ impl App {
         let Some(id) = self.group_cursor else {
             return;
         };
-        let Some(vault) = &self.vault else {
+        let Some(vault) = self.session.vault() else {
             return;
         };
         if vault.groups_in(&id).is_empty() {
@@ -2697,8 +2494,7 @@ impl App {
             self.say("already folded");
             return;
         }
-        self.vault
-            .as_mut()
+        self.session.vault_mut()
             .expect("checked above")
             .set_expanded(&id, false);
     }
@@ -2706,7 +2502,7 @@ impl App {
     /// Right on the groups pane re-opens a folded group.
     pub fn expand_group(&mut self) {
         if let Some(id) = self.group_cursor
-            && let Some(vault) = &mut self.vault
+            && let Some(vault) = self.session.vault_mut()
         {
             vault.set_expanded(&id, true);
         }
@@ -3175,14 +2971,14 @@ impl App {
     }
 
     pub fn selected_group(&self) -> Option<keepass::db::GroupRef<'_>> {
-        let (vault, id) = (self.vault.as_ref()?, self.group_cursor?);
+        let (vault, id) = (self.session.vault()?, self.group_cursor?);
         vault.get_group(&id)
     }
 
     /// The root id of the open vault. Only reached from browser paths that
     /// already know a vault is open.
     fn root_id(&self) -> GroupId {
-        self.vault.as_ref().expect("browser keys need a vault").root_id()
+        self.session.vault().expect("browser keys need a vault").root_id()
     }
 
     /* Filtered out means not selected: the entry cursor may name an entry of
@@ -3191,7 +2987,7 @@ impl App {
        list is global then, and a hit from another folder is exactly the row
        the user asked to act on. */
     pub fn selected_entry(&self) -> Option<keepass::db::EntryRef<'_>> {
-        let (vault, group, id) = (self.vault.as_ref()?, self.group_cursor?, self.entry_cursor?);
+        let (vault, group, id) = (self.session.vault()?, self.group_cursor?, self.entry_cursor?);
         let searching = self.search.as_deref().is_some_and(|n| !n.is_empty());
         vault.get_entry(&id).filter(|_| {
             searching || vault.parent_group_of_entry(&id) == Some(group)
@@ -3207,7 +3003,7 @@ impl App {
            it runs before the autosave — so this, not `persist`, is the first
            moment the cached rows can be out of date. */
         self.rows_cache = None;
-        if self.vault.is_none() {
+        if !self.session.is_open() {
             self.group_cursor = None;
             self.entry_cursor = None;
             return;
@@ -3368,7 +3164,6 @@ impl App {
     // A save that waits on a hardware key, which can need a touch. The loop draws this message first and
     // then calls `flush_pending`, as an unlock draws "unlocking…". Edits before that frame share one write.
     fn defer_for_touch(&mut self, what: Pending) {
-        self.pending = Some(what);
         // A message still on screen goes back in the queue rather than being lost to this one.
         if self.flash_until.take().is_some() {
             let showing = std::mem::take(&mut self.stage);
@@ -3383,11 +3178,11 @@ impl App {
     }
 
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some()
+        self.session.pending().is_some()
     }
 
     pub fn flush_pending(&mut self) {
-        let Some(what) = self.pending.take() else {
+        let Some(what) = self.session.take_pending() else {
             return;
         };
         self.flushing = true;
@@ -3405,41 +3200,21 @@ impl App {
        An in-memory vault (tests) has no path: it cannot save, so it stays
        dirty rather than silently discarding. */
     pub fn persist(&mut self) {
-        /* Every mutation lands here on its way to disk, which makes it the
-           one place that can say "the vault is not what it was". */
-        self.revision = self.revision.wrapping_add(1);
         self.rows_cache = None;
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        if vault.path().is_none() {
-            self.dirty = true;
-            return;
-        }
-        if vault.has_challenge() && !self.flushing {
-            self.dirty = true;
-            self.defer_for_touch(Pending::Save);
-            return;
-        }
-        match vault.save() {
-            Ok(()) => {
-                self.dirty = false;
-                self.overwrite_armed = false;
-                if self.flushing {
-                    self.say("saved");
-                }
+        let saved = self.session.persist(self.flushing);
+        self.report_saved(saved);
+    }
+
+    fn report_saved(&mut self, saved: Saved) {
+        match saved {
+            Saved::Locked | Saved::NoFile => {}
+            Saved::Deferred(what) => self.defer_for_touch(what),
+            Saved::Written if self.flushing => self.say("saved"),
+            Saved::Written => {}
+            Saved::Conflict => {
+                self.error("vault changed on disk  ·  ^f merges  ·  ^s overwrites  ·  ^r reloads theirs")
             }
-            /* Somebody else wrote the file. Refusing is the whole point: the
-               alternative is this session quietly winning every race. */
-            Err(VaultError::ChangedOnDisk) => {
-                self.dirty = true;
-                self.overwrite_armed = true;
-                self.error("vault changed on disk  ·  ^f merges  ·  ^s overwrites  ·  ^r reloads theirs");
-            }
-            Err(e) => {
-                self.dirty = true;
-                self.error(format!("save failed  ·  {e} · kept in memory"));
-            }
+            Saved::Failed(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
         }
     }
 
@@ -3447,64 +3222,35 @@ impl App {
        presses out of habit — but it is also the retry after a failed save and
        the second press that overrides a file somebody else changed. */
     pub fn save_now(&mut self) {
-        let Some(vault) = &mut self.vault else {
-            self.say("no vault open to save");
-            return;
-        };
-        if vault.path().is_none() {
-            self.warn("this vault has no file yet  ·  nothing to save to");
-            return;
-        }
-        if self.overwrite_armed {
-            if vault.has_challenge() && !self.flushing {
-                self.defer_for_touch(Pending::Overwrite);
-                return;
-            }
-            match vault.save_over() {
-                Ok(()) => {
-                    self.dirty = false;
-                    self.overwrite_armed = false;
-                    self.warn("saved over the copy on disk");
+        match self.session.save_now(self.flushing) {
+            SaveNow::Locked => self.say("no vault open to save"),
+            SaveNow::NoFile => self.warn("this vault has no file yet  ·  nothing to save to"),
+            SaveNow::Deferred(what) => self.defer_for_touch(what),
+            SaveNow::Overwrote => self.warn("saved over the copy on disk"),
+            SaveNow::OverwriteFailed(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
+            SaveNow::Clean => self.say("nothing to save  ·  every change saves itself"),
+            SaveNow::Saved(saved) => {
+                self.rows_cache = None;
+                self.report_saved(saved);
+                if !self.session.is_dirty() {
+                    self.say("saved");
                 }
-                Err(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
             }
-            return;
-        }
-        if !self.dirty {
-            self.say("nothing to save  ·  every change saves itself");
-            return;
-        }
-        self.persist();
-        if !self.dirty {
-            self.say("saved");
         }
     }
 
     // `^f` on a conflict: keep both sides. Offered only after a save was refused, like `^r`.
     // A merge the crate cannot make leaves the file and the session untouched.
     pub fn merge_vault(&mut self) {
-        if !self.overwrite_armed {
-            self.say("nothing to merge  ·  the file has not changed");
-            return;
-        }
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        if vault.has_challenge() && !self.flushing {
-            self.defer_for_touch(Pending::Merge);
-            return;
-        }
-        match vault.merge_from_disk() {
+        match self.session.merge(self.flushing) {
             Ok(summary) => {
-                self.dirty = false;
-                self.overwrite_armed = false;
-                // The tree changed under every snapshot, as it does on a reload.
-                self.undo.clear();
-                self.cut = None;
                 self.snap();
                 self.say(format!("merged with the file on disk  ·  {}", summary.describe()));
             }
-            Err(e) => self.error(format!("{e}  ·  ^s overwrites  ·  ^r reloads theirs")),
+            Err(Resolve::NoConflict) => self.say("nothing to merge  ·  the file has not changed"),
+            Err(Resolve::Locked) => {}
+            Err(Resolve::Deferred) => self.defer_for_touch(Pending::Merge),
+            Err(Resolve::Failed(e)) => self.error(format!("{e}  ·  ^s overwrites  ·  ^r reloads theirs")),
         }
     }
 
@@ -3512,25 +3258,14 @@ impl App {
        session could not write. Only offered while a save has actually been
        refused, so it can never be a surprise reload of somebody's work. */
     pub fn reload_vault(&mut self) {
-        if !self.overwrite_armed {
-            self.say("nothing to reload  ·  the file has not changed");
-            return;
-        }
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        match vault.reload() {
+        match self.session.reload() {
             Ok(()) => {
-                self.dirty = false;
-                self.overwrite_armed = false;
-                /* The database was replaced wholesale, so every snapshot on
-                   the stack describes a vault that is no longer there. */
-                self.undo.clear();
-                self.cut = None;
                 self.snap();
                 self.warn("reloaded from disk  ·  your unsaved changes are gone");
             }
-            Err(e) => self.error(format!("cannot reload  ·  {e}")),
+            Err(Resolve::NoConflict) => self.say("nothing to reload  ·  the file has not changed"),
+            Err(Resolve::Locked | Resolve::Deferred) => {}
+            Err(Resolve::Failed(e)) => self.error(format!("cannot reload  ·  {e}")),
         }
     }
 
@@ -3538,7 +3273,7 @@ impl App {
        group because an entry must live somewhere, and the root always exists
        once a vault is open. */
     pub fn open_add_form(&mut self) {
-        if self.vault.is_none() || self.group_cursor.is_none() {
+        if !self.session.is_open() || self.group_cursor.is_none() {
             self.say("no vault open to add to");
             return;
         }
@@ -3611,46 +3346,26 @@ impl App {
         };
         let id = entry.id();
         let title = entry.title().to_string();
-        let forever = self.vault.as_ref().is_some_and(|v| v.is_recycled(&id));
+        let forever = self.session.vault().is_some_and(|v| v.is_recycled(&id));
         self.confirm = Some(Confirm::DeleteEntry { id, title, forever });
     }
 
     /// The yes side of the delete confirm. Kept off the key handler so the
     /// confirm popup and the delete itself cannot drift apart.
     pub fn confirm_delete_entry(&mut self, id: EntryId) {
-        /* Snapshot before either delete. The bin path does not need it (the
-           entry lives on and undo moves it home), but the expunge path does,
-           and taking it once keeps the two branches the same shape. */
-        let parent = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id));
-        let before: Option<keepass::db::Entry> =
-            self.vault.as_ref().and_then(|v| v.get_entry(&id).map(|e| e.clone()));
-        let forever = self.vault.as_ref().is_some_and(|v| v.is_recycled(&id));
-        if let (Some(vault), Some(parent), Some(before)) =
-            (self.vault.as_mut(), parent, before)
-        {
-            let done = if forever {
-                vault.expunge_entry(&id)
-            } else {
-                vault.recycle_entry(&id)
-            };
-            match done {
-                Ok(()) => {
-                    self.push_undo(if forever {
-                        Undo::Delete { id, parent, before }
-                    } else {
-                        Undo::Recycle { id, parent, before }
-                    });
-                    self.entry_cursor = None;
-                    self.snap();
-                    self.persist();
-                    self.say(if forever {
-                        "entry deleted for good  ·  u restores it"
-                    } else {
-                        "entry moved to the recycle bin  ·  u restores it"
-                    });
-                }
-                Err(e) => self.say(format!("cannot delete  ·  {e}")),
+        match self.session.delete_entry(id) {
+            Ok(forever) => {
+                self.entry_cursor = None;
+                self.snap();
+                self.persist();
+                self.say(if forever {
+                    "entry deleted for good  ·  u restores it"
+                } else {
+                    "entry moved to the recycle bin  ·  u restores it"
+                });
             }
+            Err(Delete::Missing) => {}
+            Err(Delete::Vault(e)) => self.say(format!("cannot delete  ·  {e}")),
         }
     }
 
@@ -3808,124 +3523,42 @@ impl App {
         let Some(form) = self.form.take() else {
             return;
         };
-        if form.title.trim().is_empty() {
-            self.say("a title is the only must  ·  the form stays open");
-            // Reopen the same form on the title box rather than losing input.
-            self.form = Some(form);
-            self.form.as_mut().unwrap().field = FormField::Title;
-            self.form.as_mut().unwrap().caret =
-                self.form.as_ref().unwrap().title.chars().count();
-            return;
-        }
-        /* The seed is checked before anything is written: a secret that
-           cannot mint a code is worse than no secret at all, because the
-           entry then looks set up and answers with nothing. */
-        /* Read before anything is written, the same rule the seed follows: a
-           date that cannot be parsed must not leave half an entry behind. */
-        let expires = match parse_expiry(&form.expires) {
-            Ok(at) => at,
-            Err(why) => {
-                self.warn(format!("{why}  ·  the form stays open"));
-                self.form = Some(form);
-                let form = self.form.as_mut().expect("just put back");
-                form.field = FormField::Expires;
-                form.caret = form.expires.chars().count();
-                return;
-            }
+        let target = match form.kind {
+            FormKind::Add => EntryTarget::Add(self.group_cursor),
+            FormKind::Edit(id) => EntryTarget::Edit(id),
         };
-        let otp: Option<Option<String>> = if !form.otp_touched {
-            None
-        } else if form.otp.trim().is_empty() {
-            Some(None)
-        } else {
-            match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
-                Ok(url) => Some(Some(url)),
-                Err(why) => {
-                    self.warn(format!("{why}  ·  the form stays open"));
-                    self.form = Some(form);
-                    let form = self.form.as_mut().expect("just put back");
-                    form.field = FormField::Otp;
-                    form.caret = form.otp.chars().count();
-                    return;
-                }
-            }
+        // An untouched box keeps the stored password on an edit, while backspacing it
+        // to empty writes empty. An add always writes the box.
+        let keep = matches!(form.kind, FormKind::Edit(_)) && !form.password_touched;
+        let input = EntryInput {
+            title: &form.title,
+            username: &form.username,
+            password: (!keep).then_some(form.password.as_str()),
+            url: &form.url,
+            notes: &form.notes,
+            tags: &form.tags,
+            expires: &form.expires,
+            otp: form.otp_touched.then_some(form.otp.as_str()),
         };
-        let result = match form.kind {
-            FormKind::Add => {
-                let group = self.group_cursor;
-                let vault = self.vault.as_mut().expect("add form needs a vault");
-                let Some(group) = group else {
-                    self.say("no group selected  ·  the form stays open");
-                    self.form = Some(form);
-                    return;
-                };
-                let tags = split_tags(&form.tags);
-                vault
-                    .create_entry(&group, &form.title, &form.username, &form.password, &form.url, &form.notes)
-                    .map(|id| {
-                        if let Some(Some(url)) = otp.as_ref() {
-                            let _ = vault.set_otp(&id, Some(url));
-                        }
-                        let _ = vault.set_tags(&id, &tags);
-                        let _ = vault.set_expiry(&id, expires);
-                        Some(id)
-                    })
-            }
-            FormKind::Edit(id) => {
-                /* Empty and untouched keeps the stored password; anything
-                   typed — including backspacing to empty — writes what the
-                   box now holds. */
-                let password = if form.password_touched {
-                    Some(form.password.as_str())
-                } else {
-                    None
-                };
-                /* Taken before the write, because afterwards the old values
-                   are gone — but pushed only once the write has landed.
-
-                   Defensive, not a fix for a live bug: the snapshot and the
-                   write do the same `entry(id)` lookup, so `before` is Some
-                   exactly when the write will succeed, and no input reaches
-                   the failing combination. There is deliberately no test,
-                   because none can fail without this. It is one validation
-                   inside `update_entry` — an empty-title check, a read-only
-                   guard — away from arming an undo step for a change that
-                   never happened, and the ordering costs nothing. */
-                let before = self
-                    .vault
-                    .as_ref()
-                    .and_then(|v| v.get_entry(&id).map(|e| e.clone()));
-                let tags = split_tags(&form.tags);
-                let vault = self.vault.as_mut().expect("edit form needs a vault");
-                let wrote = vault
-                    .update_entry(&id, &form.title, &form.username, password, &form.url, &form.notes)
-                    .and_then(|()| vault.set_tags(&id, &tags))
-                    .and_then(|()| vault.set_expiry(&id, expires))
-                    .and_then(|()| match otp.as_ref() {
-                        // Untouched keeps whatever the entry already carried.
-                        None => Ok(()),
-                        Some(url) => vault.set_otp(&id, url.as_deref()),
-                    });
-                if wrote.is_ok() && let Some(before) = before {
-                    self.push_undo(Undo::Edit { id, before });
-                }
-                wrote.map(|()| None)
+        let result = self.session.save_entry(target, &input);
+        // The box a refusal is about, so the form reopens with the caret behind its text.
+        let reopen = |app: &mut App, form: Form, field: Option<FormField>| {
+            app.form = Some(form);
+            if let (Some(form), Some(field)) = (app.form.as_mut(), field) {
+                form.field = field;
+                form.caret = form_field_value_ref(form, field).chars().count();
             }
         };
         match result {
-            Ok(new_id) => {
-                if let Some(id) = new_id {
-                    self.push_undo(Undo::AddEntry {
-                        id,
-                        title: form.title.clone(),
-                    });
+            Ok(saved) => {
+                if let Some(id) = saved.id {
                     self.entry_cursor = Some(id);
                 }
                 self.snap();
                 self.persist();
-                let note = match otp {
-                    Some(Some(_)) => "  ·  one-time code set",
-                    Some(None) if form.had_otp => "  ·  one-time code removed",
+                let note = match saved.otp {
+                    Some(true) => "  ·  one-time code set",
+                    Some(false) if form.had_otp => "  ·  one-time code removed",
                     _ => "",
                 };
                 self.say(match form.kind {
@@ -3933,9 +3566,25 @@ impl App {
                     FormKind::Edit(_) => format!("entry saved{note}"),
                 });
             }
-            Err(e) => {
+            Err(EntryError::NoTitle) => {
+                self.say("a title is the only must  ·  the form stays open");
+                reopen(self, form, Some(FormField::Title));
+            }
+            Err(EntryError::Expiry(why)) => {
+                self.warn(format!("{why}  ·  the form stays open"));
+                reopen(self, form, Some(FormField::Expires));
+            }
+            Err(EntryError::Otp(why)) => {
+                self.warn(format!("{why}  ·  the form stays open"));
+                reopen(self, form, Some(FormField::Otp));
+            }
+            Err(EntryError::NoGroup) => {
+                self.say("no group selected  ·  the form stays open");
+                reopen(self, form, None);
+            }
+            Err(EntryError::Vault(e)) => {
                 self.say(format!("cannot save  ·  {e}"));
-                self.form = Some(form);
+                reopen(self, form, None);
             }
         }
     }
@@ -3988,29 +3637,8 @@ impl App {
             return;
         }
         let result = match prompt.kind {
-            GroupPromptKind::New => {
-                let parent = self.group_cursor;
-                let vault = self.vault.as_mut().expect("group prompt needs a vault");
-                match parent {
-                    Some(parent) => vault.create_group(&parent, &prompt.value).map(Some),
-                    None => Err(VaultError::GroupNotFound),
-                }
-            }
-            GroupPromptKind::Rename(id) => {
-                /* Taken before the rename, pushed after it lands — same rule,
-                   and the same "defensive, untestable today" caveat as the
-                   entry edit above. */
-                let before = self
-                    .vault
-                    .as_ref()
-                    .and_then(|v| v.get_group(&id).map(|g| g.name.clone()));
-                let vault = self.vault.as_mut().expect("group prompt needs a vault");
-                let wrote = vault.rename_group(&id, &prompt.value);
-                if wrote.is_ok() && let Some(before) = before {
-                    self.push_undo(Undo::Rename { id, before });
-                }
-                wrote.map(|()| None)
-            }
+            GroupPromptKind::New => self.session.add_group(self.group_cursor, &prompt.value).map(Some),
+            GroupPromptKind::Rename(id) => self.session.rename_group(id, &prompt.value).map(|()| None),
         };
         match result {
             Ok(new_id) => {
@@ -4042,7 +3670,7 @@ impl App {
        behind it — an unsaved vault has no password to change yet, and the
        unlock screen is where that one is set. */
     pub fn open_rekey(&mut self) {
-        let has_file = self.vault.as_ref().is_some_and(|v| v.path().is_some());
+        let has_file = self.session.vault().is_some_and(|v| v.path().is_some());
         if !has_file {
             self.say("no vault file to re-key  ·  unlock one first");
             return;
@@ -4152,34 +3780,23 @@ impl App {
                 }
             }
         }
-        let done = self
-            .vault
-            .as_mut()
-            .expect("the prompt only opens on an open vault")
-            .rekey(&rekey.password, key_bytes.as_deref());
+        let done = self.session.rekey(&rekey.password, key_bytes.as_deref());
         if let Some(b) = key_bytes.as_mut() {
             b.zeroize();
         }
         match done {
-            Ok(removed) => {
-                /* The file on disk is now the new password's, so anything the
-                   session had pending is written too. Nothing is left dirty. */
-                self.dirty = false;
-                self.overwrite_armed = false;
+            Ok(rekeyed) => {
                 let mut said = match key_path.is_empty() {
                     true => "master password changed".to_string(),
                     false => format!("master password changed  ·  key file {key_path} kept"),
                 };
+                let removed = rekeyed.removed;
                 if removed > 0 {
                     let plural = if removed == 1 { "backup" } else { "backups" };
                     said.push_str(&format!("  ·  {removed} {plural} under the old password deleted"));
                 }
-                // What was sealed is the old password now.
-                if let Some((db, _)) = self.quick.take() {
-                    match crate::touchid::seal(rekey.password.as_bytes()) {
-                        Ok(sealed) => self.quick = Some((db, sealed)),
-                        Err(why) => said.push_str(&format!("  ·  Touch ID off until a typed unlock  ·  {why}")),
-                    }
+                if let Some(why) = rekeyed.touch_id_off {
+                    said.push_str(&format!("  ·  Touch ID off until a typed unlock  ·  {why}"));
                 }
                 self.say(said);
             }
@@ -4215,8 +3832,7 @@ impl App {
     }
 
     fn extra_rows(&self, id: &EntryId) -> Vec<crate::vault::Extra> {
-        self.vault
-            .as_ref()
+        self.session.vault()
             .and_then(|v| v.get_entry(id))
             .map(|e| crate::vault::extra_rows(&e))
             .unwrap_or_default()
@@ -4291,26 +3907,9 @@ impl App {
         let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
             return;
         };
-        let lifetime = self.ssh_lifetime;
-        let result = match (crate::agent::Agent::connect(), self.vault.as_ref()) {
-            (Ok(mut agent), Some(vault)) => {
-                let settings = vault
-                    .attachment_bytes(&id, crate::agent::SETTINGS)
-                    .and_then(|bytes| crate::agent::parse_settings(&bytes));
-                crate::agent::add_entry_key(&mut agent, vault, &id, &name, settings.as_ref(), lifetime)
-            }
-            (Err(why), _) => Err(why),
-            (_, None) => return,
-        };
-        match result {
-            // Already loaded at unlock: its own settings still decide whether lock removes it.
-            Ok(mut key) => {
-                key.remove_at_close = true;
-                if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
-                    self.agent_keys.push(key);
-                }
-                self.say(format!("{name} given to the agent for {lifetime}s"));
-            }
+        match self.session.agent_give(id, &name) {
+            Ok(Some(lifetime)) => self.say(format!("{name} given to the agent for {lifetime}s")),
+            Ok(None) => {}
             Err(why) => self.warn(format!("ssh agent: {why}")),
         }
     }
@@ -4324,47 +3923,17 @@ impl App {
         let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
             return;
         };
-        let Some(bytes) = self.vault.as_ref().and_then(|v| v.attachment_bytes(&id, &name)) else {
-            self.error("the attachment is not there any more");
-            return;
-        };
-        /* Beside the vault, not in the working directory: the vault's folder
-           is somewhere the user already keeps secrets, and cwd is wherever
-           they happened to launch from. */
-        let Some(dir) = self
-            .vault
-            .as_ref()
-            .and_then(|v| v.path())
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        else {
-            self.error("no vault file to write beside");
-            return;
-        };
-        /* The name comes out of the vault and may hold anything, including a
-           path separator: take the last component only, so an attachment
-           called "../../.ssh/authorized_keys" lands as a file, not a write
-           somewhere else entirely. */
-        let leaf = std::path::Path::new(&name)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty() && n != "." && n != "..")
-            .unwrap_or_else(|| "attachment".to_string());
-        let at = dir.join(&leaf);
-        /* Named before the write is attempted. `write_owner_only` creates
-           exclusively — which is what stops a symlink planted at the path
-           redirecting it — so a second extraction fails with a bare
-           "File exists" that says nothing about which file or why. */
-        if at.exists() {
-            self.warn(format!("{} is already there  ·  move it first", at.display()));
-            return;
-        }
-        match crate::vault::write_owner_only(&at, &bytes) {
-            Ok(()) => self.warn(format!(
-                "wrote {} ·  {} bytes, owner-only, outside the vault",
-                at.display(),
-                bytes.len()
+        match self.session.extract(id, &name) {
+            Ok((at, len)) => self.warn(format!(
+                "wrote {} ·  {len} bytes, owner-only, outside the vault",
+                at.display()
             )),
-            Err(e) => self.error(format!("cannot write {} · {e}", at.display())),
+            Err(Extract::Gone) => self.error("the attachment is not there any more"),
+            Err(Extract::NoFolder) => self.error("no vault file to write beside"),
+            Err(Extract::Exists(at)) => {
+                self.warn(format!("{} is already there  ·  move it first", at.display()))
+            }
+            Err(Extract::Write(at, e)) => self.error(format!("cannot write {} · {e}", at.display())),
         }
     }
 
@@ -4442,21 +4011,14 @@ impl App {
         let done = if add.from_file {
             let path = crate::config::expand(add.value.trim());
             match std::fs::read(&path) {
-                Ok(bytes) => self
-                    .vault
-                    .as_mut()
-                    .expect("the screen only opens on a vault")
-                    .add_attachment(&id, add.name.trim(), bytes),
+                Ok(bytes) => self.session.attach(id, add.name.trim(), bytes),
                 Err(e) => {
                     self.error(format!("cannot read {} · {e}", path.display()));
                     return;
                 }
             }
         } else {
-            self.vault
-                .as_mut()
-                .expect("the screen only opens on a vault")
-                .set_field(&id, add.name.trim(), &add.value, true)
+            self.session.add_field(id, add.name.trim(), &add.value)
         };
         match done {
             Ok(()) => {
@@ -4483,16 +4045,11 @@ impl App {
         let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
             return;
         };
-        let vault = self.vault.as_mut().expect("the screen only opens on a vault");
-        let (done, said) = match &row {
-            crate::vault::Extra::Field { name, .. } => {
-                (vault.remove_field(&id, name), format!("removed field {name}"))
-            }
-            crate::vault::Extra::File { name, .. } => {
-                (vault.remove_attachment(&id, name), format!("removed {name}"))
-            }
+        let said = match &row {
+            crate::vault::Extra::Field { name, .. } => format!("removed field {name}"),
+            crate::vault::Extra::File { name, .. } => format!("removed {name}"),
         };
-        match done {
+        match self.session.remove_extra(id, &row) {
             Ok(()) => {
                 self.snap();
                 self.persist();
@@ -4516,55 +4073,20 @@ impl App {
             self.say("no group selected");
             return;
         };
-        if id == self.root_id() {
-            self.say("the root group cannot move");
-            return;
-        }
-        let Some(vault) = &self.vault else {
-            return;
-        };
-        if vault.in_recycle_bin(&id) {
-            self.say("that group is in the recycle bin  ·  u restores it");
-            return;
-        }
-        let Some(parent) = vault.get_group(&id).and_then(|g| g.parent().map(|p| p.id())) else {
-            return;
-        };
-        let target = if deeper {
-            /* The sibling directly above, in the tree's own order — the one
-               the eye reads as "the folder this would go into". */
-            let siblings: Vec<GroupId> = vault.groups_in(&parent).iter().map(|g| g.id()).collect();
-            let at = siblings.iter().position(|s| *s == id).unwrap_or(0);
-            match at.checked_sub(1).and_then(|prev| siblings.get(prev).copied()) {
-                Some(prev) => prev,
-                None => {
-                    self.say("nothing above it to go into");
-                    return;
-                }
-            }
-        } else {
-            if parent == self.root_id() {
-                self.say("already at the top");
-                return;
-            }
-            match vault.get_group(&parent).and_then(|g| g.parent().map(|p| p.id())) {
-                Some(grandparent) => grandparent,
-                None => return,
-            }
-        };
-        let vault = self.vault.as_mut().expect("checked above");
-        match vault.move_group(&id, &target) {
+        match self.session.reparent_group(id, deeper) {
             Ok(()) => {
-                /* Expanded, or the group the cursor is on vanishes inside a
-                   folded parent and reads as a delete. */
-                vault.set_expanded(&target, true);
                 self.group_cursor = Some(id);
                 self.snap();
                 self.persist();
                 let path = self.here();
                 self.say(format!("moved to {path}"));
             }
-            Err(e) => self.say(format!("cannot move  ·  {e}")),
+            Err(Reparent::Missing) => {}
+            Err(Reparent::Root) => self.say("the root group cannot move"),
+            Err(Reparent::InBin) => self.say("that group is in the recycle bin  ·  u restores it"),
+            Err(Reparent::NothingAbove) => self.say("nothing above it to go into"),
+            Err(Reparent::AtTop) => self.say("already at the top"),
+            Err(Reparent::Vault(e)) => self.say(format!("cannot move  ·  {e}")),
         }
     }
 
@@ -4579,8 +4101,8 @@ impl App {
             return;
         };
         let rows = self
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .and_then(|v| v.get_entry(&id))
             .map(|e| crate::vault::history(&e))
             .unwrap_or_default();
@@ -4620,11 +4142,7 @@ impl App {
         let Some(id) = self.history.as_ref().map(|h| h.entry) else {
             return;
         };
-        let done = self
-            .vault
-            .as_mut()
-            .expect("the screen only opens on a vault")
-            .clear_history(&id);
+        let done = self.session.clear_history(id);
         match done {
             Ok(gone) => {
                 self.history = None;
@@ -4640,7 +4158,7 @@ impl App {
     /* `!`: what is wrong with this vault's passwords. A list, not a score:
        a number out of ten tells nobody which entry to open next. */
     pub fn open_audit(&mut self) {
-        let Some(vault) = &self.vault else {
+        let Some(vault) = self.session.vault() else {
             self.say("no vault open");
             return;
         };
@@ -4680,7 +4198,7 @@ impl App {
         self.audit = None;
         /* Into the group that holds it, or the row would be filtered out of
            a pane pointed somewhere else entirely. */
-        if let Some(parent) = self.vault.as_ref().and_then(|v| v.parent_group_of_entry(&id)) {
+        if let Some(parent) = self.session.vault().and_then(|v| v.parent_group_of_entry(&id)) {
             self.group_cursor = Some(parent);
         }
         self.search = None;
@@ -4795,8 +4313,8 @@ impl App {
             return;
         }
         let forever = self
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .is_some_and(|v| v.in_recycle_bin(&group.id()));
         self.confirm = Some(Confirm::DeleteGroup {
             id: group.id(),
@@ -4807,37 +4325,8 @@ impl App {
 
     /// The yes side of the group delete confirm, kept off the key handler.
     pub fn confirm_delete_group(&mut self, id: GroupId) {
-        let parent = self.vault.as_ref().and_then(|v| v.get_group(&id).and_then(|g| g.parent().map(|p| p.id())));
-        let title = self
-            .vault
-            .as_ref()
-            .and_then(|v| v.get_group(&id).map(|g| g.name.clone()))
-            .unwrap_or_default();
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        let forever = vault.in_recycle_bin(&id);
-        /* Inside the bin `D` destroys the group and everything under it, and
-           there is no snapshot big enough to undo a subtree — so that path
-           clears the slot rather than leaving a stale one armed. */
-        let done = if forever {
-            vault.delete_group_tree(&id)
-        } else {
-            vault.recycle_group(&id)
-        };
-        match done {
-            Ok(()) => {
-                /* A cut pointing at the deleted group is a ghost: disarm it
-                   rather than letting V paste nothing. */
-                if self.cut == Some(Cut::Group(id)) {
-                    self.cut = None;
-                }
-                /* A permanent group delete takes a subtree with it and no
-                   snapshot is big enough to put that back, so it arms
-                   nothing — and leaves earlier steps alone to be undone. */
-                if let (false, Some(parent)) = (forever, parent) {
-                    self.push_undo(Undo::RecycleGroup { id, parent, title });
-                }
+        match self.session.delete_group(id) {
+            Ok(forever) => {
                 self.group_cursor = None;
                 self.snap();
                 self.persist();
@@ -4847,7 +4336,8 @@ impl App {
                     "group moved to the recycle bin  ·  u restores it"
                 });
             }
-            Err(e) => self.say(format!("cannot delete  ·  {e}")),
+            Err(Delete::Missing) => {}
+            Err(Delete::Vault(e)) => self.say(format!("cannot delete  ·  {e}")),
         }
     }
 
@@ -4876,7 +4366,7 @@ impl App {
     }
 
     fn arm_cut(&mut self, cut: Cut) {
-        self.cut = Some(cut);
+        self.session.arm_cut(cut);
         self.say(match cut {
             Cut::Group(_) => "group cut  ·  V pastes it under another group",
             Cut::Entry(_) => "entry cut  ·  V moves it to another group",
@@ -4885,14 +4375,14 @@ impl App {
 
     // The menus name the kind of row, so each pastes only its own kind of cut. `V` pastes either.
     pub fn paste_entry(&mut self) {
-        match self.cut {
+        match self.session.cut() {
             Some(Cut::Group(_)) => self.say("a group is cut  ·  Group › Paste moves it"),
             _ => self.paste_cut(),
         }
     }
 
     pub fn paste_group(&mut self) {
-        match self.cut {
+        match self.session.cut() {
             Some(Cut::Entry(_)) => self.say("an entry is cut  ·  Entry › Paste moves it"),
             _ => self.paste_cut(),
         }
@@ -4902,47 +4392,30 @@ impl App {
        One-shot: the shelf empties on a successful paste, and a failed one
        stays armed so a typo in the target costs nothing. */
     pub fn paste_cut(&mut self) {
-        let Some(cut) = self.cut else {
-            self.say("nothing cut  ·  X arms the shelf");
-            return;
-        };
-        let Some(target) = self.group_cursor else {
-            self.say("no group selected");
-            return;
-        };
-        let Some(vault) = &mut self.vault else {
-            return;
-        };
-        /* The two ids split by arm: a cut knows which kind it is, so each
-           arm sets exactly the cursor that kind owns. */
-        match cut {
-            Cut::Entry(id) => match vault.move_entry(&id, &target) {
-                Ok(()) => {
-                    self.cut = None;
-                    self.entry_cursor = Some(id);
-                    self.snap();
-                    self.persist();
-                    self.say("entry moved");
-                }
-                Err(e) => self.say(format!("cannot paste  ·  {e}")),
-            },
-            Cut::Group(id) => match vault.move_group(&id, &target) {
-                Ok(()) => {
-                    self.cut = None;
-                    self.group_cursor = Some(id);
-                    self.snap();
-                    self.persist();
-                    self.say("group moved");
-                }
-                Err(e) => self.say(format!("cannot paste  ·  {e}")),
-            },
+        match self.session.paste(self.group_cursor) {
+            Ok(Cut::Entry(id)) => {
+                self.entry_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say("entry moved");
+            }
+            Ok(Cut::Group(id)) => {
+                self.group_cursor = Some(id);
+                self.snap();
+                self.persist();
+                self.say("group moved");
+            }
+            Err(Paste::Locked) => {}
+            Err(Paste::Nothing) => self.say("nothing cut  ·  X arms the shelf"),
+            Err(Paste::NoGroup) => self.say("no group selected"),
+            Err(Paste::Vault(e)) => self.say(format!("cannot paste  ·  {e}")),
         }
     }
 
     /* Esc unwinds the shelf before its usual report: a mis-cut is one press
        from undone, and the message says so rather than the key reading dead. */
     pub fn drop_cut(&mut self) -> bool {
-        if self.cut.take().is_some() {
+        if self.session.drop_cut().is_some() {
             self.say("cut dropped");
             return true;
         }
@@ -4951,8 +4424,8 @@ impl App {
 
     /// Status-bar note for an armed cut, with the title looked up fresh.
     pub fn cut_note(&self) -> Option<String> {
-        let vault = self.vault.as_ref()?;
-        match self.cut? {
+        let vault = self.session.vault()?;
+        match self.session.cut()? {
             Cut::Entry(id) => vault
                 .get_entry(&id)
                 .map(|e| format!("cut: {}", e.title())),
@@ -4962,98 +4435,46 @@ impl App {
         }
     }
 
-    /* `u` walks back through the session's changes, newest first. It used to
-       be one slot, which meant a mistake noticed one keystroke too late was
-       already permanent — the most common way to actually lose work here.
-
-       Still session-only and still bounded: this is a way back out of what
-       you just did, not a history of the vault. */
-    /* Bounded on purpose. Each Delete holds a whole entry, secrets included,
-       so an unbounded stack is an unbounded pile of plaintext in memory —
-       and dropping the oldest is what zeroizes it. Deep enough to cover a
-       mistake noticed several steps later, which is the case one slot
-       could not. */
-    const UNDO_DEPTH: usize = 32;
-
-    fn push_undo(&mut self, step: Undo) {
-        if self.undo.len() == Self::UNDO_DEPTH {
-            self.undo.remove(0);
-        }
-        self.undo.push(step);
-    }
-
     pub fn undo_last(&mut self) {
-        let Some(undo) = self.undo.pop() else {
+        if self.session.undo_steps().is_empty() {
             self.say("nothing to undo · nothing changed this session");
             return;
-        };
-        let Some(vault) = self.vault.as_mut() else {
+        }
+        let Some(undone) = self.session.undo() else {
             return;
         };
-        match undo {
-            Undo::Edit { id, before } => {
-                let title = before.title().to_string();
-                /* Results ignored the way a rollback is: the mutation can
-                   only fail on an id that no longer exists, and persist()
-                   below reports anything the save kept from landing. */
-                let _ = vault.replace_entry(&before);
+        let said = match undone {
+            Undone::Edit { id, title } => {
                 self.entry_cursor = Some(id);
-                self.snap();
-                self.persist();
-                self.say(format!("undid edit of {title}"));
+                format!("undid edit of {title}")
             }
-            Undo::Delete { id, parent, before } => {
-                let title = before.title().to_string();
-                let _ = vault.restore_entry(&before, &parent);
+            Undone::Entry { id, title } => {
                 self.entry_cursor = Some(id);
-                self.snap();
-                self.persist();
-                self.say(format!("restored {title}"));
+                format!("restored {title}")
             }
-            /* Out of the bin rather than back from the dead: the entry never
-               stopped existing, so this keeps its id, history and timestamps
-               instead of overwriting them with the snapshot's. */
-            Undo::Recycle { id, parent, before } => {
-                let title = before.title().to_string();
-                let _ = vault.move_entry(&id, &parent);
-                self.entry_cursor = Some(id);
-                self.snap();
-                self.persist();
-                self.say(format!("restored {title}"));
-            }
-            Undo::RecycleGroup { id, parent, title } => {
-                let _ = vault.move_group(&id, &parent);
+            Undone::Group { id, title } => {
                 self.group_cursor = Some(id);
-                self.snap();
-                self.persist();
-                self.say(format!("restored {title}"));
+                format!("restored {title}")
             }
-            Undo::AddEntry { id, title } => {
-                /* The add is rolled back by removing what it created, and the
-                   undo slot empties instead of growing. */
-                let _ = vault.expunge_entry(&id);
+            Undone::Removed { title } => {
                 self.entry_cursor = None;
-                self.snap();
-                self.persist();
-                self.say(format!("removed {title}"));
+                format!("removed {title}")
             }
-            Undo::Rename { id, before } => {
-                let _ = vault.set_group_title(&id, &before);
-                self.snap();
-                self.persist();
-                self.say(format!("restored name {before}"));
-            }
-        }
+            Undone::Renamed { before } => format!("restored name {before}"),
+        };
+        self.snap();
+        self.persist();
+        self.say(said);
     }
 
     /// What the status bar says the undo slot holds, looked up fresh so a
     /// later rename or delete still names the thing it would restore.
     pub fn undo_note(&self) -> Option<String> {
-        let deeper = match self.undo.len() {
+        let deeper = match self.session.undo_steps().len() {
             0 | 1 => String::new(),
             n => format!(" +{}", n - 1),
         };
-        let note = match self.undo.last()? {
+        let note = match self.session.undo_steps().last()? {
             Undo::Edit { before, .. } => format!("undo: edit of {}", before.title()),
             Undo::Delete { before, .. } => format!("undo: restore {}", before.title()),
             Undo::Recycle { before, .. } => format!("undo: restore {}", before.title()),
@@ -5275,10 +4696,10 @@ pub mod tests {
     #[test]
     fn without_a_timeout_the_vault_never_locks() {
         let mut app = open_app();
-        app.last_activity = Instant::now() - Duration::from_secs(3600);
+        app.session.last_activity = Instant::now() - Duration::from_secs(3600);
         app.check_idle();
         assert_eq!(app.view, View::Browser);
-        assert!(app.vault.is_some(), "an untimed vault was dropped");
+        assert!(app.session.is_open(), "an untimed vault was dropped");
     }
 
     /* Idleness past the deadline drops the vault and returns behind the
@@ -5290,13 +4711,13 @@ pub mod tests {
         app.set_lock_timeout(60);
         // What an unlock leaves behind, and what the lock has to take back.
         app.resting = "ready".into();
-        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
         app.check_idle();
         assert_eq!(app.view, View::Unlock);
-        assert!(app.vault.is_none(), "the secrets survived the lock");
+        assert!(!app.session.is_open(), "the secrets survived the lock");
         assert!(app.group_cursor.is_none());
         assert!(app.entry_cursor.is_none());
-        assert!(!app.dirty, "a lock invented unsaved changes");
+        assert!(!app.session.is_dirty(), "a lock invented unsaved changes");
         assert!(app.stage.contains("locked after 60 seconds idle"), "{}", app.stage);
         /* And once the flash has been read the header says locked, not the
            "ready" the open vault left behind. */
@@ -5311,11 +4732,11 @@ pub mod tests {
         app.set_lock_timeout(60);
         /* What a six-hour suspend leaves behind: no monotonic time passed at
            all, six hours of wall clock did. */
-        app.last_activity = Instant::now();
-        app.last_activity_wall = std::time::SystemTime::now() - Duration::from_secs(6 * 3600);
+        app.session.last_activity = Instant::now();
+        app.session.last_activity_wall = std::time::SystemTime::now() - Duration::from_secs(6 * 3600);
         app.check_idle();
         assert_eq!(app.view, View::Unlock, "the vault slept through the lock");
-        assert!(app.vault.is_none(), "the secrets survived the suspend");
+        assert!(!app.session.is_open(), "the secrets survived the suspend");
     }
 
     /* And the other way, so a clock set backwards cannot hold a vault open:
@@ -5324,8 +4745,8 @@ pub mod tests {
     fn a_backwards_wall_clock_does_not_defer_the_lock() {
         let mut app = open_app();
         app.set_lock_timeout(60);
-        app.last_activity = Instant::now() - Duration::from_secs(61);
-        app.last_activity_wall = std::time::SystemTime::now() + Duration::from_secs(3600);
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
+        app.session.last_activity_wall = std::time::SystemTime::now() + Duration::from_secs(3600);
         app.check_idle();
         assert_eq!(app.view, View::Unlock, "a clock change outlasted the deadline");
     }
@@ -5338,7 +4759,7 @@ pub mod tests {
         let mut app = open_app();
         app.unlock_file = "/vaults/personal.kdbx".into();
         app.set_lock_timeout(60);
-        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
         app.check_idle();
         assert_eq!(app.view, View::Unlock);
         assert_eq!(
@@ -5353,11 +4774,11 @@ pub mod tests {
     fn a_keypress_defers_the_lock() {
         let mut app = open_app();
         app.set_lock_timeout(60);
-        app.last_activity = Instant::now() - Duration::from_secs(61);
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
         app.touch();
         app.check_idle();
         assert_eq!(app.view, View::Browser);
-        assert!(app.vault.is_some());
+        assert!(app.session.is_open());
     }
 
     /* Zero disables rather than arming a zero-second deadline, which would
@@ -5367,10 +4788,10 @@ pub mod tests {
         let mut app = open_app();
         app.set_lock_timeout(60);
         app.set_lock_timeout(0);
-        app.last_activity = Instant::now() - Duration::from_secs(3600);
+        app.session.last_activity = Instant::now() - Duration::from_secs(3600);
         app.check_idle();
         assert_eq!(app.view, View::Browser);
-        assert!(app.vault.is_some());
+        assert!(app.session.is_open());
     }
 
     /* Opening lands on the root with a valid selection, or the first keypress
@@ -5378,7 +4799,7 @@ pub mod tests {
     #[test]
     fn opening_a_vault_selects_root_and_snaps() {
         let app = open_app();
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert_eq!(app.group_cursor, Some(vault.root_id()));
         assert_eq!(app.view, View::Browser);
         assert!(app.selected_group().is_some());
@@ -5389,7 +4810,7 @@ pub mod tests {
     #[test]
     fn the_group_tree_walks_pre_order_with_depths() {
         let app = open_app();
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         let root = vault.root_id();
         let names: Vec<(String, usize)> = app
             .group_tree()
@@ -5411,10 +4832,10 @@ pub mod tests {
         let banks = app.group_tree()[1].0;
         app.group_cursor = Some(banks);
         // Straight to the bin, contents and all, which is what `D` now does.
-        app.vault.as_mut().unwrap().recycle_group(&banks).unwrap();
-        app.vault.as_mut().unwrap().delete_group_tree(&banks).unwrap();
+        app.session.vault_mut().unwrap().recycle_group(&banks).unwrap();
+        app.session.vault_mut().unwrap().delete_group_tree(&banks).unwrap();
         app.snap();
-        let root = app.vault.as_ref().unwrap().root_id();
+        let root = app.session.vault().unwrap().root_id();
         assert_eq!(app.group_cursor, Some(root));
         assert!(app.selected_group().is_some());
     }
@@ -5429,7 +4850,7 @@ pub mod tests {
         app.step_group(true);
         let banks = app.group_cursor.unwrap();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&banks).unwrap().name,
+            app.session.vault().unwrap().get_group(&banks).unwrap().name,
             "Banks"
         );
         assert!(app.selected_entry().is_some());
@@ -5446,7 +4867,7 @@ pub mod tests {
     fn an_entry_of_another_group_is_not_selected() {
         let mut app = open_app();
         let banks = app.group_tree()[1].0;
-        let eid = app.vault.as_ref().unwrap().entries_in(&banks)[0].id();
+        let eid = app.session.vault().unwrap().entries_in(&banks)[0].id();
         // Still on root: the Banks entry must not resolve.
         app.entry_cursor = Some(eid);
         assert!(app.selected_entry().is_none());
@@ -5493,7 +4914,7 @@ pub mod tests {
         let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
-        assert!(app.vault.is_some());
+        assert!(app.session.is_open());
         assert!(pw.iter().all(|b| *b == 0), "password buffer survived unlock");
         assert!(app.unlock_password.is_empty());
         assert!(app.unlock_confirm.is_empty());
@@ -5530,7 +4951,7 @@ pub mod tests {
         let mut pw = "wrong guess".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(app.stage.contains("try again"), "{}", app.stage);
         assert!(pw.iter().all(|b| *b == 0), "failed guess lingered");
     }
@@ -5698,7 +5119,7 @@ pub mod tests {
         let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser, "unconfirmed path refused");
-        assert!(app.vault.is_some());
+        assert!(app.session.is_open());
     }
 
     // A path typed over a configured vault must replace it, not unlock the old one.
@@ -5740,7 +5161,7 @@ pub mod tests {
         let mut pw = "pw".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Unlock);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(app.stage.contains("another user"), "{}", app.stage);
         assert!(pw.iter().all(|b| *b == 0), "password buffer survived");
     }
@@ -5860,13 +5281,13 @@ pub mod tests {
         let name = tmp.0.file_name().unwrap().to_string_lossy().into_owned();
         let mut password = b"pw".to_vec();
         app.try_unlock(&mut password, None);
-        assert!(app.vault.is_some(), "{}", app.stage);
+        assert!(app.session.is_open(), "{}", app.stage);
         assert_eq!(app.window_title(), format!("Sennel — {name}"));
         app.expire_now();
         assert_eq!(app.stage, name, "the header did not name the vault");
         // Locked again, the title and the header drop the vault with it.
         app.set_lock_timeout(1);
-        app.last_activity = Instant::now() - Duration::from_secs(2);
+        app.session.last_activity = Instant::now() - Duration::from_secs(2);
         app.check_idle();
         assert_eq!(app.window_title(), "Sennel");
         app.expire_now();
@@ -5899,9 +5320,9 @@ pub mod tests {
         app.open_add_form();
         app.lock_now();
         assert_eq!(app.view, View::Unlock);
-        assert!(app.vault.is_none(), "the secrets survived ^l");
+        assert!(!app.session.is_open(), "the secrets survived ^l");
         assert!(app.form.is_none(), "the form outlived the vault");
-        assert!(app.cut.is_none(), "the cut outlived the vault");
+        assert!(app.session.cut().is_none(), "the cut outlived the vault");
         assert!(app.search.is_none(), "the filter outlived the vault");
         /* Earlier flashes are still queued, so drain them: the header lands
            on the resting stage, which the lock has taken back to "locked". */
@@ -5922,7 +5343,7 @@ pub mod tests {
         let (mut app, tmp) = locked_app_with_db("pw");
         let mut password = b"pw".to_vec();
         app.try_unlock(&mut password, None);
-        assert!(app.vault.is_some(), "{}", app.stage);
+        assert!(app.session.is_open(), "{}", app.stage);
 
         // Somebody else writes the file while this session holds it.
         let mut theirs = Vault::open(&tmp.0, "pw", None).unwrap();
@@ -5934,7 +5355,7 @@ pub mod tests {
         app.form.as_mut().unwrap().title = "mine".into();
         app.submit_form();
         assert!(app.working(), "the refused save left no unsaved work");
-        assert!(app.overwrite_armed, "the override was not armed");
+        assert!(app.session.in_conflict(), "the override was not armed");
         assert_eq!(app.level, Level::Error);
         assert!(app.stage.contains("changed on disk"), "{}", app.stage);
         // Theirs survived.
@@ -5943,7 +5364,7 @@ pub mod tests {
         // `^s` is the deliberate override, and it says what it did.
         app.save_now();
         assert!(!app.working(), "the override did not save");
-        assert!(!app.overwrite_armed);
+        assert!(!app.session.in_conflict());
         assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 1);
     }
 
@@ -5959,9 +5380,9 @@ pub mod tests {
         let tmp = temp_path("keyed");
         Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
         let mut app = open_app();
-        app.vault = Some(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
-        let root = app.vault.as_ref().unwrap().root_id();
-        let vault = app.vault.as_mut().unwrap();
+        app.session.open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        let root = app.session.vault().unwrap().root_id();
+        let vault = app.session.vault_mut().unwrap();
         vault.create_entry(&root, "one", "", "", "", "").unwrap();
         vault.create_entry(&root, "two", "", "", "", "").unwrap();
 
@@ -6026,7 +5447,7 @@ pub mod tests {
         let tmp = temp_path("keyed-lock");
         Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
         let mut app = open_app();
-        app.vault = Some(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        app.session.open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
         app.persist();
         assert!(app.has_pending());
         app.lock_now();
@@ -6052,7 +5473,7 @@ pub mod tests {
         app.open_add_form();
         app.form.as_mut().unwrap().title = "mine".into();
         app.submit_form();
-        assert!(app.overwrite_armed);
+        assert!(app.session.in_conflict());
         assert!(app.stage.contains("^f merges"), "{}", app.stage);
 
         // Messages queue behind each other; let the earlier ones go by.
@@ -6060,10 +5481,10 @@ pub mod tests {
             app.expire_now();
         }
         app.merge_vault();
-        assert!(!app.overwrite_armed && !app.working(), "{}", app.stage);
+        assert!(!app.session.in_conflict() && !app.working(), "{}", app.stage);
         assert!(app.stage.contains("merged"), "{}", app.stage);
         assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 2);
-        assert_eq!(app.vault.as_ref().unwrap().entry_count(), 2);
+        assert_eq!(app.session.vault().unwrap().entry_count(), 2);
     }
 
     /* `^s` with nothing to do says so rather than going quiet — it is the key
@@ -6178,7 +5599,7 @@ pub mod tests {
         app.switch_pane();
         let id = app.entry_cursor.unwrap();
         let url = crate::vault::totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
-        app.vault.as_mut().unwrap().set_otp(&id, Some(&url)).unwrap();
+        app.session.vault_mut().unwrap().set_otp(&id, Some(&url)).unwrap();
 
         // An edit that never looks at the box keeps it.
         app.open_edit_form();
@@ -6214,7 +5635,7 @@ pub mod tests {
 
         let mut password = b"pw".to_vec();
         app.try_unlock(&mut password, None);
-        assert!(app.vault.is_some(), "{}", app.stage);
+        assert!(app.session.is_open(), "{}", app.stage);
 
         let text = std::fs::read_to_string(&config.0).unwrap();
         assert!(text.contains(&tmp.0.display().to_string()), "{text}");
@@ -6466,7 +5887,7 @@ pub mod tests {
 
         /* End of the named day, not its start: an expiry of the 1st should
            not go off at midnight that morning. */
-        let at = crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap());
+        let at = crate::vault::expires_at(&app.session.vault().unwrap().get_entry(&id).unwrap());
         assert_eq!(at.map(|a| a.to_string()), Some("2030-06-01 23:59:59".to_string()));
 
         // It prefills as a date, so a second save does not move it.
@@ -6474,7 +5895,7 @@ pub mod tests {
         assert_eq!(app.form.as_ref().unwrap().expires, "2030-06-01");
         app.submit_form();
         assert_eq!(
-            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            crate::vault::expires_at(&app.session.vault().unwrap().get_entry(&id).unwrap()),
             at,
             "a round trip through the form moved the date"
         );
@@ -6484,7 +5905,7 @@ pub mod tests {
         app.form.as_mut().unwrap().expires = "  ".into();
         app.submit_form();
         assert_eq!(
-            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            crate::vault::expires_at(&app.session.vault().unwrap().get_entry(&id).unwrap()),
             None,
             "an empty box left the expiry on"
         );
@@ -6500,7 +5921,7 @@ pub mod tests {
             app.cancel_form();
         }
         assert_eq!(
-            crate::vault::expires_at(&app.vault.as_ref().unwrap().get_entry(&id).unwrap()),
+            crate::vault::expires_at(&app.session.vault().unwrap().get_entry(&id).unwrap()),
             None,
             "a refused date was written anyway"
         );
@@ -6513,7 +5934,7 @@ pub mod tests {
         use chrono::{Duration, Utc};
         let mut app = open_app();
         let root = app.root_id();
-        let vault = app.vault.as_mut().unwrap();
+        let vault = app.session.vault_mut().unwrap();
         let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
         let stale = vault.create_entry(&root, "cert", "u", strong, "", "").unwrap();
         let live = vault.create_entry(&root, "other", "u", "Zt4&pLr9Wd6*Ks1Xq7!vm2", "", "").unwrap();
@@ -6521,7 +5942,7 @@ pub mod tests {
         vault.set_expiry(&live, Some((Utc::now() + Duration::days(1)).naive_utc())).unwrap();
         app.snap();
 
-        let found = crate::vault::audit(app.vault.as_ref().unwrap());
+        let found = crate::vault::audit(app.session.vault().unwrap());
         let issue = |id| found.iter().find(|(e, _)| *e == id).map(|(_, i)| *i);
         assert_eq!(issue(stale), Some(crate::vault::Issue::Expired));
         // A strong password with a future date has nothing wrong with it.
@@ -6542,7 +5963,7 @@ pub mod tests {
     fn angle_brackets_move_a_group_in_and_out_of_the_tree() {
         let mut app = open_app();
         let root = app.root_id();
-        let vault = app.vault.as_mut().unwrap();
+        let vault = app.session.vault_mut().unwrap();
         /* Under a parent of their own: the fixture already has groups at the
            root, and "the sibling above" has to mean one this test controls. */
         let home = vault.create_group(&root, "Home").unwrap();
@@ -6553,14 +5974,14 @@ pub mod tests {
         // `>` takes the sibling above as the new parent.
         app.group_cursor = Some(second);
         app.reparent_group(true);
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Aaa", "Bbb"]);
         // The cursor stays on the group it moved, wherever that landed.
         assert_eq!(app.group_cursor, Some(second));
 
         // `<` puts it back beside its old parent.
         app.reparent_group(false);
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Bbb"]);
 
         /* The edges say so rather than doing nothing: the first sibling has
@@ -6583,7 +6004,7 @@ pub mod tests {
         // And the root itself never moves.
         app.group_cursor = Some(root);
         app.reparent_group(true);
-        assert_eq!(app.vault.as_ref().unwrap().group_path(&root), vec!["Root"]);
+        assert_eq!(app.session.vault().unwrap().group_path(&root), vec!["Root"]);
     }
 
     /* A tag is an exact label somebody chose, so `#work` answers yes or no.
@@ -6592,7 +6013,7 @@ pub mod tests {
     fn a_hash_needle_filters_by_tag_instead_of_ranking() {
         let mut app = open_app();
         let root = app.root_id();
-        let vault = app.vault.as_mut().unwrap();
+        let vault = app.session.vault_mut().unwrap();
         let work = vault.create_entry(&root, "jira", "u", "p", "", "").unwrap();
         let home = vault.create_entry(&root, "homework-club", "u", "p", "", "").unwrap();
         vault.set_tags(&work, &["work".into(), "urgent".into()]).unwrap();
@@ -6628,7 +6049,7 @@ pub mod tests {
         app.form.as_mut().unwrap().tags = "  work , , urgent,".into();
         app.submit_form();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_entry(&home).unwrap().tags,
+            app.session.vault().unwrap().get_entry(&home).unwrap().tags,
             vec!["work", "urgent"],
             "the comma list did not survive the form"
         );
@@ -6640,7 +6061,7 @@ pub mod tests {
            the band shows under a `#` so nobody has to remember a label. The
            edit above moved `home` off "personal", so it is gone. */
         assert_eq!(
-            crate::vault::all_tags(app.vault.as_ref().unwrap()),
+            crate::vault::all_tags(app.session.vault().unwrap()),
             vec!["urgent", "work"]
         );
     }
@@ -6654,7 +6075,7 @@ pub mod tests {
         let mut app = open_app();
         app.step_group(true);
         let id = app.entry_cursor.unwrap();
-        let before = app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string();
+        let before = app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string();
 
         // Three changes, then three undos.
         app.open_edit_form();
@@ -6666,18 +6087,18 @@ pub mod tests {
         app.ask_delete_entry();
         app.confirm = None;
         app.confirm_delete_entry(id);
-        assert_eq!(app.undo.len(), 3, "the stack did not grow");
+        assert_eq!(app.session.undo_steps().len(), 3, "the stack did not grow");
 
         let title = |app: &App| {
-            app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string()
+            app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string()
         };
         app.undo_last(); // out of the bin
-        assert!(!app.vault.as_ref().unwrap().is_recycled(&id));
+        assert!(!app.session.vault().unwrap().is_recycled(&id));
         app.undo_last(); // back to first-edit
         assert_eq!(title(&app), "first-edit");
         app.undo_last(); // back to where it started
         assert_eq!(title(&app), before);
-        assert!(app.undo.is_empty());
+        assert!(app.session.undo_steps().is_empty());
 
         /* Drain first: the flash queue is bounded, so a message sent while
            six others are waiting is dropped rather than queued, and the
@@ -6698,18 +6119,18 @@ pub mod tests {
         let mut app = open_app();
         app.step_group(true);
         let id = app.entry_cursor.unwrap();
-        for n in 0..App::UNDO_DEPTH + 5 {
+        for n in 0..sennel_core::session::UNDO_DEPTH + 5 {
             app.open_edit_form();
             app.form.as_mut().unwrap().title = format!("edit-{n}");
             app.submit_form();
         }
-        assert_eq!(app.undo.len(), App::UNDO_DEPTH, "the stack is unbounded");
+        assert_eq!(app.session.undo_steps().len(), sennel_core::session::UNDO_DEPTH, "the stack is unbounded");
         /* The oldest steps fell off, so the walk back stops at the oldest
            one kept rather than at the original title. */
-        for _ in 0..App::UNDO_DEPTH {
+        for _ in 0..sennel_core::session::UNDO_DEPTH {
             app.undo_last();
         }
-        let title = app.vault.as_ref().unwrap().get_entry(&id).unwrap().title().to_string();
+        let title = app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string();
         assert_eq!(title, "edit-4", "{title}");
     }
 
@@ -6722,9 +6143,9 @@ pub mod tests {
         app.open_edit_form();
         app.form.as_mut().unwrap().title = "edited".into();
         app.submit_form();
-        assert!(!app.undo.is_empty());
+        assert!(!app.session.undo_steps().is_empty());
         app.lock();
-        assert!(app.undo.is_empty(), "snapshots survived the lock");
+        assert!(app.session.undo_steps().is_empty(), "snapshots survived the lock");
     }
 
     /* The bar names the next step and how many are behind it, so `u` never
@@ -6761,9 +6182,9 @@ pub mod tests {
         app.unlock_confirm = "first-pw".into();
         let mut typed = b"first-pw".to_vec();
         app.try_unlock(&mut typed, None);
-        assert!(app.vault.is_some(), "the vault did not open: {}", app.stage);
-        let root = app.vault.as_ref().unwrap().root_id();
-        app.vault.as_mut().unwrap().create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        assert!(app.session.is_open(), "the vault did not open: {}", app.stage);
+        let root = app.session.vault().unwrap().root_id();
+        app.session.vault_mut().unwrap().create_entry(&root, "mail", "u", "p", "", "").unwrap();
         app.persist();
 
         app.open_rekey();
@@ -6788,7 +6209,7 @@ pub mod tests {
         );
         // And the session kept working against the file it just rewrote.
         let entry = app.entry_rows()[0];
-        app.vault.as_mut().unwrap().update_entry(&entry, "mail2", "u", None, "", "").unwrap();
+        app.session.vault_mut().unwrap().update_entry(&entry, "mail2", "u", None, "", "").unwrap();
         app.persist();
         assert!(!app.stage.contains("cannot"), "{}", app.stage);
     }
@@ -6886,7 +6307,7 @@ pub mod tests {
         let bank = app.group_cursor.unwrap();
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 2, "the new entry did not land");
-        let made = app.vault.as_ref().unwrap().get_entry(&rows[1]).unwrap();
+        let made = app.session.vault().unwrap().get_entry(&rows[1]).unwrap();
         assert_eq!(made.title(), "savings");
         assert_eq!(made.username(), "me");
         assert_eq!(made.password(), "pw");
@@ -6915,7 +6336,7 @@ pub mod tests {
         }
         app.submit_form();
         let rows = app.entry_rows();
-        let kept = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
+        let kept = app.session.vault().unwrap().get_entry(&rows[0]).unwrap();
         assert_eq!(kept.password(), "p", "empty edit box overwrote the secret");
         assert_eq!(kept.notes(), "note");
     }
@@ -6933,7 +6354,7 @@ pub mod tests {
         app.form_backspace(); // empty again, but touched
         app.submit_form();
         let rows = app.entry_rows();
-        let cleared = app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap();
+        let cleared = app.session.vault().unwrap().get_entry(&rows[0]).unwrap();
         assert_eq!(cleared.password(), "", "backspace-to-empty did not clear");
     }
 
@@ -6950,7 +6371,7 @@ pub mod tests {
         assert!(app.form.is_none());
         assert!(!app.working(), "a cancelled form dirtied the vault");
         let rows = app.entry_rows();
-        assert_eq!(app.vault.as_ref().unwrap().get_entry(&rows[0]).unwrap().title(), "checking");
+        assert_eq!(app.session.vault().unwrap().get_entry(&rows[0]).unwrap().title(), "checking");
     }
 
     /* A title is the only must: submit without one reopens the form on the
@@ -7032,11 +6453,11 @@ pub mod tests {
         app.submit_group_prompt();
         let tree = app.group_tree();
         assert!(tree.iter().any(|(id, _)| {
-            app.vault.as_ref().unwrap().get_group(id).unwrap().name == "Cards"
+            app.session.vault().unwrap().get_group(id).unwrap().name == "Cards"
         }));
         let cursor = app.group_cursor.unwrap();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&cursor).unwrap().name,
+            app.session.vault().unwrap().get_group(&cursor).unwrap().name,
             "Cards"
         );
     }
@@ -7055,8 +6476,8 @@ pub mod tests {
         }
         app.submit_group_prompt();
         let path = app
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .unwrap()
             .group_path(&app.group_cursor.unwrap());
         assert!(path.contains(&"Ledgers".to_string()), "{path:?}");
@@ -7087,13 +6508,13 @@ pub mod tests {
         app.confirm = None;
         app.confirm_delete_group(id);
 
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert!(vault.in_recycle_bin(&banks), "the group is not in the bin");
         assert!(vault.is_recycled(&entry), "the entry did not ride along");
         assert!(app.stage.contains("recycle bin"), "{}", app.stage);
 
         app.undo_last();
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert!(!vault.in_recycle_bin(&banks), "u left the group in the bin");
         assert!(!vault.is_recycled(&entry), "u left the entry in the bin");
     }
@@ -7108,11 +6529,10 @@ pub mod tests {
         app.ask_delete_entry();
         app.confirm = None;
         app.confirm_delete_entry(id); // to the bin
-        app.undo.clear();
 
         // Onto the binned row, which lives under the bin group now.
         app.entry_cursor = Some(id);
-        app.group_cursor = app.vault.as_ref().unwrap().parent_group_of_entry(&id);
+        app.group_cursor = app.session.vault().unwrap().parent_group_of_entry(&id);
         app.ask_delete_entry();
         let Confirm::DeleteEntry { id, forever, .. } = app.confirm.clone().unwrap() else {
             panic!("no confirm in the bin");
@@ -7120,7 +6540,7 @@ pub mod tests {
         assert!(forever, "the bin asked the recoverable question");
         app.confirm = None;
         app.confirm_delete_entry(id);
-        assert!(app.vault.as_ref().unwrap().get_entry(&id).is_none(), "it survived");
+        assert!(app.session.vault().unwrap().get_entry(&id).is_none(), "it survived");
         // The first delete's flash is still showing; this is the next one.
         app.expire_now();
         assert!(app.stage.contains("for good"), "{}", app.stage);
@@ -7144,10 +6564,10 @@ pub mod tests {
         app.confirm_delete_group(id);
         /* Still in the tree, because the bin is a group like any other — but
            under the bin, which is what the pane and KeePassXC both show. */
-        assert!(app.vault.as_ref().unwrap().in_recycle_bin(&id));
+        assert!(app.session.vault().unwrap().in_recycle_bin(&id));
         let under_banks: Vec<String> = app
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .unwrap()
             .groups_in(&banks)
             .iter()
@@ -7164,12 +6584,12 @@ pub mod tests {
         app.step_group(true); // onto Banks
         app.switch_pane(); // X follows the pane: entries pane cuts the row
         app.cut_selected();
-        assert!(matches!(app.cut, Some(Cut::Entry(_))));
+        assert!(matches!(app.session.cut(), Some(Cut::Entry(_))));
         app.step_group(false); // back to Root as the paste target
         app.paste_cut();
-        assert!(app.cut.is_none(), "paste left the shelf armed");
+        assert!(app.session.cut().is_none(), "paste left the shelf armed");
         let root = app.root_id();
-        let rows = app.vault.as_ref().unwrap().entries_in(&root);
+        let rows = app.session.vault().unwrap().entries_in(&root);
         assert_eq!(rows.len(), 1, "the entry did not move to Root");
     }
 
@@ -7188,15 +6608,15 @@ pub mod tests {
         app.cut_selected();
         app.step_group(true); // onto Work
         app.paste_cut();
-        assert!(app.cut.is_none(), "paste left the shelf armed");
+        assert!(app.session.cut().is_none(), "paste left the shelf armed");
         /* The cursor lands on the moved group, so Work is found by name. */
         let work = app
             .group_tree()
             .iter()
             .map(|(id, _)| *id)
-            .find(|id| app.vault.as_ref().unwrap().get_group(id).unwrap().name == "Work")
+            .find(|id| app.session.vault().unwrap().get_group(id).unwrap().name == "Work")
             .unwrap();
-        let under_work = app.vault.as_ref().unwrap().groups_in(&work);
+        let under_work = app.session.vault().unwrap().groups_in(&work);
         assert_eq!(under_work.len(), 1, "Banks did not land under Work");
         assert_eq!(under_work[0].name, "Banks");
     }
@@ -7211,10 +6631,10 @@ pub mod tests {
         app.step_group(true); // onto Banks
         app.cut_selected();
         app.paste_cut(); // target is still Banks
-        assert!(app.cut.is_some(), "a failed paste disarmed the shelf");
+        assert!(app.session.cut().is_some(), "a failed paste disarmed the shelf");
         let banks = app.group_cursor.unwrap();
         assert_eq!(
-            app.vault.as_ref().unwrap().parent_group(&banks),
+            app.session.vault().unwrap().parent_group(&banks),
             Some(app.root_id()),
             "Banks moved despite the cycle guard"
         );
@@ -7229,7 +6649,7 @@ pub mod tests {
         app.step_group(true);
         app.cut_selected();
         assert!(app.drop_cut(), "an armed cut should be dropped");
-        assert!(app.cut.is_none());
+        assert!(app.session.cut().is_none());
         assert!(!app.drop_cut(), "an empty shelf is not a drop");
     }
 
@@ -7253,8 +6673,7 @@ pub mod tests {
         app.entry_rows()
             .iter()
             .map(|id| {
-                app.vault
-                    .as_ref()
+                app.session.vault()
                     .unwrap()
                     .get_entry(id)
                     .unwrap()
@@ -7290,7 +6709,7 @@ pub mod tests {
             .filter(|(i, _)| *i != 1)
             .map(|(_, id)| *id)
             .collect();
-        let vault = app.vault.as_mut().unwrap();
+        let vault = app.session.vault_mut().unwrap();
         for id in other {
             vault
                 .db_mut()
@@ -7312,7 +6731,7 @@ pub mod tests {
         app.step_group(true); // onto Banks
         let banks = app.group_cursor.unwrap();
         /* Banks needs a subtree to fold: a leaf correctly refuses. */
-        app.vault.as_mut().unwrap().create_group(&banks, "Work").unwrap();
+        app.session.vault_mut().unwrap().create_group(&banks, "Work").unwrap();
         app.collapse_group();
         let tree = app.group_tree();
         /* A folded group keeps its own row: only its subtree hides. */
@@ -7380,7 +6799,7 @@ pub mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         let hit = rows[0];
         assert_eq!(
-            app.vault.as_ref().unwrap().get_entry(&hit).unwrap().title(),
+            app.session.vault().unwrap().get_entry(&hit).unwrap().title(),
             "github token"
         );
         /* The relaxed selection rule: a global hit from another folder is
@@ -7476,7 +6895,7 @@ pub mod tests {
 
     fn open_password(app: &App) -> String {
         let id = app.entry_cursor.unwrap();
-        app.vault.as_ref().unwrap().get_entry(&id).unwrap()
+        app.session.vault().unwrap().get_entry(&id).unwrap()
             .password().to_string()
     }
 
@@ -7496,7 +6915,7 @@ pub mod tests {
         app.undo_last();
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 1, "u did not restore the entry");
-        let vault = app.vault.as_ref().unwrap();
+        let vault = app.session.vault().unwrap();
         assert_eq!(
             vault.parent_group_of_entry(&rows[0]),
             Some(app.group_cursor.unwrap()),
@@ -7516,7 +6935,7 @@ pub mod tests {
         app.submit_form();
         assert!(
             app.entry_rows().iter().any(|id| {
-                app.vault.as_ref().unwrap().get_entry(id).unwrap().title() == "fresh"
+                app.session.vault().unwrap().get_entry(id).unwrap().title() == "fresh"
             }),
             "the add did not land"
         );
@@ -7524,7 +6943,7 @@ pub mod tests {
         let titles: Vec<String> = app
             .entry_rows()
             .iter()
-            .map(|id| app.vault.as_ref().unwrap().get_entry(id).unwrap().title().to_string())
+            .map(|id| app.session.vault().unwrap().get_entry(id).unwrap().title().to_string())
             .collect();
         assert!(!titles.contains(&"fresh".to_string()), "u did not remove the add");
     }
@@ -7540,10 +6959,10 @@ pub mod tests {
             prompt.caret = 7;
         }
         app.submit_group_prompt();
-        assert_eq!(app.vault.as_ref().unwrap().get_group(&banks).unwrap().name, "Savings");
+        assert_eq!(app.session.vault().unwrap().get_group(&banks).unwrap().name, "Savings");
         app.undo_last();
         assert_eq!(
-            app.vault.as_ref().unwrap().get_group(&banks).unwrap().name,
+            app.session.vault().unwrap().get_group(&banks).unwrap().name,
             "Banks",
             "u did not put the old name back"
         );
@@ -7952,7 +7371,7 @@ pub mod tests {
         app.open_mint();
         app.mint_reroll();
         app.mint_toggle(Knob::Symbols);
-        assert!(!app.dirty, "the generator dirtied the vault");
+        assert!(!app.session.is_dirty(), "the generator dirtied the vault");
     }
 
     /* `y` on an empty popup says so rather than wiping whatever the user is

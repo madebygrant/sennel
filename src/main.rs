@@ -227,7 +227,7 @@ fn main() -> Result<()> {
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
     app.mouse = cfg.mouse;
-    app.touch_id = cfg.touch_id && cfg!(target_os = "macos");
+    app.session.touch_id = cfg.touch_id && cfg!(target_os = "macos");
     app.theme_overridden = cfg.theme_overridden;
     /* Said once, on the first frame, and then it is the user's screen: an
        override that measures badly is worth naming, not worth refusing. */
@@ -1842,7 +1842,7 @@ mod tests {
         app.open_vault(vault);
         handle_paste(&mut app, "DDDD/qq".to_string());
         assert!(app.confirm.is_none() && !app.band && !app.quit);
-        assert_eq!(app.vault.as_ref().unwrap().entry_count(), 1);
+        assert_eq!(app.session.vault().unwrap().entry_count(), 1);
         assert!(app.stage.contains("nothing here takes pasted text"), "{}", app.stage);
     }
 
@@ -1916,10 +1916,10 @@ mod tests {
     // Unlocked once by typing, then locked, the way every quick unlock starts.
     fn typed_then_locked(touch_id: bool) -> (App, crate::app::tests::TempPath) {
         let (mut app, tmp) = crate::app::tests::locked_app_with_db("correct horse");
-        app.touch_id = touch_id;
+        app.session.touch_id = touch_id;
         app.unlock_password = "correct horse".into();
         enter(&mut app);
-        assert!(app.vault.is_some(), "the typed unlock failed: {}", app.stage);
+        assert!(app.session.is_open(), "the typed unlock failed: {}", app.stage);
         app.expire_now();
         app.lock_now();
         (app, tmp)
@@ -1932,7 +1932,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.stage, "unlocking…  Touch ID");
         unlock_now(&mut app);
-        assert!(app.vault.is_some(), "the sealed password did not open it: {}", app.stage);
+        assert!(app.session.is_open(), "the sealed password did not open it: {}", app.stage);
         assert_eq!(app.view, crate::app::View::Browser);
     }
 
@@ -1942,7 +1942,7 @@ mod tests {
         assert_eq!(app.stage, "locked  ·  password to return");
         assert!(!app.quick_ready());
         enter(&mut app);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(app.stage.contains("empty password"), "{}", app.stage);
     }
 
@@ -1953,12 +1953,12 @@ mod tests {
         refuse(Some(crate::touchid::Refused::Again("cancelled".into())));
         enter(&mut app);
         refuse(None);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(!app.unlocking, "the frame loop would open the prompt again next frame");
         assert!(app.stage.contains("cancelled"), "{}", app.stage);
         assert!(app.quick_ready(), "a cancel forgot the sealed password");
         enter(&mut app);
-        assert!(app.vault.is_some(), "{}", app.stage);
+        assert!(app.session.is_open(), "{}", app.stage);
     }
 
     fn refuse(with: Option<crate::touchid::Refused>) {
@@ -1972,7 +1972,7 @@ mod tests {
         refuse(Some(crate::touchid::Refused::Void("item not found".into())));
         enter(&mut app);
         refuse(None);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(!app.quick_ready());
         assert!(app.stage.contains("type the password"), "{}", app.stage);
     }
@@ -1985,10 +1985,10 @@ mod tests {
         std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o000)).unwrap();
         enter(&mut app);
         std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(app.vault.is_none(), "opened an unreadable file");
+        assert!(!app.session.is_open(), "opened an unreadable file");
         assert!(app.quick_ready(), "a read error dropped the sealed password");
         enter(&mut app);
-        assert!(app.vault.is_some(), "{}", app.stage);
+        assert!(app.session.is_open(), "{}", app.stage);
     }
 
     // ^o and the file box can name the vault through a symlinked folder.
@@ -2010,7 +2010,7 @@ mod tests {
         let (mut app, tmp) = typed_then_locked(true);
         crate::vault::Vault::new().save_as(&tmp.0, "changed elsewhere", None).unwrap();
         enter(&mut app);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(!app.quick_ready(), "Enter would try the stale password forever");
     }
 
@@ -2030,7 +2030,7 @@ mod tests {
         assert!(crate::vault::Vault::open(&tmp.0, "battery staple", None).is_ok());
         app.lock_now();
         enter(&mut app);
-        assert!(app.vault.is_some(), "sealed the old password: {}", app.stage);
+        assert!(app.session.is_open(), "sealed the old password: {}", app.stage);
     }
 
     // Sealed for one vault, never offered for another typed into the file box.
@@ -2040,7 +2040,7 @@ mod tests {
         let (_, other) = crate::app::tests::locked_app_with_db("other");
         app.unlock_file = other.0.display().to_string();
         enter(&mut app);
-        assert!(app.vault.is_none());
+        assert!(!app.session.is_open());
         assert!(app.stage.contains("empty password"), "{}", app.stage);
     }
 
@@ -2162,7 +2162,7 @@ mod tests {
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 3, "the typed row was not added");
         assert_eq!(
-            app.vault.as_ref().unwrap().get_entry(&rows[2]).unwrap().title(),
+            app.session.vault().unwrap().get_entry(&rows[2]).unwrap().title(),
             "q"
         );
     }
@@ -2208,7 +2208,7 @@ mod tests {
         assert!(app.group_prompt.is_none(), "enter did not submit");
         let tree = app.group_tree();
         let named = tree.iter().any(|(id, _)| {
-            app.vault.as_ref().unwrap().get_group(id).unwrap().name == "q"
+            app.session.vault().unwrap().get_group(id).unwrap().name == "q"
         });
         assert!(named, "the typed name did not become a group");
     }
@@ -2228,9 +2228,9 @@ mod tests {
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
-        assert!(app.cut.is_some(), "X did not arm the shelf");
+        assert!(app.session.cut().is_some(), "X did not arm the shelf");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(app.cut.is_none(), "esc did not drop the cut");
+        assert!(app.session.cut().is_none(), "esc did not drop the cut");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         // Second Esc has nothing to unwind: the usual report returns and,
         // above all, Esc never quits.
@@ -2245,8 +2245,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
         let banks = app.group_cursor.unwrap();
         // Banks needs a subtree to fold: a leaf correctly refuses.
-        app.vault
-            .as_mut()
+        app.session.vault_mut()
             .unwrap()
             .create_group(&banks, "Work")
             .unwrap();
@@ -2378,8 +2377,8 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // submit
         handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
         let entry = app
-            .vault
-            .as_ref()
+            .session
+            .vault()
             .unwrap()
             .get_entry(&app.entry_cursor.unwrap())
             .unwrap();
@@ -2420,11 +2419,11 @@ mod tests {
 
         let mut app = groups();
         app.run_menu(&menu_item(MenuId::Entry, "Cut"));
-        assert!(matches!(app.cut, Some(Cut::Entry(_))), "{:?}", app.cut);
+        assert!(matches!(app.session.cut(), Some(Cut::Entry(_))), "{:?}", app.session.cut());
 
         let mut app = entries();
         app.run_menu(&menu_item(MenuId::Group, "Cut"));
-        assert!(matches!(app.cut, Some(Cut::Group(_))), "{:?}", app.cut);
+        assert!(matches!(app.session.cut(), Some(Cut::Group(_))), "{:?}", app.session.cut());
     }
 
     // On the fields screen `D` deletes a field without asking, and in the entry popup `p` copies.
@@ -2792,17 +2791,17 @@ mod tests {
         app.run_menu(&menu_item(MenuId::Group, "Cut"));
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto B
         app.run_menu(&menu_item(MenuId::Entry, "Paste"));
-        assert!(matches!(app.cut, Some(Cut::Group(_))), "Entry › Paste moved the group");
+        assert!(matches!(app.session.cut(), Some(Cut::Group(_))), "Entry › Paste moved the group");
         app.run_menu(&menu_item(MenuId::Group, "Paste"));
-        assert_eq!(app.cut, None, "Group › Paste did not move it");
+        assert_eq!(app.session.cut(), None, "Group › Paste did not move it");
 
         let mut app = two_groups();
         app.run_menu(&menu_item(MenuId::Entry, "Cut"));
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         app.run_menu(&menu_item(MenuId::Group, "Paste"));
-        assert!(matches!(app.cut, Some(Cut::Entry(_))), "Group › Paste moved the entry");
+        assert!(matches!(app.session.cut(), Some(Cut::Entry(_))), "Group › Paste moved the entry");
         app.run_menu(&menu_item(MenuId::Entry, "Paste"));
-        assert_eq!(app.cut, None, "Entry › Paste did not move it");
+        assert_eq!(app.session.cut(), None, "Entry › Paste did not move it");
     }
 
     #[test]

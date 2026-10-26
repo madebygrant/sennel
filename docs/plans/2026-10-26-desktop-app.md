@@ -25,7 +25,7 @@ The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pa
   - the Touch ID fake: `touchid::REFUSE`, and the `imp` swap from `cfg(test)` to `cfg(any(test, feature = "test-support"))`
 - **Exit criterion:** `cargo test --workspace` and `cargo clippy --workspace --all-targets` both pass with the same test count. `tests/get.rs` still runs the `sennel` binary.
 
-## Wave 2: A `Session` in core that returns outcomes
+## Wave 2: A `Session` in core that returns outcomes [done 2026-10-26]
 - Add `sennel_core::session::Session` holding:
   - the vault
   - save state: `dirty`, `overwrite_armed`, `pending`, `revision`

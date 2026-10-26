@@ -10,6 +10,7 @@ pub mod import;
 pub mod migration;
 pub mod pwned;
 pub mod search;
+pub mod session;
 pub mod sort;
 pub mod touchid;
 pub mod vault;
