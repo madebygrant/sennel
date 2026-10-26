@@ -1859,6 +1859,35 @@ fn draw_form(frame: &mut Frame, app: &App) {
     popup(frame, &truncate(&title, width.saturating_sub(4) as usize), lines, width, &p);
 }
 
+// Shared with the test that holds the menus to the keys listed here.
+pub const BROWSER_KEYS: &[(&str, &str, &str)] = &[
+    ("move", "j k  ↑ ↓", "through the panes"),
+    ("page", "^d ^u  PgUp PgDn", "a screen at a time"),
+    ("ends", "g G", "top, bottom of the pane"),
+    ("panes", "Tab", "groups ↔ entries"),
+    ("open", "enter", "open group, open entry"),
+    ("copy", "y p U t", "username, password, url, one-time code"),
+    ("reveal", "*", "show the password"),
+    ("edit", "a e D", "add, edit, delete entry"),
+    ("make", "P", "generate a password, no entry needed"),
+    ("groups", "A E D", "add, rename, delete group"),
+    ("cut", "X V", "cut, paste"),
+    ("fold", "← →", "collapse, expand · ← hops from entries"),
+    ("order", "o", "entries: name, recent, updated"),
+    ("find", "/", "fuzzy search · ^g narrows it to this group"),
+    ("match", "n N", "next, previous match"),
+    ("undo", "u", "one level"),
+    ("save", "^s  ^r  ^f", "save now · reload the file on disk · merge it in"),
+    ("lock", "^l", "lock now"),
+    ("master", "^p", "change the master password"),
+    ("audit", "!", "reused, weak and empty passwords"),
+    ("fields", "F", "custom fields and attachments"),
+    ("history", "H", "old versions · D clears them"),
+    ("theme", "^t", "next palette · remembered"),
+    ("back", "esc", "drop cut, clear filter, then report"),
+    ("quit", "q  ^c", ""),
+];
+
 /* One entry per line in three aligned columns. Only live keys: a row naming
    a key that does nothing on this screen is documentation for a bug. */
 fn draw_help(frame: &mut Frame, app: &App) {
@@ -1866,8 +1895,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
     /* Only live keys: a row naming a key that does nothing on this screen is
        documentation for a bug. The lock owns every printable key, so its
        table names the boxes rather than the browser's list. */
-    let rows: Vec<(&str, &str, &str)> = if app.view == View::Unlock {
-        vec![
+    let rows: &[(&str, &str, &str)] = if app.view == View::Unlock {
+        &[
             ("type", "a–z  0–9", "the boxes take every key"),
             ("move", "tab  ↑ ↓", "between boxes"),
             ("edit", "^u  ^w", "clear box, kill word"),
@@ -1880,33 +1909,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("quit", "^c", ""),
         ]
     } else {
-        vec![
-            ("move", "j k  ↑ ↓", "through the panes"),
-            ("page", "^d ^u  PgUp PgDn", "a screen at a time"),
-            ("ends", "g G", "top, bottom of the pane"),
-            ("panes", "Tab", "groups ↔ entries"),
-            ("open", "enter", "open group, open entry"),
-            ("copy", "y p U t", "username, password, url, one-time code"),
-            ("reveal", "*", "show the password"),
-            ("edit", "a e D", "add, edit, delete entry"),
-            ("make", "P", "generate a password, no entry needed"),
-            ("groups", "A E D", "add, rename, delete group"),
-            ("cut", "X V", "cut, paste"),
-            ("fold", "← →", "collapse, expand · ← hops from entries"),
-            ("order", "o", "entries: name, recent, updated"),
-            ("find", "/", "fuzzy search · ^g narrows it to this group"),
-            ("match", "n N", "next, previous match"),
-            ("undo", "u", "one level"),
-            ("save", "^s  ^r  ^f", "save now · reload the file on disk · merge it in"),
-            ("lock", "^l", "lock now"),
-            ("master", "^p", "change the master password"),
-            ("audit", "!", "reused, weak and empty passwords"),
-            ("fields", "F", "custom fields and attachments"),
-            ("history", "H", "old versions · D clears them"),
-            ("theme", "^t", "next palette · remembered"),
-            ("back", "esc", "drop cut, clear filter, then report"),
-            ("quit", "q  ^c", ""),
-        ]
+        BROWSER_KEYS
     };
 
     let group = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0) + 2;

@@ -28,6 +28,88 @@ pub enum Pane {
     Entries,
 }
 
+// Calls the action rather than replaying its key: `D`, `X` and `p` mean other things in other panes and popups.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct MenuItem {
+    pub label: &'static str,
+    // Shown beside the label only. The help table test holds it to a listed key.
+    pub shortcut: &'static str,
+    pub run: fn(&mut App),
+}
+
+const fn item(label: &'static str, shortcut: &'static str, run: fn(&mut App)) -> MenuItem {
+    MenuItem { label, shortcut, run }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuId {
+    Vault,
+    Entry,
+    Group,
+    View,
+    Help,
+}
+
+// Read only by tests until the header draws it.
+#[allow(dead_code)]
+pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
+    (
+        MenuId::Vault,
+        "Vault",
+        &[
+            item("Save", "^s", App::save_now),
+            item("Reload from disk", "^r", App::reload_vault),
+            item("Merge from disk", "^f", App::merge_vault),
+            item("Undo", "u", App::undo_last),
+            item("Generate password", "P", App::open_mint),
+            item("Audit passwords", "!", App::open_audit),
+            item("Change master password", "^p", App::open_rekey),
+            item("Lock", "^l", App::lock_now),
+            item("Quit", "q", App::ask_quit),
+        ],
+    ),
+    (
+        MenuId::Entry,
+        "Entry",
+        &[
+            item("Copy username", "y", App::copy_username),
+            item("Copy password", "p", App::copy_password),
+            item("Copy URL", "U", App::copy_url),
+            item("Copy one-time code", "t", App::copy_totp),
+            item("Show password", "*", App::toggle_password),
+            item("Add", "a", App::open_add_form),
+            item("Edit", "e", App::open_edit_form),
+            item("Fields and attachments", "F", App::open_fields),
+            item("History", "H", App::open_history),
+            item("Cut", "X", App::cut_entry),
+            item("Paste", "V", App::paste_cut),
+            item("Delete", "D", App::ask_delete_entry),
+        ],
+    ),
+    (
+        MenuId::Group,
+        "Group",
+        &[
+            item("Add", "A", App::open_group_prompt_new),
+            item("Rename", "E", App::open_group_prompt_rename),
+            item("Cut", "X", App::cut_group),
+            item("Paste", "V", App::paste_cut),
+            item("Delete", "D", App::ask_delete_group),
+        ],
+    ),
+    (
+        MenuId::View,
+        "View",
+        &[
+            item("Search", "/", App::open_search),
+            item("Sort order", "o", App::cycle_order),
+            item("Next theme", "^t", App::cycle_theme),
+        ],
+    ),
+    (MenuId::Help, "Help", &[item("Keys", "h", App::open_help)]),
+];
+
 /* Which box on the unlock screen has the keys. Password first because it is
    the one every unlock needs; the confirm only exists in create mode. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -2653,6 +2735,32 @@ impl App {
         }
     }
 
+    pub fn open_help(&mut self) {
+        self.show_help = true;
+    }
+
+    // Does nothing under a popup or the search band: the action would land on the browser behind it.
+    #[allow(dead_code)]
+    pub fn run_menu(&mut self, item: &MenuItem) {
+        let covered = self.view != View::Browser
+            || self.confirm.is_some()
+            || self.form.is_some()
+            || self.group_prompt.is_some()
+            || self.rekey.is_some()
+            || self.audit.is_some()
+            || self.fields.is_some()
+            || self.history.is_some()
+            || self.mint.is_some()
+            || self.browse.is_some()
+            || self.library.is_some()
+            || self.detail
+            || self.band
+            || self.show_help;
+        if !covered {
+            (item.run)(self);
+        }
+    }
+
     /* `/` opens the band over whatever was last searched, so refining a
        filter does not mean retyping it. The caret lands at the end: you came
        here to add characters. */
@@ -4477,28 +4585,28 @@ impl App {
     /* `X`: cut whatever the cursor is on. Groups pane cuts the group, entries
        pane cuts the entry — one key, pane decides, the status bar says which. */
     pub fn cut_selected(&mut self) {
-        let Some(cut) = (match self.active_pane {
-            Pane::Groups => match self.selected_group() {
-                Some(g) if g.id() != self.root_id() => Some(Cut::Group(g.id())),
-                Some(_) => {
-                    self.say("the root group cannot be cut");
-                    None
-                }
-                None => {
-                    self.say("no group here to cut");
-                    None
-                }
-            },
-            Pane::Entries => match self.selected_entry() {
-                Some(e) => Some(Cut::Entry(e.id())),
-                None => {
-                    self.say("no entry here to cut");
-                    None
-                }
-            },
-        }) else {
-            return;
-        };
+        match self.active_pane {
+            Pane::Groups => self.cut_group(),
+            Pane::Entries => self.cut_entry(),
+        }
+    }
+
+    pub fn cut_group(&mut self) {
+        match self.selected_group() {
+            Some(g) if g.id() != self.root_id() => self.arm_cut(Cut::Group(g.id())),
+            Some(_) => self.say("the root group cannot be cut"),
+            None => self.say("no group here to cut"),
+        }
+    }
+
+    pub fn cut_entry(&mut self) {
+        match self.selected_entry() {
+            Some(e) => self.arm_cut(Cut::Entry(e.id())),
+            None => self.say("no entry here to cut"),
+        }
+    }
+
+    fn arm_cut(&mut self, cut: Cut) {
         self.cut = Some(cut);
         self.say(match cut {
             Cut::Group(_) => "group cut  ·  V pastes it under another group",

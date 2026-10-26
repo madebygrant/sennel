@@ -2190,4 +2190,89 @@ mod tests {
             .unwrap();
         assert_eq!(entry.notes(), "", "u did not restore the notes");
     }
+
+    fn menu_item(menu: crate::app::MenuId, label: &str) -> crate::app::MenuItem {
+        let (_, _, items) = crate::app::MENUS.iter().find(|(id, _, _)| *id == menu).unwrap();
+        *items.iter().find(|item| item.label == label).unwrap()
+    }
+
+    // `D` and `X` follow the active pane on the keyboard; the menu names the kind of row instead.
+    #[test]
+    fn menu_delete_and_cut_act_on_the_kind_of_row_they_name() {
+        use crate::app::{Cut, MenuId, Pane};
+
+        let groups = || {
+            let mut app = open_browser();
+            handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
+            assert_eq!(app.active_pane, Pane::Groups);
+            app
+        };
+        let entries = || {
+            let mut app = groups();
+            handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(app.active_pane, Pane::Entries);
+            app
+        };
+
+        let mut app = groups();
+        app.run_menu(&menu_item(MenuId::Entry, "Delete"));
+        assert!(matches!(app.confirm, Some(Confirm::DeleteEntry { .. })), "{:?}", app.confirm);
+        assert_eq!(app.active_pane, Pane::Groups, "the menu moved the pane");
+
+        let mut app = entries();
+        app.run_menu(&menu_item(MenuId::Group, "Delete"));
+        assert!(matches!(app.confirm, Some(Confirm::DeleteGroup { .. })), "{:?}", app.confirm);
+
+        let mut app = groups();
+        app.run_menu(&menu_item(MenuId::Entry, "Cut"));
+        assert!(matches!(app.cut, Some(Cut::Entry(_))), "{:?}", app.cut);
+
+        let mut app = entries();
+        app.run_menu(&menu_item(MenuId::Group, "Cut"));
+        assert!(matches!(app.cut, Some(Cut::Group(_))), "{:?}", app.cut);
+    }
+
+    // On the fields screen `D` deletes a field without asking, and in the entry popup `p` copies.
+    #[test]
+    fn menus_do_nothing_under_a_popup() {
+        use crate::app::MenuId;
+
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.open_fields();
+        assert!(app.fields.is_some());
+        app.run_menu(&menu_item(MenuId::Entry, "Delete"));
+        assert!(app.confirm.is_none(), "Delete reached the browser behind the fields screen");
+        assert!(app.fields.is_some());
+
+        let mut app = open_browser();
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.detail = true;
+        app.run_menu(&menu_item(MenuId::Vault, "Change master password"));
+        assert!(app.rekey.is_none(), "rekey opened behind the entry popup");
+        app.run_menu(&menu_item(MenuId::Vault, "Lock"));
+        assert_eq!(app.view, crate::app::View::Browser, "Lock ran behind the entry popup");
+    }
+
+    #[test]
+    fn every_menu_shortcut_is_in_the_help_table() {
+        let listed: Vec<&str> = crate::ui::BROWSER_KEYS
+            .iter()
+            .flat_map(|(_, keys, _)| keys.split_whitespace())
+            .collect();
+        for (menu, _, items) in crate::app::MENUS {
+            // `h` opens the table, and the status bar is where it is advertised.
+            if *menu == crate::app::MenuId::Help {
+                continue;
+            }
+            for item in *items {
+                assert!(
+                    listed.contains(&item.shortcut),
+                    "{menu:?} › {} shows {}, which the help table does not list",
+                    item.label,
+                    item.shortcut
+                );
+            }
+        }
+    }
 }
