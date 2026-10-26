@@ -32,7 +32,8 @@ pub enum Pane {
 #[derive(Clone, Copy, Debug)]
 pub struct MenuItem {
     pub label: &'static str,
-    // Shown beside the label only. The help table test holds it to a listed key.
+    // Shown beside the label only. The help table test holds it to a listed key. Empty where the key follows
+    // the pane (`D`, `X`) or the cut (`V`), or the menu would teach a key that does something else.
     pub shortcut: &'static str,
     pub run: fn(&mut App),
 }
@@ -79,9 +80,9 @@ pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
             item("Edit", "e", App::open_edit_form),
             item("Fields and attachments", "F", App::open_fields),
             item("History", "H", App::open_history),
-            item("Cut", "X", App::cut_entry),
-            item("Paste", "V", App::paste_cut),
-            item("Delete", "D", App::ask_delete_entry),
+            item("Cut", "", App::cut_entry),
+            item("Paste", "", App::paste_entry),
+            item("Delete", "", App::ask_delete_entry),
         ],
     ),
     (
@@ -90,9 +91,9 @@ pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
         &[
             item("Add", "A", App::open_group_prompt_new),
             item("Rename", "E", App::open_group_prompt_rename),
-            item("Cut", "X", App::cut_group),
-            item("Paste", "V", App::paste_cut),
-            item("Delete", "D", App::ask_delete_group),
+            item("Cut", "", App::cut_group),
+            item("Paste", "", App::paste_group),
+            item("Delete", "", App::ask_delete_group),
         ],
     ),
     (
@@ -792,9 +793,9 @@ pub struct App {
     pub menu_cursor: usize,
     /// Where a right-click opened the menu. `None` hangs it under its header label.
     pub menu_at: Option<(u16, u16)>,
-    /// The open dropdown's box and its item rows as drawn this frame.
+    /// The open dropdown's box as drawn this frame, and how many of its items fit in it.
     pub menu_area: Rect,
-    pub menu_rows: Vec<(Rect, usize)>,
+    pub menu_shown: usize,
     /// The row a click just copied, and when, for the glow.
     pub copied: Option<(CopyRow, Instant)>,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
@@ -955,7 +956,7 @@ impl App {
             menu_cursor: 0,
             menu_at: None,
             menu_area: Rect::ZERO,
-            menu_rows: Vec::new(),
+            menu_shown: 0,
             copied: None,
             order: SortOrder::default(),
             generator: crate::config::Generator::default(),
@@ -2682,11 +2683,6 @@ impl App {
        the pane at all hands it the keys, which is what a click means
        everywhere else. */
     pub fn click(&mut self, column: u16, row: u16) {
-        let inside = |area: Rect| {
-            area.width > 0
-                && (area.left()..area.right()).contains(&column)
-                && (area.top()..area.bottom()).contains(&row)
-        };
         /* Before the panes, because a copy row can sit over the detail pane
            and a click there means the field, not a list selection. */
         if let Some((_, what)) = self.copy_rows.iter().find(|(at, _)| *at == row).copied() {
@@ -2700,7 +2696,8 @@ impl App {
         if self.detail {
             return;
         }
-        if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| inside(*at)).copied() {
+        let at = Position::new(column, row);
+        if let Some((_, id)) = self.menu_bar.iter().find(|(label, _)| label.contains(at)).copied() {
             if !self.menus_blocked() {
                 self.toggle_menu(id);
             }
@@ -2744,12 +2741,19 @@ impl App {
         let Some(pane) = self.select_at(column, row) else {
             return;
         };
-        self.menu = Some(match pane {
+        let id = match pane {
             Pane::Groups => MenuId::Group,
             Pane::Entries => MenuId::Entry,
-        });
-        self.menu_cursor = 0;
-        self.menu_at = Some((column, row));
+        };
+        self.open_menu(id, Some((column, row)));
+    }
+
+    // On the open box it does nothing, so it cannot select the row hidden behind the menu.
+    pub fn right_click_menu(&mut self, column: u16, row: u16) {
+        if !self.menu_area.contains(Position::new(column, row)) {
+            self.close_menu();
+            self.context_menu(column, row);
+        }
     }
 
     /* Click-to-copy. The same four copies `y p U t` do, through the same
@@ -2775,10 +2779,7 @@ impl App {
 
     /// Wheel over a pane scrolls that pane, whichever one has the keys.
     pub fn wheel(&mut self, column: u16, row: u16, down: bool) {
-        let over_groups = self.group_area.width > 0
-            && (self.group_area.left()..self.group_area.right()).contains(&column)
-            && (self.group_area.top()..self.group_area.bottom()).contains(&row);
-        if over_groups {
+        if self.group_area.contains(Position::new(column, row)) {
             self.step_group(down);
         } else {
             self.step_entry(down);
@@ -2789,22 +2790,34 @@ impl App {
         self.show_help = true;
     }
 
-    // Under a popup or the search band, a menu action would land on the browser behind it.
-    pub fn menus_blocked(&self) -> bool {
-        self.view != View::Browser
-            || self.confirm.is_some()
+    // The popups that own the screen, so the mouse stays out of them. Not the detail popup or the search
+    // band: a click on a copy row still means something under those.
+    pub fn popup_open(&self) -> bool {
+        self.confirm.is_some()
             || self.form.is_some()
             || self.group_prompt.is_some()
             || self.rekey.is_some()
             || self.audit.is_some()
             || self.fields.is_some()
             || self.history.is_some()
+            // The generator draws over the detail pane, whose copy rows match on the screen row alone: a click
+            // under the generated password once copied the selected entry's instead.
             || self.mint.is_some()
             || self.browse.is_some()
             || self.library.is_some()
-            || self.detail
-            || self.band
             || self.show_help
+    }
+
+    // Under any popup or the search band, a menu action would land on the browser behind it.
+    pub fn menus_blocked(&self) -> bool {
+        self.view != View::Browser || self.popup_open() || self.detail || self.band
+    }
+
+    // On every event and frame: a popup can open with no click or key, such as the idle lock or a reload conflict.
+    pub fn drop_blocked_menu(&mut self) {
+        if self.menu.is_some() && self.menus_blocked() {
+            self.close_menu();
+        }
     }
 
     pub fn run_menu(&mut self, item: &MenuItem) {
@@ -2819,13 +2832,22 @@ impl App {
         self.menu_at = None;
     }
 
+    fn open_menu(&mut self, id: MenuId, at: Option<(u16, u16)>) {
+        self.menu = Some(id);
+        self.menu_at = at;
+        self.menu_cursor = 0;
+        // Nothing of this menu is on screen to step through or click until the next frame draws it.
+        self.menu_area = Rect::ZERO;
+        self.menu_shown = 0;
+    }
+
+    // A second click on the label closes its menu, unless the menu is at a right-click's pointer: then it
+    // moves under the label.
     fn toggle_menu(&mut self, id: MenuId) {
-        if self.menu == Some(id) {
+        if self.menu == Some(id) && self.menu_at.is_none() {
             self.close_menu();
         } else {
-            self.menu = Some(id);
-            self.menu_cursor = 0;
-            self.menu_at = None;
+            self.open_menu(id, None);
         }
     }
 
@@ -2838,11 +2860,10 @@ impl App {
 
     // Only through the rows drawn: a short terminal cuts the box off, and Enter must not run a hidden item.
     pub fn step_menu(&mut self, down: bool) {
-        let len = match self.menu_rows.len() {
-            0 => self.menu_items().len(),
-            drawn => drawn,
+        let len = self.menu_shown;
+        if len == 0 {
+            return;
         }
-        .max(1);
         self.menu_cursor = if down {
             (self.menu_cursor + 1) % len
         } else {
@@ -2856,33 +2877,39 @@ impl App {
             return;
         };
         let next = (if right { at + 1 } else { at + MENUS.len() - 1 }) % MENUS.len();
-        self.menu = Some(MENUS[next].0);
-        self.menu_cursor = 0;
         // Under its label when there is one; a right-click menu with the labels hidden stays put.
-        if !self.menu_bar.is_empty() {
-            self.menu_at = None;
-        }
+        let anchor = if self.menu_bar.is_empty() { self.menu_at } else { None };
+        self.open_menu(MENUS[next].0, anchor);
     }
 
-    // Closed before the item runs, so the popup the item opens is the only thing up.
+    // Closed before the item runs, so the popup the item opens is the only thing up. Only a drawn row runs.
     pub fn choose_menu(&mut self) {
-        let item = self.menu_items().get(self.menu_cursor).copied();
+        let shown = &self.menu_items()[..self.menu_shown.min(self.menu_items().len())];
+        let item = shown.get(self.menu_cursor).copied();
         self.close_menu();
         if let Some(item) = item {
             self.run_menu(&item);
         }
     }
 
-    // An open menu takes every click: one that misses it closes it rather than landing behind it.
+    /// Where item `n` of the open menu was drawn: one row each, inside the box's border.
+    pub fn menu_row(&self, n: usize) -> Option<Rect> {
+        let box_ = self.menu_area;
+        (n < self.menu_shown).then(|| Rect::new(box_.x + 1, box_.y + 1 + n as u16, box_.width.saturating_sub(2), 1))
+    }
+
+    // An open menu takes every click: one that misses it closes it rather than landing behind it. The box
+    // goes before the labels, because a menu lifted to fit a short screen can cover them.
     pub fn click_menu(&mut self, column: u16, row: u16) {
-        let hit = |area: Rect| area.contains(Position::new(column, row));
-        if let Some((_, n)) = self.menu_rows.iter().find(|(at, _)| hit(*at)).copied() {
+        let at = Position::new(column, row);
+        if let Some(n) = (0..self.menu_shown).find(|&n| self.menu_row(n).is_some_and(|r| r.contains(at))) {
             self.menu_cursor = n;
             self.choose_menu();
-        } else if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| hit(*at)).copied() {
-            self.toggle_menu(id);
-        } else if !hit(self.menu_area) {
-            self.close_menu();
+        } else if !self.menu_area.contains(at) {
+            match self.menu_bar.iter().find(|(label, _)| label.contains(at)).copied() {
+                Some((_, id)) => self.toggle_menu(id),
+                None => self.close_menu(),
+            }
         }
     }
 
@@ -4743,6 +4770,21 @@ impl App {
             Cut::Group(_) => "group cut  ·  V pastes it under another group",
             Cut::Entry(_) => "entry cut  ·  V moves it to another group",
         });
+    }
+
+    // The menus name the kind of row, so each pastes only its own kind of cut. `V` pastes either.
+    pub fn paste_entry(&mut self) {
+        match self.cut {
+            Some(Cut::Group(_)) => self.say("a group is cut  ·  Group › Paste moves it"),
+            _ => self.paste_cut(),
+        }
+    }
+
+    pub fn paste_group(&mut self) {
+        match self.cut {
+            Some(Cut::Entry(_)) => self.say("an entry is cut  ·  Entry › Paste moves it"),
+            _ => self.paste_cut(),
+        }
     }
 
     /* `V`: paste the armed cut into the selected group, from either pane.

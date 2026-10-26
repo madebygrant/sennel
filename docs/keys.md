@@ -129,22 +129,24 @@ otherwise invisible: the clipboard is somewhere else, and the status line is at 
 screen from the hand that just moved.
 
 The header holds a menu bar, `Vault  Entry  Group  View  Help`. A click opens a menu under its
-label, and each row shows its key on the right, so the menus teach the key table as they go. A
-click on a row runs it, and a click on another label switches to that menu. A click outside the
-menu closes it and goes no further, so it cannot select a row or copy a field behind it. While a
-menu is open the wheel moves through its rows instead of scrolling a pane, `↑ ↓` or `j k` move,
+label, and most rows show their key on the right, so the menus teach the key table as they go.
+Delete, Cut and Paste show none, because `D`, `X` and `V` follow the pane or the cut rather than
+the menu. A click on a row runs it, and a click on a label switches to that menu. A click outside
+the menu closes it and goes no further, so it cannot select a row or copy a field behind it. While
+a menu is open the wheel moves through its rows instead of scrolling a pane, `↑ ↓` or `j k` move,
 `← →` step to the next menu, `enter` runs the row and `esc` closes it. Any other key closes the
 menu and then does what it always does, so `^l` still locks.
 
 A right-click on a group or entry selects it and opens its menu at the pointer. On empty space it
-opens no menu, though the pane under it takes the keys, as a click there would.
+opens no menu, though the pane under it takes the keys, as a click there would. On an open menu it
+does nothing. A click on the open menu's own label moves it up under the label.
 
 A menu row runs the same action as its key, but where a key depends on the pane, the menu names
 the row instead: Entry › Delete deletes the entry and Group › Delete the group, whichever pane has
-the keys. The labels only take room the header has spare, so on a narrow terminal or under a long
-status message they give way, and a menu hanging from one closes with it. A right-click menu is
-not tied to a label and stays open. With `mouse = false` there are no labels, since nothing could
-open them.
+the keys, and each Paste moves only its own kind of cut. The labels only take room the header has
+spare, so on a narrow terminal or under a long status message they give way. While a menu hangs
+from one they hold their place and the message is cut short instead. With `mouse = false` there
+are no labels, since nothing could open them.
 
 Nothing here is the only way to do anything, and the mouse and the menus stay out of the popups
 that ask a question, so a stray click cannot answer one.

@@ -930,15 +930,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
    is a convenience over a keyboard app, so it stays out of the popups, where
    a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    app.drop_blocked_menu();
     // Ahead of `click`, whose copy rows match on the screen row alone and may sit under a menu row.
     if app.menu.is_some() {
         app.touch();
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => app.click_menu(mouse.column, mouse.row),
-            MouseEventKind::Down(MouseButton::Right) => {
-                app.close_menu();
-                app.context_menu(mouse.column, mouse.row);
-            }
+            MouseEventKind::Down(MouseButton::Right) => app.right_click_menu(mouse.column, mouse.row),
             MouseEventKind::ScrollDown => app.wheel_menu(mouse.column, mouse.row, true),
             MouseEventKind::ScrollUp => app.wheel_menu(mouse.column, mouse.row, false),
             _ => {}
@@ -950,21 +948,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
        detail view a narrow terminal has, and its rows copy on click like the
        pane's do — so it stays in, and `click` only acts on a copy row while
        it is up. */
-    if app.view != app::View::Browser
-        || app.confirm.is_some()
-        || app.form.is_some()
-        || app.group_prompt.is_some()
-        || app.rekey.is_some()
-        || app.audit.is_some()
-        || app.fields.is_some()
-        || app.history.is_some()
-        /* The generator draws over the detail pane, whose copy rows match on
-           the screen row alone. A click one row under the generated password
-           used to copy the selected entry's instead — a different secret, on
-           the clipboard, with a flash naming an entry nobody was looking at. */
-        || app.mint.is_some()
-        || app.show_help
-    {
+    if app.view != app::View::Browser || app.popup_open() {
         return;
     }
     app.touch();
@@ -1019,6 +1003,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        the session restarts the idle clock, including the ones swallowed
        below. The poll timeout is not presence, so `run` never touches it. */
     app.touch();
+    app.drop_blocked_menu();
     /* Ahead of every screen's keys: it is the UI's own question and the
        answer must not also reach the list behind it. */
     if app.confirm.is_some() {
@@ -1108,7 +1093,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        keys" promising a key that does not exist on the first screen anybody
        sees. */
     if matches!(code, KeyCode::F(1)) {
-        app.show_help = true;
+        app.open_help();
         return;
     }
     /* The lock screen owns its own keys: typing `q` or `h` must land in the
@@ -1126,7 +1111,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
-        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc never ends the session. There is no screen behind the lock yet,
            so it says so rather than going silent: a key that goes silent
@@ -1144,7 +1129,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('c') if ctrl => app.quit = true,
-        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc unwinds the armed cut, then a kept filter, before its usual
            report: a mis-cut is one press from undone, a bad needle one press
@@ -2302,7 +2287,7 @@ mod tests {
             if *menu == crate::app::MenuId::Help {
                 continue;
             }
-            for item in *items {
+            for item in items.iter().filter(|item| !item.shortcut.is_empty()) {
                 assert!(
                     listed.contains(&item.shortcut),
                     "{menu:?} › {} shows {}, which the help table does not list",
@@ -2350,7 +2335,7 @@ mod tests {
     fn clicking_a_menu_row_runs_it_and_closes_the_menu() {
         let (mut app, mut t) = menu_screen();
         open_menu(&mut app, &mut t, crate::app::MenuId::Group);
-        let (row, _) = app.menu_rows[0];
+        let row = app.menu_row(0).unwrap();
         left_click(&mut app, row.x + 1, row.y);
         assert_eq!(app.menu, None);
         assert!(app.group_prompt.is_some(), "Group › Add did not open the prompt");
@@ -2371,10 +2356,9 @@ mod tests {
     fn a_menu_row_over_a_copy_row_does_not_copy() {
         let (mut app, mut t) = menu_screen();
         open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
-        let (row, _) = *app
-            .menu_rows
-            .iter()
-            .find(|(at, _)| app.copy_rows.iter().any(|(y, _)| *y == at.y))
+        let row = (0..app.menu_shown)
+            .filter_map(|n| app.menu_row(n))
+            .find(|at| app.copy_rows.iter().any(|(y, _)| *y == at.y))
             .expect("no menu row shares a screen row with a copy row");
         left_click(&mut app, row.x + 1, row.y);
         assert_eq!(app.copied, None, "the click copied through the menu");
@@ -2410,6 +2394,7 @@ mod tests {
         open_menu(&mut app, &mut t, crate::app::MenuId::View);
         handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.menu, Some(crate::app::MenuId::Group));
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.menu, None);
@@ -2428,7 +2413,7 @@ mod tests {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 8)).unwrap();
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
-        let drawn = app.menu_rows.len();
+        let drawn = app.menu_shown;
         assert!(drawn < app.menu_items().len(), "the box was not cut off");
         handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(app.menu_cursor, drawn - 1, "the cursor wrapped onto a hidden item");
@@ -2438,7 +2423,7 @@ mod tests {
     fn the_wheel_over_a_menu_steps_its_cursor() {
         let (mut app, mut t) = menu_screen();
         open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
-        let (row, _) = app.menu_rows[0];
+        let row = app.menu_row(0).unwrap();
         let cursor = app.entry_cursor;
         handle_mouse(
             &mut app,
@@ -2495,7 +2480,7 @@ mod tests {
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert_eq!(app.menu_area.x, entries.x + 2);
         assert!(app.menu_area.bottom() <= 18, "the menu ran off the screen");
-        assert_eq!(app.menu_rows.len(), app.menu_items().len(), "lifting it still cut items off");
+        assert_eq!(app.menu_shown, app.menu_items().len(), "lifting it still cut items off");
     }
 
     #[test]
@@ -2565,8 +2550,9 @@ mod tests {
         right_click(&mut app, entries.x + 1, entries.y);
         let first = app.entry_cursor;
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
-        right_click(&mut app, entries.x + 1, entries.y + 1);
-        assert_eq!(app.menu_at, Some((entries.x + 1, entries.y + 1)), "the second right-click was dropped");
+        // Left of the box, which opens at the first pointer's column.
+        right_click(&mut app, entries.x, entries.y + 1);
+        assert_eq!(app.menu_at, Some((entries.x, entries.y + 1)), "the second right-click was dropped");
         assert_ne!(app.entry_cursor, first);
 
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
@@ -2589,5 +2575,101 @@ mod tests {
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert_eq!(app.menu, Some(crate::app::MenuId::Group), "the arrow closed the menu");
+    }
+
+    #[test]
+    fn a_right_click_on_an_open_menu_selects_nothing_behind_it() {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        for name in ["a", "b", "c", "d"] {
+            vault.create_entry(&root, name, "u", "p", "", "").unwrap();
+        }
+        let mut app = App::new();
+        app.open_vault(vault);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+        right_click(&mut app, entries.x + 1, entries.y);
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let selected = app.entry_cursor;
+        let row = app.menu_row(1).unwrap();
+        assert!(row.y < entries.y + 4, "the menu does not cover an entry row");
+        right_click(&mut app, row.x + 1, row.y);
+        assert_eq!(app.entry_cursor, selected, "the right-click selected the row behind the menu");
+        assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
+    }
+
+    #[test]
+    fn each_paste_moves_only_its_own_kind() {
+        use crate::app::{Cut, MenuId};
+        // Two groups, so a paste from the other kind's menu would succeed and empty the shelf.
+        let two_groups = || {
+            let mut vault = crate::vault::Vault::new();
+            let root = vault.root_id();
+            let a = vault.create_group(&root, "A").unwrap();
+            vault.create_group(&root, "B").unwrap();
+            vault.create_entry(&a, "checking", "u", "p", "", "").unwrap();
+            let mut app = App::new();
+            app.open_vault(vault);
+            handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto A
+            app
+        };
+
+        let mut app = two_groups();
+        app.run_menu(&menu_item(MenuId::Group, "Cut"));
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto B
+        app.run_menu(&menu_item(MenuId::Entry, "Paste"));
+        assert!(matches!(app.cut, Some(Cut::Group(_))), "Entry › Paste moved the group");
+        app.run_menu(&menu_item(MenuId::Group, "Paste"));
+        assert_eq!(app.cut, None, "Group › Paste did not move it");
+
+        let mut app = two_groups();
+        app.run_menu(&menu_item(MenuId::Entry, "Cut"));
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.run_menu(&menu_item(MenuId::Group, "Paste"));
+        assert!(matches!(app.cut, Some(Cut::Entry(_))), "Group › Paste moved the entry");
+        app.run_menu(&menu_item(MenuId::Entry, "Paste"));
+        assert_eq!(app.cut, None, "Entry › Paste did not move it");
+    }
+
+    #[test]
+    fn clicking_the_label_of_a_right_click_menu_moves_it_under_the_label() {
+        let (mut app, mut t) = menu_screen();
+        let entries = app.entry_area;
+        right_click(&mut app, entries.x + 1, entries.y);
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let (label, _) = *app.menu_bar.iter().find(|(_, id)| *id == crate::app::MenuId::Entry).unwrap();
+        left_click(&mut app, label.x, label.y);
+        assert_eq!(app.menu, Some(crate::app::MenuId::Entry), "the click closed the menu");
+        assert_eq!(app.menu_at, None);
+    }
+
+    #[test]
+    fn enter_runs_nothing_when_no_row_fits() {
+        let (mut app, _) = menu_screen();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 3)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Vault);
+        assert_eq!(app.menu_shown, 0);
+        let before = app.stage.clone();
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.stage, before, "Enter ran Vault › Save or Reload off screen");
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn a_lifted_menu_stays_off_the_header() {
+        let (mut app, _) = menu_screen();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+        right_click(&mut app, entries.x + 1, entries.y);
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(app.menu_area.y >= 1, "the box covered the header");
+        // A click on its border does nothing, whatever lies under it.
+        let corner = app.menu_area;
+        left_click(&mut app, corner.x, corner.y);
+        assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
     }
 }

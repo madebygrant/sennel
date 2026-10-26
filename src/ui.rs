@@ -74,12 +74,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
        selecting a row. */
     app.copy_rows.clear();
     app.menu_bar.clear();
-    app.menu_rows.clear();
     app.menu_area = Rect::ZERO;
-    // Before the header lights the label: a popup that opened under a menu, such as a reload conflict, closes it.
-    if app.menus_blocked() {
-        app.close_menu();
-    }
+    app.menu_shown = 0;
+    // Before the header lights the label of a menu that a popup has just covered.
+    app.drop_blocked_menu();
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() {
@@ -219,7 +217,15 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         name
     };
-    let room = width.saturating_sub(lead + cols(&tail) + 2);
+    let labels: usize = MENUS.iter().map(|(_, label, _)| 2 + cols(label)).sum();
+    let show_labels = app.mouse && app.view == View::Browser;
+    // A menu hanging from its label keeps the label: the flash is cut short instead, or the menu would vanish
+    // between two keys aimed at it.
+    let hanging = show_labels
+        && app.menu.is_some()
+        && app.menu_at.is_none()
+        && width >= lead + labels + cols(&tail) + 3;
+    let room = width.saturating_sub(lead + cols(&tail) + 2 + if hanging { labels } else { 0 });
     let stage = truncate(&format!("{badge}{}", app.stage), room);
     let mut gap = width
         .saturating_sub(lead + cols(&stage) + cols(&tail) + 1)
@@ -227,9 +233,8 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let wordmark = format!(" {MARK} Sennel");
     let mut x = area.x + cols(&wordmark) as u16;
     let mut spans = vec![Span::styled(wordmark, Style::new().fg(p.accent))];
-    // The labels only take what the flash and the vault name leave spare, so they are the first thing to go.
-    let labels: usize = MENUS.iter().map(|(_, label, _)| 2 + cols(label)).sum();
-    if app.mouse && app.view == View::Browser && gap > labels {
+    // Otherwise the labels only take what the flash and the vault name leave spare, so they go first.
+    if show_labels && gap > labels {
         gap -= labels;
         for (id, label, _) in MENUS {
             let ink = if app.menu == Some(*id) { p.accent } else { p.muted };
@@ -1306,15 +1311,15 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-// Hangs under its header label, or at the pointer after a right-click, and records each row for `click_menu`.
+// Hangs under its header label, or at the pointer after a right-click, and records where for `click_menu`.
 fn draw_menu(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
     let mut items = app.menu_items();
     let screen = frame.area();
     let tall = items.len() as u16 + 2;
     let (left, top) = match app.menu_at {
-        // Below the pointer, lifted only as far as the screen's bottom edge needs.
-        Some((x, y)) => (x, (y + 1).min(screen.bottom().saturating_sub(tall)).max(screen.top())),
+        // Below the pointer, lifted only as far as the bottom edge needs and never over the header's labels.
+        Some((x, y)) => (x, (y + 1).min(screen.bottom().saturating_sub(tall)).max(screen.top() + 1)),
         None => match app.menu_bar.iter().find(|(_, id)| Some(*id) == app.menu) {
             Some((label, _)) => (label.x.saturating_sub(2), label.y + 1),
             None => return,
@@ -1356,9 +1361,7 @@ fn draw_menu(frame: &mut Frame, app: &mut App) {
     frame.render_widget(block, at);
     frame.render_widget(Paragraph::new(lines), inner);
     app.menu_area = at;
-    for n in 0..items.len() as u16 {
-        app.menu_rows.push((Rect::new(inner.x, inner.y + n, inner.width, 1), n as usize));
-    }
+    app.menu_shown = items.len();
 }
 
 /// Draws the box and hands back where its contents landed, so a caller that
@@ -3771,14 +3774,19 @@ mod tests {
         assert!(app.menu_bar.is_empty());
         app.mouse = true;
 
-        app.menu = Some(crate::app::MenuId::Vault);
         let error = "save failed  ·  the disk is full and nothing was written";
         app.error(error);
         let narrow = header(80, &mut app);
         assert!(narrow.contains(error), "the flash was cut for the labels: {narrow:?}");
         assert!(!narrow.contains("Vault  Entry"), "{narrow:?}");
         assert!(app.menu_bar.is_empty(), "hidden labels left click targets behind");
-        assert_eq!(app.menu, None, "the menu stayed open with its label gone");
+
+        // An open header menu keeps its labels, and the flash is cut instead.
+        app.menu = Some(crate::app::MenuId::Vault);
+        let open = header(80, &mut app);
+        assert!(open.contains("Vault  Entry  Group  View  Help"), "{open:?}");
+        assert!(open.contains("save failed"), "{open:?}");
+        assert_eq!(app.menu, Some(crate::app::MenuId::Vault), "the menu vanished under the flash");
     }
 
     #[test]
