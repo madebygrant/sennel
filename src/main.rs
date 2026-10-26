@@ -934,6 +934,10 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         app.touch();
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => app.click_menu(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Right) => {
+                app.close_menu();
+                app.context_menu(mouse.column, mouse.row);
+            }
             MouseEventKind::ScrollDown => app.wheel_menu(mouse.column, mouse.row, true),
             MouseEventKind::ScrollUp => app.wheel_menu(mouse.column, mouse.row, false),
             _ => {}
@@ -967,6 +971,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         MouseEventKind::ScrollDown => app.wheel(mouse.column, mouse.row, true),
         MouseEventKind::ScrollUp => app.wheel(mouse.column, mouse.row, false),
         MouseEventKind::Down(MouseButton::Left) => app.click(mouse.column, mouse.row),
+        MouseEventKind::Down(MouseButton::Right) => app.context_menu(mouse.column, mouse.row),
         _ => {}
     }
 }
@@ -995,14 +1000,14 @@ fn handle_paste(app: &mut App, mut text: String) {
 // Any other key closes the menu and then does what it always does, so ^l still locks and `p` still copies.
 fn handle_menu_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
-        KeyCode::Esc => app.menu = None,
+        KeyCode::Esc => app.close_menu(),
         KeyCode::Down | KeyCode::Char('j') => app.step_menu(true),
         KeyCode::Up | KeyCode::Char('k') => app.step_menu(false),
         KeyCode::Right => app.shift_menu(true),
         KeyCode::Left => app.shift_menu(false),
         KeyCode::Enter => app.choose_menu(),
         _ => {
-            app.menu = None;
+            app.close_menu();
             handle_key(app, code, mods);
         }
     }
@@ -2445,5 +2450,130 @@ mod tests {
         );
         assert_eq!(app.menu_cursor, 1);
         assert_eq!(app.entry_cursor, cursor, "the wheel scrolled the pane behind the menu");
+    }
+
+    fn right_click(app: &mut App, column: u16, row: u16) {
+        handle_mouse(
+            app,
+            event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_row_selects_it_and_opens_its_menu_there() {
+        use crate::app::{MenuId, Pane};
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        vault.create_entry(&banks, "savings", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
+        app.step_pane(true); // onto Banks
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+        let groups = app.group_area;
+        right_click(&mut app, groups.x + 2, groups.y + 1); // Banks
+        assert_eq!((app.menu, app.active_pane), (Some(MenuId::Group), Pane::Groups));
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert_eq!((app.menu_area.x, app.menu_area.y), (groups.x + 2, groups.y + 2), "not at the pointer");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+        let first = app.entry_cursor;
+        right_click(&mut app, entries.x + 2, entries.y + 1);
+        assert_eq!((app.menu, app.active_pane), (Some(MenuId::Entry), Pane::Entries));
+        assert_ne!(app.entry_cursor, first, "the right-click did not select its row");
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert_eq!(app.menu_area.x, entries.x + 2);
+        assert!(app.menu_area.bottom() <= 18, "the menu ran off the screen");
+        assert_eq!(app.menu_rows.len(), app.menu_items().len(), "lifting it still cut items off");
+    }
+
+    #[test]
+    fn a_right_click_never_copies() {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            vault.create_entry(&root, name, "octo", "vault-password", "", "").unwrap();
+        }
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.step_pane(true);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+        // A row holding both an entry and a copy target, which is what `click` would copy from.
+        let row = app.copy_rows[0].0;
+        assert!(entries.y <= row && row < entries.y + 6, "no entry row beside a copy row");
+        right_click(&mut app, entries.x + 1, row);
+        assert_eq!(app.copied, None, "the right-click copied a field");
+        assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
+
+        // Labels hidden by a long flash do not close a menu opened at the pointer.
+        app.error("save failed  ·  the disk is full and nothing was written at all, again");
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(app.menu_bar.is_empty());
+        assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
+    }
+
+    #[test]
+    fn right_clicks_do_nothing_under_a_popup() {
+        let opens: [fn(&mut App); 3] = [App::open_mint, |app| app.detail = true, App::open_search];
+        for open in opens {
+            let (mut app, mut t) = menu_screen();
+            open(&mut app);
+            t.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let entries = app.entry_area;
+            right_click(&mut app, entries.x + 1, entries.y);
+            assert_eq!(app.menu, None);
+        }
+    }
+
+    #[test]
+    fn a_right_click_on_empty_space_opens_nothing() {
+        let (mut app, mut t) = menu_screen();
+        let entries = app.entry_area;
+        let selected = app.entry_cursor;
+        right_click(&mut app, entries.x + 1, entries.bottom() - 1);
+        assert_eq!(app.menu, None, "a menu opened over the row selected before");
+        assert_eq!(app.entry_cursor, selected);
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn a_right_click_menu_hands_over_cleanly() {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "checking", "u", "p", "", "").unwrap();
+        vault.create_entry(&root, "savings", "u", "p", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+
+        right_click(&mut app, entries.x + 1, entries.y);
+        let first = app.entry_cursor;
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        right_click(&mut app, entries.x + 1, entries.y + 1);
+        assert_eq!(app.menu_at, Some((entries.x + 1, entries.y + 1)), "the second right-click was dropped");
+        assert_ne!(app.entry_cursor, first);
+
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.menu, Some(crate::app::MenuId::Group));
+        assert_eq!(app.menu_at, None, "the next menu stayed at the pointer");
+
+        right_click(&mut app, entries.x + 1, entries.y);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!((app.menu, app.menu_at), (None, None));
     }
 }

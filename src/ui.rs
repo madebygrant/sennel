@@ -78,7 +78,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.menu_area = Rect::ZERO;
     // Before the header lights the label: a popup that opened under a menu, such as a reload conflict, closes it.
     if app.menus_blocked() {
-        app.menu = None;
+        app.close_menu();
     }
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
@@ -239,9 +239,9 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
             app.menu_bar.push((Rect::new(x + 2, area.y, w, 1), *id));
             x += 2 + w;
         }
-    } else {
-        // With its label gone there is nothing left to click to close it.
-        app.menu = None;
+    } else if app.menu_at.is_none() {
+        // A header menu with no label has nowhere to hang, and would take every key unseen.
+        app.close_menu();
     }
     spans.extend([
         p.faint("  ·  "),
@@ -1306,26 +1306,31 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-// Hangs under its label in the header and records each row for `click_menu`.
+// Hangs under its header label, or at the pointer after a right-click, and records each row for `click_menu`.
 fn draw_menu(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
-    let Some((label, _)) = app.menu_bar.iter().find(|(_, id)| Some(*id) == app.menu).copied() else {
-        return;
-    };
     let mut items = app.menu_items();
+    let screen = frame.area();
+    let tall = items.len() as u16 + 2;
+    let (left, top) = match app.menu_at {
+        // Below the pointer, lifted only as far as the screen's bottom edge needs.
+        Some((x, y)) => (x, (y + 1).min(screen.bottom().saturating_sub(tall)).max(screen.top())),
+        None => match app.menu_bar.iter().find(|(_, id)| Some(*id) == app.menu) {
+            Some((label, _)) => (label.x.saturating_sub(2), label.y + 1),
+            None => return,
+        },
+    };
     let wide = items
         .iter()
         .map(|item| cols(item.label) + 3 + cols(item.shortcut))
         .max()
         .unwrap_or(0);
-    let screen = frame.area();
     let width = (wide as u16 + 4).min(screen.width);
-    let top = label.y + 1;
     let at = Rect::new(
-        label.x.saturating_sub(2).min(screen.right().saturating_sub(width)),
+        left.min(screen.right().saturating_sub(width)),
         top,
         width,
-        (items.len() as u16 + 2).min(screen.bottom().saturating_sub(top)),
+        tall.min(screen.bottom().saturating_sub(top)),
     );
     items = &items[..items.len().min(at.height.saturating_sub(2) as usize)];
     app.menu_cursor = app.menu_cursor.min(items.len().saturating_sub(1));

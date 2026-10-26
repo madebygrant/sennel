@@ -788,6 +788,8 @@ pub struct App {
     pub menu_bar: Vec<(Rect, MenuId)>,
     pub menu: Option<MenuId>,
     pub menu_cursor: usize,
+    /// Where a right-click opened the menu. `None` hangs it under its header label.
+    pub menu_at: Option<(u16, u16)>,
     /// The open dropdown's box and its item rows as drawn this frame.
     pub menu_area: Rect,
     pub menu_rows: Vec<(Rect, usize)>,
@@ -948,6 +950,7 @@ impl App {
             menu_bar: Vec::new(),
             menu: None,
             menu_cursor: 0,
+            menu_at: None,
             menu_area: Rect::ZERO,
             menu_rows: Vec::new(),
             copied: None,
@@ -1455,7 +1458,7 @@ impl App {
         self.mint = None;
         self.confirm = None;
         self.cut = None;
-        self.menu = None;
+        self.close_menu();
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
            lock would be a pile of plaintext passwords behind a locked screen. */
         self.undo.clear();
@@ -2700,22 +2703,50 @@ impl App {
             }
             return;
         }
+        self.select_at(column, row);
+    }
+
+    // Hands the pane under the pointer the keys and selects the row there. `None` when no row was hit.
+    // Never a copy row: that is `click`'s.
+    fn select_at(&mut self, column: u16, row: u16) -> Option<Pane> {
+        let inside = |area: Rect| area.contains(Position::new(column, row));
         if inside(self.group_area) {
             let at = self.group_scroll + (row - self.group_area.top()) as usize;
             self.active_pane = Pane::Groups;
-            let tree = self.group_tree();
-            if let Some((id, _)) = tree.get(at) {
-                self.group_cursor = Some(*id);
+            let id = self.group_tree().get(at).map(|(id, _)| *id);
+            if id.is_some() {
+                self.group_cursor = id;
             }
             self.snap();
+            id.map(|_| Pane::Groups)
         } else if inside(self.entry_area) {
             let at = self.entry_scroll + (row - self.entry_area.top()) as usize;
             self.active_pane = Pane::Entries;
-            let rows = self.entry_rows();
-            if let Some(id) = rows.get(at) {
-                self.entry_cursor = Some(*id);
+            let id = self.entry_rows().get(at).copied();
+            if id.is_some() {
+                self.entry_cursor = id;
             }
+            id.map(|_| Pane::Entries)
+        } else {
+            None
         }
+    }
+
+    // `handle_mouse` lets clicks through under the detail popup, so this checks for itself.
+    pub fn context_menu(&mut self, column: u16, row: u16) {
+        if self.menus_blocked() {
+            return;
+        }
+        // A right-click on empty space opens nothing: the menu would act on the row selected before.
+        let Some(pane) = self.select_at(column, row) else {
+            return;
+        };
+        self.menu = Some(match pane {
+            Pane::Groups => MenuId::Group,
+            Pane::Entries => MenuId::Entry,
+        });
+        self.menu_cursor = 0;
+        self.menu_at = Some((column, row));
     }
 
     /* Click-to-copy. The same four copies `y p U t` do, through the same
@@ -2779,12 +2810,19 @@ impl App {
         }
     }
 
+    // The one way a menu closes, so a right-click's position never outlives its menu.
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+        self.menu_at = None;
+    }
+
     fn toggle_menu(&mut self, id: MenuId) {
         if self.menu == Some(id) {
-            self.menu = None;
+            self.close_menu();
         } else {
             self.menu = Some(id);
             self.menu_cursor = 0;
+            self.menu_at = None;
         }
     }
 
@@ -2817,12 +2855,13 @@ impl App {
         let next = (if right { at + 1 } else { at + MENUS.len() - 1 }) % MENUS.len();
         self.menu = Some(MENUS[next].0);
         self.menu_cursor = 0;
+        self.menu_at = None;
     }
 
     // Closed before the item runs, so the popup the item opens is the only thing up.
     pub fn choose_menu(&mut self) {
         let item = self.menu_items().get(self.menu_cursor).copied();
-        self.menu = None;
+        self.close_menu();
         if let Some(item) = item {
             self.run_menu(&item);
         }
@@ -2837,7 +2876,7 @@ impl App {
         } else if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| hit(*at)).copied() {
             self.toggle_menu(id);
         } else if !hit(self.menu_area) {
-            self.menu = None;
+            self.close_menu();
         }
     }
 
