@@ -179,7 +179,10 @@ fn audit_prints_the_findings_without_printing_the_passwords() {
     /* The fixture's one entry has a strong unique password, so the clean
        answer is the one being pinned — including that it says so rather than
        printing nothing at all. */
-    assert!(out.contains("nothing reused, weak, expired or empty"), "{out}");
+    // The fixture ages, so from late 2029 its one entry is three years unchanged and that is the answer.
+    let clean = out.contains("nothing reused, weak, expired, empty or old");
+    let only_age = !out.trim().is_empty() && out.lines().all(|line| line.ends_with(" years"));
+    assert!(clean || only_age, "{out}");
     assert!(!out.contains("sennel-entry-pw"), "the audit printed a password");
 }
 

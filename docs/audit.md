@@ -23,6 +23,12 @@ line, not a second opinion.
 
 **Empty.** No password at all.
 
+**Old.** Unchanged for three years or more. Last in the list, because age says nothing is wrong with
+the password, only that it has had longer to leak. The date comes from the entry's history when
+KeePassXC kept one, so renaming an entry does not make its password young again. Sennel's own edits
+keep no history, so for those the date is the entry's last change of any kind. That can only make a
+password look younger than it is, never older. An entry with no dates at all is never called old.
+
 Findings are worst-first and stable between runs, so the list works as a to-do list. Entries in the
 recycle bin are skipped, because telling somebody to go fix an entry they deleted is how an audit
 loses their trust. Passwords are compared inside the process, and nothing is printed but the

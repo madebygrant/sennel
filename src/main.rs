@@ -496,7 +496,7 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
         say!("{:<40}  {}", printable(entry.title()), issue.say());
     }
     if found.is_empty() {
-        say!("nothing reused, weak, expired or empty");
+        say!("nothing reused, weak, expired, empty or old");
     }
     if !pwned {
         return Ok(());
@@ -998,6 +998,27 @@ fn handle_menu_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+fn handle_commands_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Esc => app.commands = None,
+        // As in a menu: ^c closes the palette and then does what it does in the browser.
+        KeyCode::Char('c') if ctrl => {
+            app.commands = None;
+            handle_key(app, code, mods);
+        }
+        KeyCode::Enter => app.run_command(),
+        KeyCode::Down => app.step_command(true),
+        KeyCode::Up => app.step_command(false),
+        KeyCode::Char('n') if ctrl => app.step_command(true),
+        KeyCode::Char('p') if ctrl => app.step_command(false),
+        KeyCode::Char('u') if ctrl => app.command_clear(),
+        KeyCode::Backspace => app.command_backspace(),
+        KeyCode::Char(c) if !ctrl => app.command_type(c),
+        _ => {}
+    }
+}
+
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* First, because this is the proof of presence: every key that reaches
        the session restarts the idle clock, including the ones swallowed
@@ -1018,6 +1039,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
     if app.menu.is_some() {
         handle_menu_key(app, code, mods);
+        return;
+    }
+    // Every printable key is part of the query, so `q` and `h` type here.
+    if app.commands.is_some() {
+        handle_commands_key(app, code, mods);
         return;
     }
     /* The group prompt is modal on the same terms, one box instead of five. */
@@ -1214,6 +1240,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `u` undoes the last one-slot change; ^u stays page-up. */
         KeyCode::Char('u') => app.undo_last(),
         KeyCode::Char('/') => app.open_search(),
+        KeyCode::Char(':') => app.open_commands(),
         /* The near misses of a keymap that means case: silence here reads as
            a broken key, and the message is the only thing that teaches the
            shift. */
@@ -2671,5 +2698,120 @@ mod tests {
         let corner = app.menu_area;
         left_click(&mut app, corner.x, corner.y);
         assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_key(app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn the_command_palette_finds_and_runs_an_action_by_name() {
+        let (mut app, mut t) = menu_screen();
+        handle_key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
+        assert!(app.commands.is_some());
+        // Every menu row but the palette's own.
+        let all: usize = crate::app::MENUS.iter().map(|(_, _, items)| items.len()).sum();
+        assert_eq!(app.command_rows().len(), all - 1, "an empty query hid rows");
+        assert!(app.command_rows().iter().all(|(_, item)| item.label != "Commands"));
+
+        type_text(&mut app, "cp pass");
+        let (menu, item) = app.command_rows()[0];
+        assert_eq!((menu, item.label), ("Entry", "Copy password"), "the docs' example");
+        app.command_clear();
+
+        type_text(&mut app, "lock");
+        let (menu, item) = app.command_rows()[0];
+        assert_eq!((menu, item.label), ("Vault", "Lock"));
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let screen: String = (0..18)
+            .map(|y| (0..120).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Vault › Lock"), "{screen}");
+
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.commands.is_none());
+        assert_eq!(app.view, crate::app::View::Unlock, "Vault › Lock did not lock");
+    }
+
+    #[test]
+    fn the_command_palette_owns_the_keys_and_the_mouse() {
+        let (mut app, _) = menu_screen();
+        handle_key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
+        type_text(&mut app, "qh");
+        assert!(!app.quit && !app.show_help, "q or h acted on the browser");
+        assert_eq!(app.commands.as_ref().unwrap().query, "qh");
+
+        let (label, _) = app.menu_bar[0];
+        left_click(&mut app, label.x, label.y);
+        let entries = app.entry_area;
+        right_click(&mut app, entries.x + 1, entries.y);
+        assert_eq!(app.menu, None, "a menu opened over the palette");
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.commands.is_none());
+        assert_eq!(app.view, crate::app::View::Browser);
+    }
+
+    #[test]
+    fn the_command_palette_cursor_wraps_and_a_miss_runs_nothing() {
+        let (mut app, _) = menu_screen();
+        app.open_commands();
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        let last = app.command_rows().len() - 1;
+        assert_eq!(app.commands.as_ref().unwrap().cursor, last);
+
+        type_text(&mut app, "zzzz");
+        assert!(app.command_rows().is_empty());
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.commands.is_some(), "Enter on no match closed the palette");
+    }
+
+    #[test]
+    fn a_paste_lands_in_the_palette_query() {
+        let (mut app, _) = menu_screen();
+        app.open_commands();
+        handle_paste(&mut app, "lock\n".to_string());
+        assert_eq!(app.commands.as_ref().unwrap().query, "lock");
+        assert_eq!(app.view, crate::app::View::Browser, "the pasted newline ran the row");
+    }
+
+    #[test]
+    fn ctrl_c_in_the_palette_closes_it_and_quits_as_the_browser_does() {
+        let (mut app, _) = menu_screen();
+        app.open_commands();
+        handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.commands.is_none());
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn a_short_screen_keeps_the_palette_cursor_in_view() {
+        let (mut app, _) = menu_screen();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+        app.open_commands();
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        let (menu, item) = *app.command_rows().last().unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let screen: String = (0..12)
+            .map(|y| (0..80).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains(&format!("▌ {menu} › {}", item.label)), "{screen}");
+    }
+
+    #[test]
+    fn a_long_palette_query_shows_its_end() {
+        let (mut app, mut t) = menu_screen();
+        app.open_commands();
+        type_text(&mut app, &format!("{}tail", "x".repeat(80)));
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let screen: String = (0..18)
+            .map(|y| (0..120).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("tail█"), "{screen}");
     }
 }

@@ -105,8 +105,19 @@ pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
             item("Next theme", "^t", App::cycle_theme),
         ],
     ),
-    (MenuId::Help, "Help", &[item("Keys", "h", App::open_help)]),
+    (
+        MenuId::Help,
+        "Help",
+        &[item("Keys", "h", App::open_help), item("Commands", ":", App::open_commands)],
+    ),
 ];
+
+// `:` finds any menu row by name: the same table and the same actions, for the hand on the keyboard.
+#[derive(Debug, Default)]
+pub struct Commands {
+    pub query: String,
+    pub cursor: usize,
+}
 
 /* Which box on the unlock screen has the keys. Password first because it is
    the one every unlock needs; the confirm only exists in create mode. */
@@ -788,6 +799,7 @@ pub struct App {
     /// Where the header drew each menu label this frame, for `click`.
     pub menu_bar: Vec<(Rect, MenuId)>,
     pub menu: Option<MenuId>,
+    pub commands: Option<Commands>,
     // Menus open by mouse alone, so with `mouse = false` the header draws no labels.
     pub mouse: bool,
     pub menu_cursor: usize,
@@ -952,6 +964,7 @@ impl App {
             copy_rows: Vec::new(),
             menu_bar: Vec::new(),
             menu: None,
+            commands: None,
             mouse: true,
             menu_cursor: 0,
             menu_at: None,
@@ -1463,6 +1476,7 @@ impl App {
         self.confirm = None;
         self.cut = None;
         self.close_menu();
+        self.commands = None;
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
            lock would be a pile of plaintext passwords behind a locked screen. */
         self.undo.clear();
@@ -1595,6 +1609,9 @@ impl App {
     pub fn takes_text(&self) -> bool {
         if self.confirm.is_some() {
             return false;
+        }
+        if self.commands.is_some() {
+            return true;
         }
         if self.form.is_some() || self.group_prompt.is_some() {
             return true;
@@ -2793,7 +2810,8 @@ impl App {
     // The popups that own the screen, so the mouse stays out of them. Not the detail popup or the search
     // band: a click on a copy row still means something under those.
     pub fn popup_open(&self) -> bool {
-        self.confirm.is_some()
+        self.commands.is_some()
+            || self.confirm.is_some()
             || self.form.is_some()
             || self.group_prompt.is_some()
             || self.rekey.is_some()
@@ -2911,6 +2929,75 @@ impl App {
                 None => self.close_menu(),
             }
         }
+    }
+
+    pub fn open_commands(&mut self) {
+        self.commands = Some(Commands::default());
+    }
+
+    /// The rows the query matches, best first, or every row in menu order while it is empty.
+    pub fn command_rows(&mut self) -> Vec<(&'static str, MenuItem)> {
+        let query = self.commands.as_ref().map(|c| c.query.clone()).unwrap_or_default();
+        // Not the palette's own row: choosing it would only close the palette and open it again, empty.
+        let all = MENUS
+            .iter()
+            .flat_map(|(_, menu, items)| items.iter().map(move |item| (*menu, *item)))
+            .filter(|(_, item)| !std::ptr::fn_addr_eq(item.run, App::open_commands as fn(&mut App)));
+        if query.is_empty() {
+            return all.collect();
+        }
+        let pattern = crate::search::pattern(&query);
+        let mut found: Vec<(u16, (&'static str, MenuItem))> = all
+            .filter_map(|row| {
+                let hay = format!("{} {}", row.0, row.1.label);
+                self.searcher.score(&pattern, &hay).map(|score| (score, row))
+            })
+            .collect();
+        // Stable, so rows that score alike keep the menus' order.
+        found.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        found.into_iter().map(|(_, row)| row).collect()
+    }
+
+    pub fn command_type(&mut self, c: char) {
+        if let Some(commands) = &mut self.commands {
+            commands.query.push(c);
+            commands.cursor = 0;
+        }
+    }
+
+    pub fn command_backspace(&mut self) {
+        if let Some(commands) = &mut self.commands {
+            commands.query.pop();
+            commands.cursor = 0;
+        }
+    }
+
+    pub fn command_clear(&mut self) {
+        if let Some(commands) = &mut self.commands {
+            commands.query.clear();
+            commands.cursor = 0;
+        }
+    }
+
+    pub fn step_command(&mut self, down: bool) {
+        let len = self.command_rows().len();
+        if let Some(commands) = self.commands.as_mut().filter(|_| len > 0) {
+            commands.cursor = if down {
+                (commands.cursor + 1) % len
+            } else {
+                (commands.cursor + len - 1) % len
+            };
+        }
+    }
+
+    // Closed first, like a menu, so the row runs on the browser and not under its own popup.
+    pub fn run_command(&mut self) {
+        let rows = self.command_rows();
+        let Some((_, item)) = self.commands.as_ref().and_then(|c| rows.get(c.cursor)).copied() else {
+            return;
+        };
+        self.commands = None;
+        self.run_menu(&item);
     }
 
     pub fn wheel_menu(&mut self, column: u16, row: u16, down: bool) {
@@ -4535,7 +4622,7 @@ impl App {
         };
         let rows = crate::vault::audit(vault);
         if rows.is_empty() {
-            self.say("nothing to fix  ·  nothing reused, weak, expired or empty");
+            self.say("nothing to fix  ·  nothing reused, weak, expired, empty or old");
             return;
         }
         self.audit = Some(Audit { rows, cursor: 0 });

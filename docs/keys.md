@@ -51,6 +51,7 @@ not the browser's `*`.
 | `#tag` (in search)  | filter by tag instead of fuzzy-matching · `#` alone lists them|
 | `n` `N`             | next, previous match                                          |
 | `↑ ↓` (in search)   | move through the results while still typing                   |
+| `:`                 | the command palette: every action, found by name              |
 | `a` `e` `D`         | add, edit, delete entry to the bin (`otp`, `tags`, `expires`) |
 | `A` `E`             | add, rename group                                             |
 | `D` (on groups)     | group to the recycle bin, contents and all                    |
@@ -76,6 +77,14 @@ not the browser's `*`.
 | `h` `?` `F1`        | keys overlay (`F1` on the lock screen, where letters are text)|
 | `esc`               | unwind: drop cut, clear filter, then report                   |
 | `q` `^c`            | quit (asks when there are unsaved changes; `qq` answers)      |
+
+## The command palette (`:`)
+
+Every row of the header menus in one list, found by typing part of its name: `:` then `lock`, or
+`cp pass` for Entry › Copy password. `↑ ↓` or `^n ^p` choose, `enter` runs it, `^u` clears the
+query and `esc` closes. Each row shows its key on the right, as the menus do, so the palette is also
+the way to learn a key you have forgotten. It runs exactly what the menu row would, and works with
+`mouse = false`.
 
 ## The generator (`P`)
 

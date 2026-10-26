@@ -112,7 +112,7 @@ sennel gen --stdout [--kind complex|passphrase|pin] [options]
 
 ### `sennel audit`
 
-List weak, reused, expired and empty passwords. Exit 0 whether or not anything is found.
+List weak, reused, expired, empty and old passwords. Exit 0 whether or not anything is found.
 
 ```sh
 printf '%s\n' "$MASTER" | sennel audit --db VAULT [--pwned]
@@ -125,8 +125,9 @@ of these:
 - `reused across N entries`
 - `expired`
 - `~B bits · weak|fair|good|strong` (weak means under 60 bits)
+- `unchanged for N years` (3 years or more)
 
-No findings prints `nothing reused, weak, expired or empty`.
+No findings prints `nothing reused, weak, expired, empty or old`.
 
 `--pwned` also checks each password against Have I Been Pwned through `curl`, sending only the first
 five hex characters of its SHA-1. Each hit is a line `<title padded to 40>  in N known breaches`,

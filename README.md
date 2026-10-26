@@ -14,7 +14,7 @@ Your vault, in your terminal. Real KeePass files. A clipboard that cleans up aft
 - **Fuzzy search that shows its work.** The matched characters light up in each row, so you can see why it is there. Titles, usernames, urls and group paths. Never your notes.
 - **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group. `sennel export` takes everything back out as CSV or JSON.
 - **A generator on call.** `P` shows a password, passphrase or PIN (`t` switches), what it is worth in bits, and one key per class for whatever rule the site has this week. `^s` in the entry form fills the password box, and `^y` copies it before you save.
-- **It audits itself.** `!` lists every reused, weak, expired or empty password, worst first, and puts the cursor two keys from the fix.
+- **It audits itself.** `!` lists every reused, weak, expired, empty or old password, worst first, and puts the cursor two keys from the fix.
 - **Deletes are never losses.** `D` moves to the same recycle bin KeePassXC uses. One `u` brings it back.
 - **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped. Any SSH keys it gave your agent are taken back out.
 - **It keeps a copy.** The first save of a session keeps the file as it was, outside the folder your sync client watches.
@@ -58,6 +58,7 @@ and `^v` keeps them both.
 | `!`         | passwords worth changing                        |
 | `F`         | custom fields and attachments                   |
 | `u`         | undo, as many steps as you made                 |
+| `:`         | any action, found by name                       |
 | `h`         | every other key                                 |
 
 [The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering

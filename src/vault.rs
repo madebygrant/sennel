@@ -204,6 +204,30 @@ pub fn expires_at(entry: &EntryRef<'_>) -> Option<chrono::NaiveDateTime> {
     entry.times.expires.unwrap_or(false).then(|| entry.times.expiry)?
 }
 
+// When the current password was set, as near as the file can say. An entry's last change is never earlier
+// than its password's, so without history the age comes out short, never long. History from KeePassXC
+// pushes it back to the oldest version in an unbroken run holding the same password.
+pub fn password_set_at(entry: &EntryRef<'_>) -> Option<chrono::NaiveDateTime> {
+    let current = entry.password();
+    let count = entry.history.as_ref().map_or(0, |h| h.get_entries().len());
+    // Stamps and a match flag only: the old passwords stay on the entry rather than being copied out.
+    let mut versions: Vec<(Option<chrono::NaiveDateTime>, bool)> = (0..count)
+        .filter_map(|at| entry.historical(at))
+        .map(|old| (old.times.last_modification, old.password() == current))
+        .collect();
+    versions.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let mut set = entry.times.last_modification?;
+    for (at, same) in versions {
+        if !same {
+            break;
+        }
+        if let Some(at) = at {
+            set = set.min(at);
+        }
+    }
+    Some(set)
+}
+
 /// Whether the expiry has passed. Compared in UTC, which is what KDBX stores.
 pub fn expired(entry: &EntryRef<'_>) -> bool {
     expires_at(entry).is_some_and(|at| at <= chrono::Utc::now().naive_utc())
@@ -1860,6 +1884,8 @@ pub enum Issue {
     Expired,
     /// Fewer bits than a password worth having, by the form's own estimate.
     Weak(f64),
+    /// Unchanged for this many whole years.
+    Old(u32),
 }
 
 impl Issue {
@@ -1873,6 +1899,8 @@ impl Issue {
                them. */
             Issue::Expired => 2,
             Issue::Weak(_) => 3,
+            // Last: age alone says nothing is wrong with the password, only that it has had time to leak.
+            Issue::Old(_) => 4,
         }
     }
 
@@ -1882,6 +1910,7 @@ impl Issue {
             Issue::Reused(n) => format!("reused across {} entries", n + 1),
             Issue::Expired => "expired".to_string(),
             Issue::Weak(bits) => format!("~{bits:.0} bits · {}", crate::generator::strength(bits)),
+            Issue::Old(years) => format!("unchanged for {years} years"),
         }
     }
 }
@@ -1889,6 +1918,9 @@ impl Issue {
 /// Below this, the entry form already draws the estimate in `warn`. The audit
 /// uses the same line rather than inventing a second opinion.
 const WEAK_BITS: f64 = 60.0;
+
+/// A password this many years unchanged is listed, below every other finding.
+const OLD_YEARS: u32 = 3;
 
 /* Everything wrong with the vault's passwords, in one pass. Reuse first
    because it is the finding that matters most and the one a person cannot
@@ -1921,6 +1953,7 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
         }
     }
     let mut out: Vec<(EntryId, Issue)> = Vec::new();
+    let now = chrono::Utc::now().naive_utc();
     for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
         let shared = buckets.get(&digest(password)).map_or(0, |bucket| {
@@ -1937,10 +1970,17 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
             Issue::Expired
         } else {
             let bits = crate::generator::typed_bits(password);
-            if bits >= WEAK_BITS {
+            // Calendar years, so a leap year cannot bring the third anniversary forward a day.
+            let years = password_set_at(entry)
+                .and_then(|at| now.date().years_since(at.date()))
+                .unwrap_or(0);
+            if bits < WEAK_BITS {
+                Issue::Weak(bits)
+            } else if years >= OLD_YEARS {
+                Issue::Old(years)
+            } else {
                 continue;
             }
-            Issue::Weak(bits)
         };
         out.push((entry.id(), issue));
     }
@@ -3319,6 +3359,49 @@ mod tests {
             2,
             "empty passwords were counted as reuse"
         );
+    }
+
+    #[test]
+    fn the_audit_lists_passwords_unchanged_for_years() {
+        let mut v = vault();
+        let root = v.root_id();
+        let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
+        let years_ago = |years: i64| chrono::Utc::now().naive_utc() - chrono::Duration::days(365 * years + 1);
+        let stamp = |v: &mut Vault, id: &EntryId, years: i64| {
+            v.db.entry_mut(*id).unwrap().times.last_modification = Some(years_ago(years));
+        };
+        let old = v.create_entry(&root, "old", "u", strong, "", "").unwrap();
+        stamp(&mut v, &old, 4);
+        let recent = v.create_entry(&root, "recent", "u", "Pz8@kd3Lw9#tQe5Rm2!Vb7", "", "").unwrap();
+        stamp(&mut v, &recent, 2);
+
+        let found = audit(&v);
+        let issue = |id: &EntryId| found.iter().find(|(e, _)| e == id).map(|(_, i)| *i);
+        assert_eq!(issue(&old), Some(Issue::Old(4)));
+        assert_eq!(issue(&recent), None, "two years was flagged");
+        assert_eq!(Issue::Old(4).say(), "unchanged for 4 years");
+    }
+
+    // KeePassXC's history dates the password, not the last edit: a recent rename of an old password is still old.
+    #[test]
+    fn password_age_follows_history_back_to_the_change() {
+        let mut v = vault();
+        let root = v.root_id();
+        let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
+        let long_ago = chrono::Utc::now().naive_utc() - chrono::Duration::days(365 * 5);
+
+        let kept = v.create_entry(&root, "kept", "u", strong, "", "").unwrap();
+        v.db.entry_mut(kept).unwrap().times.last_modification = Some(long_ago);
+        with_history(&mut v, &kept, &[strong]);
+        let now = chrono::Utc::now().naive_utc();
+        v.db.entry_mut(kept).unwrap().times.last_modification = Some(now);
+        assert_eq!(password_set_at(&v.get_entry(&kept).unwrap()), Some(long_ago));
+
+        let changed = v.create_entry(&root, "changed", "u", "first-pw", "", "").unwrap();
+        v.db.entry_mut(changed).unwrap().times.last_modification = Some(long_ago);
+        with_history(&mut v, &changed, &[strong]);
+        v.db.entry_mut(changed).unwrap().times.last_modification = Some(now);
+        assert_eq!(password_set_at(&v.get_entry(&changed).unwrap()), Some(now), "an older, different password counted");
     }
 
     /* A deleted entry is not a password worth changing, and telling somebody

@@ -141,6 +141,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.mint.is_some() {
         draw_mint(frame, app);
     }
+    if app.commands.is_some() {
+        draw_commands(frame, app);
+    }
     draw_menu(frame, app);
     recolour(frame);
 }
@@ -413,6 +416,26 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
    next field. Callers pad to the column count, which absorbs coming back
    short. A cut ends in `…` — without it `Root/Bankin` reads as a group
    somebody named Bankin. */
+// `truncate` from the other end, for a box being typed into: the end is where the typing is.
+fn truncate_start(text: &str, width: usize) -> String {
+    if cols(text) <= width {
+        return text.to_string();
+    }
+    let room = width.saturating_sub(1);
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        used += w;
+        kept.push(c);
+    }
+    let tail: String = kept.into_iter().rev().collect();
+    if width > 0 { format!("…{tail}") } else { tail }
+}
+
 fn truncate(text: &str, width: usize) -> String {
     if cols(text) <= width {
         return text.to_string();
@@ -1311,6 +1334,44 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+// The query, then the rows it matches. The window follows the cursor, as the file picker's does.
+fn draw_commands(frame: &mut Frame, app: &mut App) {
+    let p = app.theme;
+    let rows = app.command_rows();
+    let Some(commands) = &app.commands else {
+        return;
+    };
+    let screen = frame.area();
+    let width = screen.width.saturating_sub(4).clamp(24, 56);
+    let inner = width.saturating_sub(2) as usize;
+    let room = (screen.height as usize).saturating_sub(8).clamp(1, 14);
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            p.lit(" : "),
+            Span::styled(truncate_start(&commands.query, inner.saturating_sub(4)), Style::new().fg(p.text)),
+            p.lit("█"),
+        ]),
+        Line::from(""),
+    ];
+    if rows.is_empty() {
+        lines.push(p.faint(" nothing matches  ·  backspace").into());
+    }
+    let first = commands.cursor.saturating_sub(room.saturating_sub(1));
+    for (n, (menu, item)) in rows.iter().enumerate().skip(first).take(room) {
+        let live = n == commands.cursor;
+        let name = truncate(&format!("{menu} › {}", item.label), inner.saturating_sub(cols(item.shortcut) + 4));
+        let pad = inner.saturating_sub(cols(&name) + cols(item.shortcut) + 3);
+        lines.push(Line::from(vec![
+            if live { p.lit("▌") } else { Span::raw(" ") },
+            Span::styled(format!(" {name}{}", " ".repeat(pad)), p.row(live)),
+            p.faint(item.shortcut),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(p.faint(" enter runs  ·  ↑ ↓ choose  ·  esc closes").into());
+    popup(frame, "commands", lines, width, &p);
+}
+
 // Hangs under its header label, or at the pointer after a right-click, and records where for `click_menu`.
 fn draw_menu(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
@@ -1959,6 +2020,7 @@ pub const BROWSER_KEYS: &[(&str, &str, &str)] = &[
     ("fold", "← →", "collapse, expand · ← hops from entries"),
     ("order", "o", "entries: name, recent, updated"),
     ("find", "/", "fuzzy search · ^g narrows it to this group"),
+    ("commands", ":", "every action by name"),
     ("match", "n N", "next, previous match"),
     ("undo", "u", "one level"),
     ("save", "^s  ^r  ^f", "save now · reload the file on disk · merge it in"),
@@ -2263,7 +2325,7 @@ fn draw_audit(frame: &mut Frame, app: &App) {
             crate::vault::Issue::Reused(_)
             | crate::vault::Issue::Empty
             | crate::vault::Issue::Expired => p.warn,
-            crate::vault::Issue::Weak(_) => p.muted,
+            crate::vault::Issue::Weak(_) | crate::vault::Issue::Old(_) => p.muted,
         };
         let name = truncate(&title, inner.saturating_sub(cols(&say) + 4));
         let pad = inner
