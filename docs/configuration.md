@@ -21,8 +21,9 @@ backup_dir = "~/.local/state/sennel/backups"
                                # client watches · XDG_STATE_HOME moves the default
 sort = "name"                  # entries order at startup: stored, name, recent, updated
 theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
-mouse = true                   # wheel scrolls, click selects; false gives the
-                               # terminal its own text selection back
+mouse = true                   # wheel scrolls, click selects, menus in the header
+                               # and on right-click; false gives the terminal its
+                               # own text selection back
 
 [generator]                    # the default for ^s in a form, P on its own,
                                # and sennel gen

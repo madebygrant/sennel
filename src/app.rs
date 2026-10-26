@@ -787,6 +787,8 @@ pub struct App {
     /// Where the header drew each menu label this frame, for `click`.
     pub menu_bar: Vec<(Rect, MenuId)>,
     pub menu: Option<MenuId>,
+    // Menus open by mouse alone, so with `mouse = false` the header draws no labels.
+    pub mouse: bool,
     pub menu_cursor: usize,
     /// Where a right-click opened the menu. `None` hangs it under its header label.
     pub menu_at: Option<(u16, u16)>,
@@ -949,6 +951,7 @@ impl App {
             copy_rows: Vec::new(),
             menu_bar: Vec::new(),
             menu: None,
+            mouse: true,
             menu_cursor: 0,
             menu_at: None,
             menu_area: Rect::ZERO,
@@ -2855,7 +2858,10 @@ impl App {
         let next = (if right { at + 1 } else { at + MENUS.len() - 1 }) % MENUS.len();
         self.menu = Some(MENUS[next].0);
         self.menu_cursor = 0;
-        self.menu_at = None;
+        // Under its label when there is one; a right-click menu with the labels hidden stays put.
+        if !self.menu_bar.is_empty() {
+            self.menu_at = None;
+        }
     }
 
     // Closed before the item runs, so the popup the item opens is the only thing up.

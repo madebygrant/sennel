@@ -229,7 +229,7 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = vec![Span::styled(wordmark, Style::new().fg(p.accent))];
     // The labels only take what the flash and the vault name leave spare, so they are the first thing to go.
     let labels: usize = MENUS.iter().map(|(_, label, _)| 2 + cols(label)).sum();
-    if app.view == View::Browser && gap > labels {
+    if app.mouse && app.view == View::Browser && gap > labels {
         gap -= labels;
         for (id, label, _) in MENUS {
             let ink = if app.menu == Some(*id) { p.accent } else { p.muted };
@@ -3765,6 +3765,11 @@ mod tests {
         let wide = header(120, &mut app);
         assert!(wide.contains("Vault  Entry  Group  View  Help"), "{wide:?}");
         assert_eq!(app.menu_bar.len(), MENUS.len());
+
+        app.mouse = false;
+        assert!(!header(120, &mut app).contains("Vault  Entry"), "labels nothing can open");
+        assert!(app.menu_bar.is_empty());
+        app.mouse = true;
 
         app.menu = Some(crate::app::MenuId::Vault);
         let error = "save failed  ·  the disk is full and nothing was written";

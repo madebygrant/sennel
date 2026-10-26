@@ -128,8 +128,26 @@ on the `user`, `pass`, `url` or `totp` row of the detail view copies that field,
 otherwise invisible: the clipboard is somewhere else, and the status line is at the far end of the
 screen from the hand that just moved.
 
-Nothing here is the only way to do anything, and the mouse stays out of the popups that ask a
-question, so a stray click cannot answer one.
+The header holds a menu bar, `Vault  Entry  Group  View  Help`. A click opens a menu under its
+label, and each row shows its key on the right, so the menus teach the key table as they go. A
+click on a row runs it, and a click on another label switches to that menu. A click outside the
+menu closes it and goes no further, so it cannot select a row or copy a field behind it. While a
+menu is open the wheel moves through its rows instead of scrolling a pane, `↑ ↓` or `j k` move,
+`← →` step to the next menu, `enter` runs the row and `esc` closes it. Any other key closes the
+menu and then does what it always does, so `^l` still locks.
+
+A right-click on a group or entry selects it and opens its menu at the pointer. On empty space it
+opens no menu, though the pane under it takes the keys, as a click there would.
+
+A menu row runs the same action as its key, but where a key depends on the pane, the menu names
+the row instead: Entry › Delete deletes the entry and Group › Delete the group, whichever pane has
+the keys. The labels only take room the header has spare, so on a narrow terminal or under a long
+status message they give way, and a menu hanging from one closes with it. A right-click menu is
+not tied to a label and stays open. With `mouse = false` there are no labels, since nothing could
+open them.
+
+Nothing here is the only way to do anything, and the mouse and the menus stay out of the popups
+that ask a question, so a stray click cannot answer one.
 
 Some terminals bind `tab`, `backtab` and the arrow chords themselves. Every key here also has a
-visible home in the `h` overlay.
+visible home in the `h` overlay, apart from the keys inside a menu, which are listed above.

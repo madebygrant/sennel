@@ -229,6 +229,7 @@ fn main() -> Result<()> {
     app.set_backups(cfg.backups, cfg.backup_dir.clone());
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
+    app.mouse = cfg.mouse;
     app.theme_overridden = cfg.theme_overridden;
     /* Said once, on the first frame, and then it is the user's screen: an
        override that measures badly is worth naming, not worth refusing. */
@@ -2575,5 +2576,18 @@ mod tests {
         right_click(&mut app, entries.x + 1, entries.y);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!((app.menu, app.menu_at), (None, None));
+    }
+
+    #[test]
+    fn arrows_keep_a_right_click_menu_open_when_the_labels_are_hidden() {
+        let (mut app, mut t) = menu_screen();
+        app.error("save failed  ·  the disk is full and nothing was written at all, again and again");
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(app.menu_bar.is_empty(), "the flash left room for the labels");
+        let entries = app.entry_area;
+        right_click(&mut app, entries.x + 1, entries.y);
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert_eq!(app.menu, Some(crate::app::MenuId::Group), "the arrow closed the menu");
     }
 }
