@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use chrono::TimeZone;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, Pane, View, char_index_to_byte};
+use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, MENUS, Pane, View, char_index_to_byte};
 use crate::vault::EntryExt;
 use crate::theme::{self, Palette};
 
@@ -73,6 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
        sitting over the entries pane, where a click would copy instead of
        selecting a row. */
     app.copy_rows.clear();
+    app.menu_bar.clear();
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() {
@@ -187,7 +188,7 @@ fn draw_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 /* The flash carries its own colour: a failure that renders the same cream as
    "unlocked 42 entries" is a failure nobody sees. Truncated to the row, since
    an error message is the longest thing the header ever holds. */
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let ink = match app.level {
         Level::Info => p.text,
@@ -213,16 +214,34 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     };
     let room = width.saturating_sub(lead + cols(&tail) + 2);
     let stage = truncate(&format!("{badge}{}", app.stage), room);
-    let gap = width
+    let mut gap = width
         .saturating_sub(lead + cols(&stage) + cols(&tail) + 1)
         .max(1);
-    let spans = vec![
-        Span::styled(format!(" {MARK} Sennel"), Style::new().fg(p.accent)),
+    let wordmark = format!(" {MARK} Sennel");
+    let mut x = area.x + cols(&wordmark) as u16;
+    let mut spans = vec![Span::styled(wordmark, Style::new().fg(p.accent))];
+    // The labels only take what the flash and the vault name leave spare, so they are the first thing to go.
+    let labels: usize = MENUS.iter().map(|(_, label, _)| 2 + cols(label)).sum();
+    if app.view == View::Browser && gap > labels {
+        gap -= labels;
+        for (id, label, _) in MENUS {
+            let ink = if app.menu == Some(*id) { p.accent } else { p.muted };
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(*label, Style::new().fg(ink)));
+            let w = cols(label) as u16;
+            app.menu_bar.push((Rect::new(x + 2, area.y, w, 1), *id));
+            x += 2 + w;
+        }
+    } else {
+        // With its label gone there is nothing left to click to close it.
+        app.menu = None;
+    }
+    spans.extend([
         p.faint("  ·  "),
         Span::styled(stage, Style::new().fg(ink)),
         Span::raw(" ".repeat(gap)),
         p.faint(tail),
-    ];
+    ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -3666,6 +3685,60 @@ mod tests {
         assert!(header.contains("save failed"), "{header:?}");
         assert!(header.contains(&name), "the vault fell off the header: {header:?}");
         assert!(header.contains('×'), "no severity glyph: {header:?}");
+    }
+
+    #[test]
+    fn the_header_shows_menu_labels_only_where_they_fit() {
+        use crate::vault::Vault;
+        let header = |width: u16, app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            t.draw(|f| draw(f, app)).unwrap();
+            screen(&t)[0].clone()
+        };
+        let mut app = App::new();
+        assert!(!header(120, &mut app).contains("Vault  Entry"), "labels on the lock screen");
+        assert!(app.menu_bar.is_empty());
+
+        app.open_vault(Vault::new());
+        let wide = header(120, &mut app);
+        assert!(wide.contains("Vault  Entry  Group  View  Help"), "{wide:?}");
+        assert_eq!(app.menu_bar.len(), MENUS.len());
+
+        app.menu = Some(crate::app::MenuId::Vault);
+        let error = "save failed  ·  the disk is full and nothing was written";
+        app.error(error);
+        let narrow = header(80, &mut app);
+        assert!(narrow.contains(error), "the flash was cut for the labels: {narrow:?}");
+        assert!(!narrow.contains("Vault  Entry"), "{narrow:?}");
+        assert!(app.menu_bar.is_empty(), "hidden labels left click targets behind");
+        assert_eq!(app.menu, None, "the menu stayed open with its label gone");
+    }
+
+    #[test]
+    fn clicking_a_menu_label_opens_it_and_clicking_again_closes_it() {
+        use crate::app::MenuId;
+        use crate::vault::Vault;
+        let mut t = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let mut app = App::new();
+        app.open_vault(Vault::new());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let (at, _) = *app.menu_bar.iter().find(|(_, id)| *id == MenuId::Group).unwrap();
+        let drawn: String = screen(&t)[0].chars().skip(at.x as usize).take(at.width as usize).collect();
+        assert_eq!(drawn, "Group");
+
+        app.click(at.x + at.width - 1, at.y);
+        assert_eq!(app.menu, Some(MenuId::Group));
+        app.click(at.x, at.y);
+        assert_eq!(app.menu, None);
+
+        app.open_search();
+        app.click(at.x, at.y);
+        assert_eq!(app.menu, None, "a menu opened while the search band had the keys");
+        app.band = false;
+
+        app.click(at.x, at.y);
+        app.lock_now();
+        assert_eq!(app.menu, None, "the menu outlived the lock");
     }
 
     /* The empty states name the key that fills them: this is the first screen

@@ -51,8 +51,6 @@ pub enum MenuId {
     Help,
 }
 
-// Read only by tests until the header draws it.
-#[allow(dead_code)]
 pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
     (
         MenuId::Vault,
@@ -787,6 +785,9 @@ pub struct App {
        with the url, the notes, the code and the expiry all being optional —
        so the draw records it rather than the click recomputing it. */
     pub copy_rows: Vec<(u16, CopyRow)>,
+    /// Where the header drew each menu label this frame, for `click`.
+    pub menu_bar: Vec<(Rect, MenuId)>,
+    pub menu: Option<MenuId>,
     /// The row a click just copied, and when, for the glow.
     pub copied: Option<(CopyRow, Instant)>,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
@@ -941,6 +942,8 @@ impl App {
             group_area: Rect::ZERO,
             entry_area: Rect::ZERO,
             copy_rows: Vec::new(),
+            menu_bar: Vec::new(),
+            menu: None,
             copied: None,
             order: SortOrder::default(),
             generator: crate::config::Generator::default(),
@@ -1446,6 +1449,7 @@ impl App {
         self.mint = None;
         self.confirm = None;
         self.cut = None;
+        self.menu = None;
         /* Dropping the snapshots zeroizes them: an undo stack that outlived a
            lock would be a pile of plaintext passwords behind a locked screen. */
         self.undo.clear();
@@ -2684,6 +2688,12 @@ impl App {
         if self.detail {
             return;
         }
+        if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| inside(*at)).copied() {
+            if !self.menus_blocked() {
+                self.menu = if self.menu == Some(id) { None } else { Some(id) };
+            }
+            return;
+        }
         if inside(self.group_area) {
             let at = self.group_scroll + (row - self.group_area.top()) as usize;
             self.active_pane = Pane::Groups;
@@ -2739,10 +2749,9 @@ impl App {
         self.show_help = true;
     }
 
-    // Does nothing under a popup or the search band: the action would land on the browser behind it.
-    #[allow(dead_code)]
-    pub fn run_menu(&mut self, item: &MenuItem) {
-        let covered = self.view != View::Browser
+    // Under a popup or the search band, a menu action would land on the browser behind it.
+    pub fn menus_blocked(&self) -> bool {
+        self.view != View::Browser
             || self.confirm.is_some()
             || self.form.is_some()
             || self.group_prompt.is_some()
@@ -2755,8 +2764,12 @@ impl App {
             || self.library.is_some()
             || self.detail
             || self.band
-            || self.show_help;
-        if !covered {
+            || self.show_help
+    }
+
+    #[allow(dead_code)]
+    pub fn run_menu(&mut self, item: &MenuItem) {
+        if !self.menus_blocked() {
             (item.run)(self);
         }
     }
