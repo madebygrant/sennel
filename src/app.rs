@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use keepass::db::{Entry, EntryId, GroupId};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use zeroize::Zeroize;
 
 use crate::clipboard::Board;
@@ -30,7 +30,6 @@ pub enum Pane {
 
 // Calls the action rather than replaying its key: `D`, `X` and `p` mean other things in other panes and popups.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub struct MenuItem {
     pub label: &'static str,
     // Shown beside the label only. The help table test holds it to a listed key.
@@ -788,6 +787,10 @@ pub struct App {
     /// Where the header drew each menu label this frame, for `click`.
     pub menu_bar: Vec<(Rect, MenuId)>,
     pub menu: Option<MenuId>,
+    pub menu_cursor: usize,
+    /// The open dropdown's box and its item rows as drawn this frame.
+    pub menu_area: Rect,
+    pub menu_rows: Vec<(Rect, usize)>,
     /// The row a click just copied, and when, for the glow.
     pub copied: Option<(CopyRow, Instant)>,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
@@ -944,6 +947,9 @@ impl App {
             copy_rows: Vec::new(),
             menu_bar: Vec::new(),
             menu: None,
+            menu_cursor: 0,
+            menu_area: Rect::ZERO,
+            menu_rows: Vec::new(),
             copied: None,
             order: SortOrder::default(),
             generator: crate::config::Generator::default(),
@@ -2690,7 +2696,7 @@ impl App {
         }
         if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| inside(*at)).copied() {
             if !self.menus_blocked() {
-                self.menu = if self.menu == Some(id) { None } else { Some(id) };
+                self.toggle_menu(id);
             }
             return;
         }
@@ -2767,10 +2773,77 @@ impl App {
             || self.show_help
     }
 
-    #[allow(dead_code)]
     pub fn run_menu(&mut self, item: &MenuItem) {
         if !self.menus_blocked() {
             (item.run)(self);
+        }
+    }
+
+    fn toggle_menu(&mut self, id: MenuId) {
+        if self.menu == Some(id) {
+            self.menu = None;
+        } else {
+            self.menu = Some(id);
+            self.menu_cursor = 0;
+        }
+    }
+
+    pub fn menu_items(&self) -> &'static [MenuItem] {
+        MENUS
+            .iter()
+            .find(|(id, _, _)| Some(*id) == self.menu)
+            .map_or(&[], |(_, _, items)| *items)
+    }
+
+    // Only through the rows drawn: a short terminal cuts the box off, and Enter must not run a hidden item.
+    pub fn step_menu(&mut self, down: bool) {
+        let len = match self.menu_rows.len() {
+            0 => self.menu_items().len(),
+            drawn => drawn,
+        }
+        .max(1);
+        self.menu_cursor = if down {
+            (self.menu_cursor + 1) % len
+        } else {
+            (self.menu_cursor + len - 1) % len
+        };
+    }
+
+    // Left and right walk the menu bar, wrapping at the ends.
+    pub fn shift_menu(&mut self, right: bool) {
+        let Some(at) = MENUS.iter().position(|(id, _, _)| Some(*id) == self.menu) else {
+            return;
+        };
+        let next = (if right { at + 1 } else { at + MENUS.len() - 1 }) % MENUS.len();
+        self.menu = Some(MENUS[next].0);
+        self.menu_cursor = 0;
+    }
+
+    // Closed before the item runs, so the popup the item opens is the only thing up.
+    pub fn choose_menu(&mut self) {
+        let item = self.menu_items().get(self.menu_cursor).copied();
+        self.menu = None;
+        if let Some(item) = item {
+            self.run_menu(&item);
+        }
+    }
+
+    // An open menu takes every click: one that misses it closes it rather than landing behind it.
+    pub fn click_menu(&mut self, column: u16, row: u16) {
+        let hit = |area: Rect| area.contains(Position::new(column, row));
+        if let Some((_, n)) = self.menu_rows.iter().find(|(at, _)| hit(*at)).copied() {
+            self.menu_cursor = n;
+            self.choose_menu();
+        } else if let Some((_, id)) = self.menu_bar.iter().find(|(at, _)| hit(*at)).copied() {
+            self.toggle_menu(id);
+        } else if !hit(self.menu_area) {
+            self.menu = None;
+        }
+    }
+
+    pub fn wheel_menu(&mut self, column: u16, row: u16, down: bool) {
+        if self.menu_area.contains(Position::new(column, row)) {
+            self.step_menu(down);
         }
     }
 

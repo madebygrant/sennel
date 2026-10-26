@@ -74,6 +74,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
        selecting a row. */
     app.copy_rows.clear();
     app.menu_bar.clear();
+    app.menu_rows.clear();
+    app.menu_area = Rect::ZERO;
+    // Before the header lights the label: a popup that opened under a menu, such as a reload conflict, closes it.
+    if app.menus_blocked() {
+        app.menu = None;
+    }
     /* The band squeezes the body from below only while it is open: a fixed
        row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() {
@@ -137,6 +143,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.mint.is_some() {
         draw_mint(frame, app);
     }
+    draw_menu(frame, app);
     recolour(frame);
 }
 
@@ -1297,6 +1304,56 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         }),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+// Hangs under its label in the header and records each row for `click_menu`.
+fn draw_menu(frame: &mut Frame, app: &mut App) {
+    let p = app.theme;
+    let Some((label, _)) = app.menu_bar.iter().find(|(_, id)| Some(*id) == app.menu).copied() else {
+        return;
+    };
+    let mut items = app.menu_items();
+    let wide = items
+        .iter()
+        .map(|item| cols(item.label) + 3 + cols(item.shortcut))
+        .max()
+        .unwrap_or(0);
+    let screen = frame.area();
+    let width = (wide as u16 + 4).min(screen.width);
+    let top = label.y + 1;
+    let at = Rect::new(
+        label.x.saturating_sub(2).min(screen.right().saturating_sub(width)),
+        top,
+        width,
+        (items.len() as u16 + 2).min(screen.bottom().saturating_sub(top)),
+    );
+    items = &items[..items.len().min(at.height.saturating_sub(2) as usize)];
+    app.menu_cursor = app.menu_cursor.min(items.len().saturating_sub(1));
+    let lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .map(|(n, item)| {
+            let live = n == app.menu_cursor;
+            let pad = wide - cols(item.label) - cols(item.shortcut);
+            Line::from(vec![
+                if live { p.lit("▌") } else { Span::raw(" ") },
+                Span::styled(format!(" {}{}", item.label, " ".repeat(pad)), p.row(live)),
+                p.faint(item.shortcut),
+            ])
+        })
+        .collect();
+    frame.render_widget(Clear, at);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(p.accent))
+        .style(Style::new().bg(p.surface));
+    let inner = block.inner(at);
+    frame.render_widget(block, at);
+    frame.render_widget(Paragraph::new(lines), inner);
+    app.menu_area = at;
+    for n in 0..items.len() as u16 {
+        app.menu_rows.push((Rect::new(inner.x, inner.y + n, inner.width, 1), n as usize));
+    }
 }
 
 /// Draws the box and hands back where its contents landed, so a caller that

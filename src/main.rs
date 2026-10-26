@@ -929,6 +929,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
    is a convenience over a keyboard app, so it stays out of the popups, where
    a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    // Ahead of `click`, whose copy rows match on the screen row alone and may sit under a menu row.
+    if app.menu.is_some() {
+        app.touch();
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => app.click_menu(mouse.column, mouse.row),
+            MouseEventKind::ScrollDown => app.wheel_menu(mouse.column, mouse.row, true),
+            MouseEventKind::ScrollUp => app.wheel_menu(mouse.column, mouse.row, false),
+            _ => {}
+        }
+        return;
+    }
     /* The popups that ask a question keep the mouse out, so a stray click
        cannot answer one. The detail popup is not a question — it is the only
        detail view a narrow terminal has, and its rows copy on click like the
@@ -981,6 +992,22 @@ fn handle_paste(app: &mut App, mut text: String) {
     text.zeroize();
 }
 
+// Any other key closes the menu and then does what it always does, so ^l still locks and `p` still copies.
+fn handle_menu_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Esc => app.menu = None,
+        KeyCode::Down | KeyCode::Char('j') => app.step_menu(true),
+        KeyCode::Up | KeyCode::Char('k') => app.step_menu(false),
+        KeyCode::Right => app.shift_menu(true),
+        KeyCode::Left => app.shift_menu(false),
+        KeyCode::Enter => app.choose_menu(),
+        _ => {
+            app.menu = None;
+            handle_key(app, code, mods);
+        }
+    }
+}
+
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* First, because this is the proof of presence: every key that reaches
        the session restarts the idle clock, including the ones swallowed
@@ -996,6 +1023,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        the browser behind it must not also act on the key. */
     if app.form.is_some() {
         handle_form_key(app, code, mods);
+        return;
+    }
+    if app.menu.is_some() {
+        handle_menu_key(app, code, mods);
         return;
     }
     /* The group prompt is modal on the same terms, one box instead of five. */
@@ -2274,5 +2305,145 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn left_click(app: &mut App, column: u16, row: u16) {
+        handle_mouse(
+            app,
+            event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    }
+
+    // An entry selected in the entries pane, drawn short enough that the detail pane's copy rows sit under a dropdown.
+    fn menu_screen() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        vault.create_entry(&root, "bank", "octo", "vault-password", "", "").unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.step_pane(true);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        (app, t)
+    }
+
+    fn open_menu(app: &mut App, t: &mut ratatui::Terminal<ratatui::backend::TestBackend>, menu: crate::app::MenuId) {
+        let (at, _) = *app.menu_bar.iter().find(|(_, id)| *id == menu).unwrap();
+        left_click(app, at.x, at.y);
+        assert_eq!(app.menu, Some(menu));
+        t.draw(|f| ui::draw(f, app)).unwrap();
+    }
+
+    #[test]
+    fn clicking_a_menu_row_runs_it_and_closes_the_menu() {
+        let (mut app, mut t) = menu_screen();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Group);
+        let (row, _) = app.menu_rows[0];
+        left_click(&mut app, row.x + 1, row.y);
+        assert_eq!(app.menu, None);
+        assert!(app.group_prompt.is_some(), "Group › Add did not open the prompt");
+    }
+
+    #[test]
+    fn a_click_outside_the_menu_closes_it_and_goes_no_further() {
+        let (mut app, mut t) = menu_screen();
+        let (cursor, pane) = (app.entry_cursor, app.active_pane);
+        open_menu(&mut app, &mut t, crate::app::MenuId::Vault);
+        let groups = app.group_area;
+        left_click(&mut app, groups.x + 1, groups.y);
+        assert_eq!(app.menu, None);
+        assert_eq!((app.entry_cursor, app.active_pane), (cursor, pane), "the click reached the panes");
+    }
+
+    #[test]
+    fn a_menu_row_over_a_copy_row_does_not_copy() {
+        let (mut app, mut t) = menu_screen();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
+        let (row, _) = *app
+            .menu_rows
+            .iter()
+            .find(|(at, _)| app.copy_rows.iter().any(|(y, _)| *y == at.y))
+            .expect("no menu row shares a screen row with a copy row");
+        left_click(&mut app, row.x + 1, row.y);
+        assert_eq!(app.copied, None, "the click copied through the menu");
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn menu_labels_are_dead_under_a_popup() {
+        let opens: [fn(&mut App); 5] = [
+            App::open_mint,
+            |app| app.confirm = Some(Confirm::Quit),
+            App::open_help,
+            App::open_search,
+            |app| app.detail = true,
+        ];
+        for open in opens {
+            let (mut app, mut t) = menu_screen();
+            let (label, id) = app.menu_bar[0];
+            open(&mut app);
+            t.draw(|f| ui::draw(f, &mut app)).unwrap();
+            left_click(&mut app, label.x, label.y);
+            assert_eq!(app.menu, None, "{id:?} opened under a popup");
+        }
+    }
+
+    #[test]
+    fn menu_keys_move_run_and_close() {
+        let (mut app, mut t) = menu_screen();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Group);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.menu, None);
+
+        open_menu(&mut app, &mut t, crate::app::MenuId::View);
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.menu, Some(crate::app::MenuId::Group));
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.menu, None);
+        assert!(app.group_prompt.is_some(), "Group › Rename did not open the prompt");
+
+        let (mut app, mut t) = menu_screen();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Vault);
+        handle_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(app.menu, None);
+        assert_eq!(app.view, crate::app::View::Unlock, "^l was swallowed by the open menu");
+    }
+
+    #[test]
+    fn a_cut_off_menu_keeps_its_cursor_on_rows_it_drew() {
+        let (mut app, _) = menu_screen();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 8)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
+        let drawn = app.menu_rows.len();
+        assert!(drawn < app.menu_items().len(), "the box was not cut off");
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.menu_cursor, drawn - 1, "the cursor wrapped onto a hidden item");
+    }
+
+    #[test]
+    fn the_wheel_over_a_menu_steps_its_cursor() {
+        let (mut app, mut t) = menu_screen();
+        open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
+        let (row, _) = app.menu_rows[0];
+        let cursor = app.entry_cursor;
+        handle_mouse(
+            &mut app,
+            event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: row.x + 1,
+                row: row.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.menu_cursor, 1);
+        assert_eq!(app.entry_cursor, cursor, "the wheel scrolled the pane behind the menu");
     }
 }
