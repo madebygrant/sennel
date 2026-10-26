@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-field"
+description = "Enables the remove_field command without any pre-configured scope."
+commands.allow = ["remove_field"]
+
+[[permission]]
+identifier = "deny-remove-field"
+description = "Denies the remove_field command without any pre-configured scope."
+commands.deny = ["remove_field"]

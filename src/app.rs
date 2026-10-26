@@ -2363,67 +2363,7 @@ impl App {
         let Some(vault) = self.session.vault() else {
             return Vec::new();
         };
-        let mut entries: Vec<keepass::db::EntryRef<'_>> = if global {
-            let mut all: Vec<keepass::db::EntryRef<'_>> = vault.entry_refs();
-            /* The store has no order of its own: a title sort gives the Stored
-               view a stable base — and every other order a deterministic
-               tiebreak — instead of whatever bucket iteration coughed up this
-               frame. */
-            all.sort_by_key(|a| a.title().to_lowercase());
-            all
-        } else {
-            match self.group_cursor {
-                Some(group) => vault.entries_in(&group),
-                None => Vec::new(),
-            }
-        };
-        /* Stable sorts: ties keep the file's own order, so equal timestamps
-           never shuffle rows between presses of `o`. Missing timestamps sort
-           last under Reverse, reading as "oldest". */
-        match self.order {
-            SortOrder::Stored => {}
-            SortOrder::Name => entries.sort_by(|a, b| {
-                a.title().to_lowercase().cmp(&b.title().to_lowercase())
-            }),
-            SortOrder::Recent => {
-                entries.sort_by_key(|e| std::cmp::Reverse(e.times.creation))
-            }
-            SortOrder::Updated => {
-                entries.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification))
-            }
-        }
-        /* `#tag` filters rather than ranks: a tag is an exact label somebody
-           chose, so it answers yes or no and the fuzzy ranking below would
-           only shuffle the answer. Applies in either scope, because "show me
-           everything tagged work" is rarely a question about one folder. */
-        if let Some(prefix) = self.search.as_deref().and_then(crate::vault::tag_needle) {
-            return entries
-                .iter()
-                .filter(|e| crate::vault::has_tag(e, prefix))
-                .map(|e| e.id())
-                .collect();
-        }
-        let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
-        if global {
-            // A Pattern so multi-word needles ("git octo") become atoms, matching the count
-            // in `entry_matches`. Needle parsed and haystacks built once, each scored once.
-            let needle = self.search.clone().unwrap_or_default();
-            let pattern = crate::search::pattern(&needle);
-            let hays = crate::search::haystacks(vault, &ids);
-            let mut scored: Vec<(EntryId, u16)> = ids
-                .iter()
-                .zip(&hays)
-                .filter_map(|(id, hay)| {
-                    self.searcher.score(&pattern, hay).map(|score| (*id, score))
-                })
-                .collect();
-            /* Relevance order while searching: the best hit first, so the
-               cursor lands on the likely answer without a single j. A stable
-               sort, so ties keep the order above. */
-            scored.sort_by_key(|a| std::cmp::Reverse(a.1));
-            return scored.into_iter().map(|(id, _)| id).collect();
-        }
-        ids
+        crate::search::rows(vault, global, self.group_cursor, self.search.as_deref(), self.order, &mut self.searcher)
     }
 
     /// How many entries the vault holds in total, for the "N of M shown"

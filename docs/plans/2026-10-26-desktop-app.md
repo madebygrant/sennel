@@ -51,7 +51,7 @@ The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pa
   - new core tests drive `Session` with no TUI
   - `app.rs` keeps only view state, input routing and message wording
 
-## Wave 3: The Tauri app
+## Wave 3: The Tauri app [done 2026-10-26]
 - Add `crates/sennel-desktop`, a Tauri 2 app with a TypeScript frontend (Svelte or plain TS with Vite), bundled locally with no remote content.
 - The Rust side holds one `Mutex<Session>` in Tauri state. Commands:
   - unlock, lock, Touch ID unlock

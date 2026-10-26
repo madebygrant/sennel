@@ -5,6 +5,7 @@ mod theme;
 mod touchid;
 mod ui;
 
+use sennel_core::harden::{core_dumps_off, harden};
 use sennel_core::{agent, clipboard, export, generator, import, pwned, search, vault};
 #[cfg(not(test))]
 use sennel_core::touchid;
@@ -252,37 +253,6 @@ fn main() -> Result<()> {
     // The vault's name must not outlive the session in the window title.
     let _ = execute!(std::io::stdout(), SetTitle(""));
     result
-}
-
-/* Refuse to write the decrypted vault anywhere a crash could leave it. A
-   core dump of this process holds every secret at once, and on Linux a
-   dumpable process can also be attached to by anything running as the same
-   user — which is the whole machine's worth of software the user has ever
-   installed. Best effort: a platform that refuses either call is no worse
-   off than before. */
-/// Whether core dumps are actually off, read back rather than assumed. Shown
-/// by `--check`, which is how the hardening becomes something a test outside
-/// this process can see — and `--check` is itself an early return, so seeing
-/// it there proves `harden` ran before any of them.
-fn core_dumps_off() -> bool {
-    let mut limit = libc::rlimit {
-        rlim_cur: 1,
-        rlim_max: 1,
-    };
-    let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
-    read == 0 && limit.rlim_cur == 0
-}
-
-fn harden() {
-    unsafe {
-        let no_core = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        libc::setrlimit(libc::RLIMIT_CORE, &no_core);
-        #[cfg(target_os = "linux")]
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-    }
 }
 
 /* The first thing to run on a new machine and the first thing to ask for in

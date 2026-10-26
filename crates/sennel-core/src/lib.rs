@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod config;
 pub mod export;
 pub mod generator;
+pub mod harden;
 pub mod import;
 pub mod migration;
 pub mod pwned;

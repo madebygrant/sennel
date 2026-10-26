@@ -1,0 +1,29 @@
+[package]
+name = "sennel-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "Sennel in a native window: the same vaults as the terminal app"
+license = "MIT OR Apache-2.0"
+
+# The bin only wires the generated context to `run`; the commands are tested in the lib, which
+# builds without the bundled frontend.
+[[bin]]
+name = "sennel-desktop"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sennel-core = { path = "../sennel-core" }
+tauri = { version = "2", features = [] }
+anyhow.workspace = true
+serde.workspace = true
+keepass.workspace = true
+chrono.workspace = true
+zeroize.workspace = true
+uuid = "1"
+
+[dev-dependencies]
+sennel-core = { path = "../sennel-core", features = ["test-support"] }

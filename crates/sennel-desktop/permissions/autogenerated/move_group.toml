@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-move-group"
+description = "Enables the move_group command without any pre-configured scope."
+commands.allow = ["move_group"]
+
+[[permission]]
+identifier = "deny-move-group"
+description = "Denies the move_group command without any pre-configured scope."
+commands.deny = ["move_group"]

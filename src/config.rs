@@ -251,81 +251,6 @@ impl Field {
     }
 }
 
-/// The generator settings a session runs with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Generator {
-    pub kind: crate::generator::Kind,
-    pub length: usize,
-    /// Pin digits. Read only for that kind.
-    pub pin_length: usize,
-    /// Passphrase words. Read only for that kind; kept beside length so one
-    /// struct answers every generator there is.
-    pub words: usize,
-    pub classes: crate::generator::Classes,
-    /// True keeps the lookalikes out of the pool.
-    pub exclude_ambiguous: bool,
-}
-
-impl Default for Generator {
-    fn default() -> Self {
-        Generator {
-            kind: crate::generator::Kind::Complex,
-            length: 20,
-            pin_length: 6,
-            words: 6,
-            classes: crate::generator::Classes::default(),
-            exclude_ambiguous: true,
-        }
-    }
-}
-
-impl Generator {
-    /// How the flash describes what it just made.
-    pub fn describe(&self) -> String {
-        match self.kind {
-            crate::generator::Kind::Complex => {
-                let mut has = vec!["a–z"];
-                if self.classes.upper {
-                    has.push("A–Z");
-                }
-                if self.classes.digits {
-                    has.push("0–9");
-                }
-                if self.classes.symbols {
-                    has.push("!@#");
-                }
-                has.join(" ")
-            }
-            crate::generator::Kind::Passphrase => {
-                format!("{}-word list", crate::generator::word_count())
-            }
-            crate::generator::Kind::Pin => "0–9".to_string(),
-        }
-    }
-
-    /// What was made, in its own units: `20 chars`, `6 words`, `6 digits`.
-    pub fn amount(&self) -> String {
-        match self.kind {
-            crate::generator::Kind::Complex => format!("{} chars", self.length),
-            crate::generator::Kind::Passphrase => format!("{} words", self.words),
-            crate::generator::Kind::Pin => format!("{} digits", self.pin_length),
-        }
-    }
-
-    /// Priced against what was drawn from: the class pool, the wordlist, or
-    /// ten digits. One number the flashes and the popup can share.
-    pub fn bits(&self) -> f64 {
-        match self.kind {
-            crate::generator::Kind::Complex => crate::generator::entropy_bits(
-                self.length,
-                self.classes.alphabet_len(self.exclude_ambiguous),
-            ),
-            crate::generator::Kind::Passphrase => crate::generator::passphrase_bits(self.words),
-            crate::generator::Kind::Pin => crate::generator::pin_bits(self.pin_length),
-        }
-    }
-}
-
 pub struct Config {
     /// The database to open. `None` means ask, since a password manager
     /// without a vault is a question, not an error.
@@ -450,24 +375,6 @@ impl Config {
     }
 }
 
-// A key left in the agent must expire, so the lifetime cannot be zero or forever.
-fn lifetime(seconds: Option<u32>) -> Result<u32> {
-    let seconds = seconds.unwrap_or(3600);
-    if !(1..=604_800).contains(&seconds) {
-        anyhow::bail!("ssh_agent_lifetime = {seconds} is outside 1–604800 seconds");
-    }
-    Ok(seconds)
-}
-
-// More than `BACKUPS_MAX` would not be found again by `--check` or deleted on a rekey.
-fn backups(keep: Option<usize>) -> Result<usize> {
-    let keep = keep.unwrap_or(DEFAULT_BACKUPS);
-    if keep > crate::vault::BACKUPS_MAX {
-        anyhow::bail!("backups = {keep} is outside 0–{}", crate::vault::BACKUPS_MAX);
-    }
-    Ok(keep)
-}
-
 /* A name Sennel does not know is a startup error, not a silent fallback to
    stored order: an ignored setting looks like a setting that does nothing. */
 fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
@@ -527,54 +434,6 @@ fn hex(value: &str) -> Result<ratatui::style::Color> {
     }
     let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16);
     Ok(ratatui::style::Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
-}
-
-/* Every field optional, and a length that could never produce a password is
-   a startup error rather than a surprise at `^s`. */
-fn generator(file: Option<&FileGenerator>) -> Result<Generator> {
-    let mut out = Generator::default();
-    let Some(file) = file else {
-        return Ok(out);
-    };
-    if let Some(kind) = file.kind.as_deref() {
-        out.kind = crate::generator::Kind::parse(kind)
-            .ok_or_else(|| anyhow::anyhow!("generator kind {kind:?} is none of complex, passphrase, pin"))?;
-    }
-    if let Some(words) = file.words {
-        let (min, max) = WORDS_RANGE;
-        if !(min..=max).contains(&words) {
-            anyhow::bail!("generator words {words} is outside {min}–{max}");
-        }
-        out.words = words;
-    }
-    if let Some(pin) = file.pin_length {
-        let (min, max) = PIN_RANGE;
-        if !(min..=max).contains(&pin) {
-            anyhow::bail!("generator pin_length {pin} is outside {min}–{max}");
-        }
-        out.pin_length = pin;
-    }
-    if let Some(length) = file.length {
-        let (min, max) = LENGTH_RANGE;
-        if !(min..=max).contains(&length) {
-            anyhow::bail!("generator length {length} is outside {min}–{max}");
-        }
-        out.length = length;
-    }
-    if let Some(on) = file.symbols {
-        out.classes.symbols = on;
-    }
-    if let Some(on) = file.digits {
-        out.classes.digits = on;
-    }
-    if let Some(on) = file.upper {
-        out.classes.upper = on;
-    }
-    if let Some(on) = file.ambiguous {
-        // The key reads as "allow ambiguous", the flag as "exclude them".
-        out.exclude_ambiguous = !on;
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

@@ -33,6 +33,8 @@ arboard.workspace = true
 nucleo-matcher = "0.3"
 zeroize.workspace = true
 getrandom = "0.4"
+# Two calls only: no core dumps, and no ptrace by the rest of this user's software.
+libc = "0.2"
 
 # Touch ID quick unlock: an ephemeral Secure Enclave key, which needs no
 # keychain entitlement, so an unsigned build can create one.

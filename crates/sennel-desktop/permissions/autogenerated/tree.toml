@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tree"
+description = "Enables the tree command without any pre-configured scope."
+commands.allow = ["tree"]
+
+[[permission]]
+identifier = "deny-tree"
+description = "Denies the tree command without any pre-configured scope."
+commands.deny = ["tree"]

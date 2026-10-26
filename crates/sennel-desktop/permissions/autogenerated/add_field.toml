@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-field"
+description = "Enables the add_field command without any pre-configured scope."
+commands.allow = ["add_field"]
+
+[[permission]]
+identifier = "deny-add-field"
+description = "Denies the add_field command without any pre-configured scope."
+commands.deny = ["add_field"]

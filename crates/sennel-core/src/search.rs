@@ -135,6 +135,52 @@ impl Default for Searcher {
     }
 }
 
+// The entries pane's rows. `global` searches the whole vault, otherwise `group` is the scope.
+// A `#tag` needle filters rather than ranks: a tag is a label somebody chose, so it answers yes
+// or no. Any other needle ranks best first; ties keep `order`, which ties on title.
+pub fn rows(
+    vault: &Vault,
+    global: bool,
+    group: Option<GroupId>,
+    needle: Option<&str>,
+    order: crate::sort::SortOrder,
+    searcher: &mut Searcher,
+) -> Vec<EntryId> {
+    use crate::sort::SortOrder;
+    use crate::vault::EntryExt;
+    let mut entries: Vec<EntryRef<'_>> = if global {
+        let mut all = vault.entry_refs();
+        // The store has no order of its own, so a title sort is the stable base.
+        all.sort_by_key(|a| a.title().to_lowercase());
+        all
+    } else {
+        group.map_or_else(Vec::new, |group| vault.entries_in(&group))
+    };
+    // Stable sorts: ties keep the file's order, and a missing timestamp reads as oldest.
+    match order {
+        SortOrder::Stored => {}
+        SortOrder::Name => entries.sort_by_key(|a| a.title().to_lowercase()),
+        SortOrder::Recent => entries.sort_by_key(|e| std::cmp::Reverse(e.times.creation)),
+        SortOrder::Updated => entries.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification)),
+    }
+    if let Some(prefix) = needle.and_then(crate::vault::tag_needle) {
+        return entries.iter().filter(|e| crate::vault::has_tag(e, prefix)).map(|e| e.id()).collect();
+    }
+    let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
+    let Some(needle) = needle.filter(|n| global && !n.is_empty()) else {
+        return ids;
+    };
+    let pattern = pattern(needle);
+    let hays = haystacks(vault, &ids);
+    let mut scored: Vec<(EntryId, u16)> = ids
+        .iter()
+        .zip(&hays)
+        .filter_map(|(id, hay)| searcher.score(&pattern, hay).map(|score| (*id, score)))
+        .collect();
+    scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+    scored.into_iter().map(|(id, _)| id).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

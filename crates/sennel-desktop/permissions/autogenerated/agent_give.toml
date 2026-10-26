@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-give"
+description = "Enables the agent_give command without any pre-configured scope."
+commands.allow = ["agent_give"]
+
+[[permission]]
+identifier = "deny-agent-give"
+description = "Denies the agent_give command without any pre-configured scope."
+commands.deny = ["agent_give"]

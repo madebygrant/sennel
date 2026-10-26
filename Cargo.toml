@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/sennel-core"]
+members = [".", "crates/sennel-core", "crates/sennel-desktop"]
 resolver = "3"
 
 # Shared by both crates, so the pins and features are written once.
@@ -59,9 +59,6 @@ chrono.workspace = true
 arboard.workspace = true
 zeroize.workspace = true
 rpassword = "7"
-# Two calls only: no core dumps, and no ptrace by the rest of this user's
-# software — a dump of this process holds every secret at once.
-libc = "0.2"
 
 [dev-dependencies]
 sennel-core = { path = "crates/sennel-core", features = ["clap", "test-support"] }
