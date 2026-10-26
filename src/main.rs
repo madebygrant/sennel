@@ -1,17 +1,13 @@
-mod agent;
 mod app;
-mod clipboard;
 mod config;
-mod export;
-mod generator;
-mod import;
-mod migration;
-mod pwned;
-mod search;
 mod theme;
+#[cfg(test)]
 mod touchid;
 mod ui;
-mod vault;
+
+use sennel_core::{agent, clipboard, export, generator, import, pwned, search, vault};
+#[cfg(not(test))]
+use sennel_core::touchid;
 
 use std::io::IsTerminal;
 use std::time::Duration;

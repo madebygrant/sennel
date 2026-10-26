@@ -4,8 +4,15 @@
 
 use zeroize::Zeroizing;
 
-use crate::config::ExportFormat;
 use crate::vault::{EntryExt, Extra, Vault, extra_rows, raw_otp};
+
+/// What `export` writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum ExportFormat {
+    Csv,
+    Json,
+}
 
 pub struct Exported {
     pub text: Zeroizing<String>,

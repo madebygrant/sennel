@@ -11,7 +11,7 @@ The vault layer is already independent of the terminal. `vault.rs`, `generator.r
 The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pattern: a guard, a `Vault` call, `push_undo`, `snap()` (a cursor fix-up), `persist()`, then a `say`/`warn`/`error` flash. So the session behaviour is real core logic that is woven into TUI state. A second front end can't reuse it until that logic returns outcomes instead of writing messages.
 
 
-## Wave 1: Workspace and core crate, moved without changing behaviour
+## Wave 1: Workspace and core crate, moved without changing behaviour [done 2026-10-26]
 - Convert to a Cargo workspace with `crates/sennel-core` (lib) and `crates/sennel-tui` (the current binary, still named `sennel`).
 - Move the ratatui-free modules into core as they are.
 - Split config:
@@ -69,12 +69,16 @@ The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pa
   - Enable only the Tauri capabilities the commands need. No fs or shell plugins.
 - **Exit criterion:** the app can unlock the fixture vault, copy a password that auto-clears, add and edit an entry, auto-lock and Touch ID unlock, and KeePassXC still opens the file afterwards.
 
-## Wave 4: Packaging and docs
-- Use `tauri build` to produce a `.app` and `.dmg` on macOS, an AppImage or `.deb` on Linux, and an MSI on Windows. Unsigned builds work for personal use.
-- Sharing it needs an Apple Developer ID ($99 a year) for signing and notarisation. Signing also makes a later option possible: a Keychain item behind Touch ID that survives a quit.
+## Wave 4: Unsigned builds and docs
+- `cargo tauri build` produces a `.app` and `.dmg` on macOS, an AppImage or `.deb` on Linux, and an MSI on Windows, all unsigned. A build runs on the Mac that made it. A copy on another Mac must be allowed once in System Settings › Privacy & Security, and Windows shows a SmartScreen warning.
 - Add a `docs/desktop.md`. Add a section to `docs/security.md` covering two things:
   - JavaScript strings cannot be zeroized, so a revealed or edited password lives in the webview until it is garbage-collected.
   - Copying stays in Rust.
+- **Exit criterion:** the `.app` from `cargo tauri build` opens on this Mac, unlocks the fixture vault, and Touch ID works.
+
+## Roadmap (not scheduled)
+- **Signing and notarisation.** An Apple Developer ID ($99 a year) so the app opens on other Macs without the Open Anyway step, and an Authenticode certificate for Windows. Needed only to share the app.
+- **Touch ID that survives a quit.** Needs a signed app with a keychain entitlement, so it waits on signing. Today the sealed password dies with the process by design.
 
 ## Security notes that shape the design
 - There is no localhost server. Tauri talks to the frontend over in-process IPC, so other software on the machine and web pages have no port to reach.
@@ -101,4 +105,4 @@ The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pa
 - Open the saved vault in KeePassXC to confirm it still reads.
 
 ## What can slip
-Waves 1 and 2 are required, because without them the desktop app would copy `app.rs` logic and the two front ends would drift. They also make the TUI easier to test on its own. Wave 4's signing can wait until you want to share the app.
+Waves 1 and 2 are required, because without them the desktop app would copy `app.rs` logic and the two front ends would drift. They also make the TUI easier to test on its own. Signing is on the roadmap, not in a wave, so nothing here depends on it.

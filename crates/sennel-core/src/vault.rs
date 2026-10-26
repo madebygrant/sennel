@@ -864,7 +864,7 @@ impl Vault {
 
     /// Open an existing `.kdbx` file. The password string is copied into the
     /// retained key; the caller zeroizes its own buffer.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open(
         path: &Path,
         password: &str,
@@ -891,7 +891,7 @@ impl Vault {
         Ok(ChallengeResponseKey::YubikeyChallenge(key, spec.slot.to_string()))
     }
 
-    pub(crate) fn open_keyed(
+    pub fn open_keyed(
         path: &Path,
         password: &str,
         key_file: Option<&[u8]>,
@@ -1125,7 +1125,7 @@ impl Vault {
 
     /// First save of a new vault: records the path and key, so later `save`
     /// calls need neither.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn save_as(
         &mut self,
         path: &Path,
@@ -1147,7 +1147,7 @@ impl Vault {
         self.save_as_keyed(path, password, key_file, challenge)
     }
 
-    pub(crate) fn save_as_keyed(
+    pub fn save_as_keyed(
         &mut self,
         path: &Path,
         password: &str,
@@ -1353,7 +1353,7 @@ impl Vault {
     /// Every live entry id in the file, for the global search scope.
     /* Test-only since the row cache took over the counting: kept because the
        KeePassXC fixture reads entries without knowing their ids. */
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn all_entry_ids(&self) -> Vec<EntryId> {
         let dead = self.recycled();
         self.db.iter_all_entries().map(|e| e.id()).filter(|id| !dead.contains(id)).collect()
@@ -2102,6 +2102,11 @@ mod tests {
         Vault::new()
     }
 
+    // The fixtures sit at the workspace root, beside the TUI's tests that read them too.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures").join(name)
+    }
+
     #[test]
     fn a_new_vault_holds_one_empty_root() {
         let v = vault();
@@ -2206,7 +2211,7 @@ mod tests {
        minutes into editing, with nowhere for the work to go. */
     #[test]
     fn an_older_kdbx_opens_and_says_it_cannot_be_written() {
-        let path = std::path::Path::new("tests/fixtures/keepassxc3.kdbx");
+        let path = &fixture("keepassxc3.kdbx");
         let mut v = Vault::open(path, "sennel-fixture", None).expect("the fixture did not open");
         assert!(!v.writable(), "the fixture is writable now, so this test is wrong");
         assert_eq!(v.format(), "KDBX 3.1");
@@ -2248,7 +2253,7 @@ mod tests {
     #[test]
     fn a_keepassxc_4_vault_opens_saves_and_keeps_what_it_held() {
         let file = Temp::new("xc4");
-        std::fs::copy("tests/fixtures/keepassxc4.kdbx", &file.path).unwrap();
+        std::fs::copy(fixture("keepassxc4.kdbx"), &file.path).unwrap();
         let mut v = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         assert!(v.writable(), "{}", v.format());
         assert_eq!(v.format(), "KDBX 4.1");
@@ -2772,7 +2777,7 @@ mod tests {
     #[test]
     fn merging_into_a_keepassxc_vault_keeps_its_history_attachment_and_bin() {
         let file = Temp::new("merge-xc4");
-        std::fs::copy("tests/fixtures/keepassxc4.kdbx", &file.path).unwrap();
+        std::fs::copy(fixture("keepassxc4.kdbx"), &file.path).unwrap();
         let mut ours = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         let mut theirs = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         let root = ours.root_id();
@@ -2796,7 +2801,7 @@ mod tests {
     fn make_a_merged_vault_for_keepassxc() {
         let out = Path::new("/tmp/sennel-merged.kdbx");
         let _ = std::fs::remove_file(out);
-        std::fs::copy("tests/fixtures/keepassxc4.kdbx", out).unwrap();
+        std::fs::copy(fixture("keepassxc4.kdbx"), out).unwrap();
         let mut ours = Vault::open(out, "sennel-fixture", None).unwrap();
         let mut theirs = Vault::open(out, "sennel-fixture", None).unwrap();
         let root = ours.root_id();
@@ -2934,7 +2939,7 @@ mod tests {
     #[test]
     #[ignore]
     fn make_the_key_file_fixture() {
-        let dir = std::path::Path::new("tests/fixtures");
+        let dir = fixture("");
         std::fs::write(dir.join("keyfile4.key"), KEY_FILE).unwrap();
         let _ = std::fs::remove_file(dir.join("keyfile4.kdbx"));
         let mut v = vault();
@@ -3833,8 +3838,7 @@ mod tests {
        Synthetic vault only: real .kdbx files must never enter the repo. */
     #[test]
     fn a_keepassxc_written_vault_opens_with_the_right_password() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/keepassxc3.kdbx");
+        let path = fixture("keepassxc3.kdbx");
         let vault = Vault::open(&path, "sennel-fixture", None).unwrap();
         let ids = vault.all_entry_ids();
         let entry = vault.get_entry(&ids[0]).unwrap();
@@ -3848,8 +3852,7 @@ mod tests {
        file says the key was wrong, not that the file is broken. */
     #[test]
     fn a_keepassxc_written_vault_names_a_wrong_password_honestly() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/keepassxc3.kdbx");
+        let path = fixture("keepassxc3.kdbx");
         assert!(matches!(
             Vault::open(&path, "not the password", None),
             Err(VaultError::WrongPassword)

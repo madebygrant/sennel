@@ -2,8 +2,6 @@
 // The key is never written to a keychain, so it dies with the process.
 
 pub use imp::{Sealed, seal};
-#[cfg(test)]
-pub use imp::REFUSE;
 
 /// Why a sealed password did not come back.
 #[derive(Clone, Debug)]
@@ -14,7 +12,7 @@ pub enum Refused {
     Void(String),
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(target_os = "macos")]
 mod imp {
     use super::Refused;
     use security_framework::access_control::SecAccessControl;
@@ -74,7 +72,7 @@ mod imp {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
+#[cfg(not(target_os = "macos"))]
 mod imp {
     use super::Refused;
     use zeroize::Zeroizing;
@@ -88,32 +86,6 @@ mod imp {
     impl Sealed {
         pub fn open(&self) -> Result<Zeroizing<Vec<u8>>, Refused> {
             match *self {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod imp {
-    use super::Refused;
-    use std::cell::RefCell;
-    use zeroize::Zeroizing;
-
-    thread_local! {
-        pub static REFUSE: RefCell<Option<Refused>> = const { RefCell::new(None) };
-    }
-
-    pub struct Sealed(Zeroizing<Vec<u8>>);
-
-    pub fn seal(secret: &[u8]) -> Result<Sealed, String> {
-        Ok(Sealed(Zeroizing::new(secret.to_vec())))
-    }
-
-    impl Sealed {
-        pub fn open(&self) -> Result<Zeroizing<Vec<u8>>, Refused> {
-            match REFUSE.with_borrow(Clone::clone) {
-                Some(refused) => Err(refused),
-                None => Ok(self.0.clone()),
-            }
         }
     }
 }

@@ -1,0 +1,41 @@
+[package]
+name = "sennel-core"
+version = "0.1.0"
+edition = "2024"
+description = "The vault, generator, search, clipboard and config file behind Sennel"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Derives clap's ValueEnum on the types the TUI's flags parse into.
+clap = ["dep:clap"]
+# The test-only vault calls, for the TUI crate's tests. Cargo also turns this on
+# for the binary in a test run, so nothing that changes behaviour belongs here.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, optional = true }
+serde.workspace = true
+toml.workspace = true
+keepass.workspace = true
+# Named only to pin it. 0.5.39 and later call a `nusb` method that exists on
+# Linux alone, so they do not build on macOS, and `cargo install` ignores the
+# lockfile. Unused here; keepass is what links it. Lift the pin once a release
+# builds on macOS again.
+challenge_response = { version = "=0.5.38", default-features = false, features = ["nusb"] }
+chrono.workspace = true
+# Reads the OpenSSH private keys stored beside KeeAgent settings (bcrypt-pbkdf and
+# AES for the passphrase) so they can be handed to ssh-agent. Without `rsa` and
+# `ed25519`: they only add conversions to signing crates, and Sennel never signs.
+# The curve features are what make an ECDSA key a type at all. Pure Rust.
+ssh-key = { version = "0.6", default-features = false, features = ["std", "encryption", "p256", "p384", "p521"] }
+arboard.workspace = true
+nucleo-matcher = "0.3"
+zeroize.workspace = true
+getrandom = "0.4"
+
+# Touch ID quick unlock: an ephemeral Secure Enclave key, which needs no
+# keychain entitlement, so an unsigned build can create one.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+security-framework-sys = "2"

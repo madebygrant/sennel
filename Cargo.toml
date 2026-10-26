@@ -1,3 +1,36 @@
+[workspace]
+members = [".", "crates/sennel-core"]
+resolver = "3"
+
+# Shared by both crates, so the pins and features are written once.
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# keepass (not keepass-rs): keepass-rs 0.2 cannot decrypt KeePassXC files
+# (CBC length / header HMAC errors on correct passwords); the keepass crate
+# opens them and is maintained. save_kdbx4 is what lets us write vaults back.
+# totp: KeePassXC writes `otp` on entries, and an entry whose code Sennel
+# cannot show is an entry the user has to open another app for.
+# _merge: the crate's own merge, matched by uuid and modification time. The
+# underscore marks it unstable, so the version is pinned and any bump has to
+# rerun the merge tests in vault.rs before it lands.
+# challenge_response: a YubiKey (or OnlyKey) HMAC-SHA1 slot as part of the key,
+# which is how KeePassXC vaults protected by a hardware key are opened. It pulls
+# in the `challenge_response` crate over `nusb`, pure Rust with no libusb.
+keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge", "challenge_response"] }
+# Already in the tree under keepass, named here for the one thing the vault
+# cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# wayland-data-control: without it arboard only speaks X11, so on a Wayland
+# session (no X11 clipboard manager) a copy reports success yet nothing
+# reaches native Wayland paste targets. With it, copies go over
+# zwlr_data_control and stay servable while Sennel runs; X11 sessions fall
+# back to the X11 backend as before.
+arboard = { version = "3", features = ["wayland-data-control"] }
+zeroize = "1"
+
 [package]
 name = "sennel-tui"
 version = "0.1.0"
@@ -11,62 +44,27 @@ name = "sennel"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+sennel-core = { path = "crates/sennel-core", features = ["clap"] }
+anyhow.workspace = true
+clap.workspace = true
 # Completions and the man page are printed by the binary from the same clap
 # definition it parses with, so they cannot drift from the flags that exist.
 # Both are thin layers over clap itself rather than new machinery.
 clap_complete = "4"
 clap_mangen = "0.3"
 ratatui = "0.30"
-serde = { version = "1", features = ["derive"] }
-toml = "1"
-unicode-normalization = "0.1"
 unicode-width = "0.2"
-# keepass (not keepass-rs): keepass-rs 0.2 cannot decrypt KeePassXC files
-# (CBC length / header HMAC errors on correct passwords); the keepass crate
-# opens them and is maintained. save_kdbx4 is what lets us write vaults back.
-# totp: KeePassXC writes `otp` on entries, and an entry whose code Sennel
-# cannot show is an entry the user has to open another app for.
-# _merge: the crate's own merge, matched by uuid and modification time. The
-# underscore marks it unstable, so the version is pinned and any bump has to
-# rerun the merge tests in vault.rs before it lands.
-# challenge_response: a YubiKey (or OnlyKey) HMAC-SHA1 slot as part of the key,
-# which is how KeePassXC vaults protected by a hardware key are opened. It pulls
-# in the `challenge_response` crate over `nusb`, pure Rust with no libusb.
-keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge", "challenge_response"] }
-# Named only to pin it. 0.5.39 and later call a `nusb` method that exists on
-# Linux alone, so they do not build on macOS, and `cargo install` ignores the
-# lockfile. Unused here; keepass is what links it. Lift the pin once a release
-# builds on macOS again.
-challenge_response = { version = "=0.5.38", default-features = false, features = ["nusb"] }
-# Already in the tree under keepass, named here for the one thing the vault
-# cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Reads the OpenSSH private keys stored beside KeeAgent settings (bcrypt-pbkdf and
-# AES for the passphrase) so they can be handed to ssh-agent. Without `rsa` and
-# `ed25519`: they only add conversions to signing crates, and Sennel never signs.
-# The curve features are what make an ECDSA key a type at all. Pure Rust.
-ssh-key = { version = "0.6", default-features = false, features = ["std", "encryption", "p256", "p384", "p521"] }
+keepass.workspace = true
+chrono.workspace = true
+arboard.workspace = true
+zeroize.workspace = true
 rpassword = "7"
-# wayland-data-control: without it arboard only speaks X11, so on a Wayland
-# session (no X11 clipboard manager) a copy reports success yet nothing
-# reaches native Wayland paste targets. With it, copies go over
-# zwlr_data_control and stay servable while Sennel runs; X11 sessions fall
-# back to the X11 backend as before.
-arboard = { version = "3", features = ["wayland-data-control"] }
-nucleo-matcher = "0.3"
-zeroize = "1"
-getrandom = "0.4"
 # Two calls only: no core dumps, and no ptrace by the rest of this user's
 # software — a dump of this process holds every secret at once.
 libc = "0.2"
 
-# Touch ID quick unlock: an ephemeral Secure Enclave key, which needs no
-# keychain entitlement, so an unsigned build can create one.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3"
-security-framework-sys = "2"
+[dev-dependencies]
+sennel-core = { path = "crates/sennel-core", features = ["clap", "test-support"] }
 
 [profile.release]
 strip = true
