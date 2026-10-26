@@ -25,6 +25,10 @@ The path field is editable every time the app locks. An idle auto-lock drops the
 editor state but not the vault path or the key-file path, so switching vaults after a lock is `esc`, edit the file box,
 `enter`.
 
+With `touch_id = true` on a Mac, a vault you unlocked by typing reopens with a fingerprint after a
+lock: `enter` with the password box empty, and the hint says `enter Touch ID` when it will. It
+lasts until you quit, and belongs to that one vault. [How it works](security.md).
+
 Every printable key on this screen is text, so a `*` in a password types as `*`. The reveal is `^r`,
 not the browser's `*`.
 

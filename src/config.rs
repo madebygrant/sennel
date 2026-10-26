@@ -289,6 +289,8 @@ pub struct FileConfig {
     /// Wheel and click. On by default; off gives the terminal its own
     /// selection back.
     pub mouse: Option<bool>,
+    /// Enter on an empty password box unlocks with a fingerprint after a lock.
+    pub touch_id: Option<bool>,
 }
 
 /// What `^s` produces. Hard-coded before this — 20 characters, no symbols —
@@ -455,6 +457,7 @@ pub struct Config {
     pub sort: crate::app::SortOrder,
     pub generator: Generator,
     pub mouse: bool,
+    pub touch_id: bool,
     /// The colours this session draws in.
     pub theme: crate::theme::Palette,
     /// Overridden colours that are hard to read on their own ground. Said
@@ -535,6 +538,7 @@ impl Config {
             key_file: cli.key_file.map(|k| expand(&k)),
             generator: generator(file.generator.as_ref())?,
             mouse: file.mouse.unwrap_or(true),
+            touch_id: file.touch_id.unwrap_or(false),
             config_file,
             check: cli.check,
             list: cli.list,

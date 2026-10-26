@@ -62,5 +62,11 @@ getrandom = "0.4"
 # software — a dump of this process holds every secret at once.
 libc = "0.2"
 
+# Touch ID quick unlock: an ephemeral Secure Enclave key, which needs no
+# keychain entitlement, so an unsigned build can create one.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+security-framework-sys = "2"
+
 [profile.release]
 strip = true

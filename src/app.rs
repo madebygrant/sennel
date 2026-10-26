@@ -920,6 +920,11 @@ pub struct App {
     // The configured YubiKey slot, and whether the next unlock uses it (`^y`).
     yubikey: Option<YubiSpec>,
     use_yubikey: bool,
+    // `touch_id` from the config. A lock keeps `quick`: it is what the lock screen opens with.
+    pub touch_id: bool,
+    quick: Option<(PathBuf, crate::touchid::Sealed)>,
+    // Whether `db_path` is the vault `quick` was sealed for, kept by `refresh_db_state`.
+    quick_here: bool,
     // A write waiting for a frame that says "touch your key" before it blocks.
     pending: Option<Pending>,
     flushing: bool,
@@ -1014,6 +1019,9 @@ impl App {
             backup_dir: PathBuf::new(),
             yubikey: None,
             use_yubikey: false,
+            touch_id: false,
+            quick: None,
+            quick_here: false,
             ssh_agent: false,
             ssh_lifetime: 3600,
             agent_keys: Vec::new(),
@@ -1378,6 +1386,37 @@ impl App {
         self.say(format!("yubikey {spec} {state} for the next unlock"));
     }
 
+    // Whether Enter on the lock screen asks for a fingerprint instead of the box.
+    pub fn quick_ready(&self) -> bool {
+        self.quick_here && self.quick.is_some() && self.unlock_password.is_empty() && !self.unlock_new
+    }
+
+    // The fingerprint prompt, then the unlock. False when this vault has nothing sealed.
+    pub fn quick_unlock(&mut self, key_file: Option<&[u8]>) -> bool {
+        if !self.sync_db_path_from_file_box() || !self.quick_ready() {
+            return false;
+        }
+        let Some((_, sealed)) = &self.quick else {
+            return false;
+        };
+        match sealed.open() {
+            // Changed somewhere else since it was sealed, so it would fail the same way every time.
+            Ok(mut password) => {
+                if self.unlock_with(&mut password, key_file, true) {
+                    self.quick = None;
+                }
+            }
+            Err(crate::touchid::Refused::Again(why)) => {
+                self.warn(format!("Touch ID {why}  ·  enter asks again, or type the password"));
+            }
+            Err(crate::touchid::Refused::Void(why)) => {
+                self.quick = None;
+                self.warn(format!("Touch ID cannot open this any more  ·  {why}  ·  type the password"));
+            }
+        }
+        true
+    }
+
     pub fn set_backups(&mut self, keep: usize, dir: PathBuf) {
         self.backups = keep;
         self.backup_dir = dir;
@@ -1424,7 +1463,8 @@ impl App {
         }
         let secs = self.lock_after.map_or(0, |d| d.as_secs());
         self.lock();
-        self.warn(format!("locked after {secs} seconds idle"));
+        let hint = if self.quick_ready() { "  ·  enter for Touch ID" } else { "" };
+        self.warn(format!("locked after {secs} seconds idle{hint}"));
     }
 
     /* `^l`: the same wipe on purpose rather than on a timer. Locking used to
@@ -1435,7 +1475,10 @@ impl App {
             return;
         }
         self.lock();
-        self.say("locked  ·  password to return");
+        self.say(match self.quick_ready() {
+            true => "locked  ·  enter for Touch ID",
+            false => "locked  ·  password to return",
+        });
     }
 
     /* Drop the vault and go back behind the password prompt. Dropping is the
@@ -1656,6 +1699,11 @@ impl App {
        changes when the file does. */
     pub fn refresh_db_state(&mut self) {
         self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
+        // Through `absolute`: ^o and the file box spell the same vault differently.
+        self.quick_here = match (&self.quick, &self.db_path) {
+            (Some((db, _)), Some(path)) => crate::config::absolute(path) == *db,
+            _ => false,
+        };
     }
 
     // Point `db_path` at the file box when it names a different vault, so Tab-past
@@ -1679,18 +1727,19 @@ impl App {
         true
     }
 
-    /* Unlock with the typed password (and optional key file), or create the
-       database when the file is missing and the confirm matches. The password
-       buffer is zeroized on every path out; the retained DatabaseKey inside
-       the vault is the only copy that survives, and it zeroizes on drop. */
+    // Unlock, or create the vault when the file is missing and the confirm matches. The
+    // password buffer is wiped on every path out; the vault's key and, with `touch_id`,
+    // the sealed copy in `quick` are the only copies that survive.
     /* Enter on the lock screen: say so, then let the loop draw before the
        derivation starts. A second of frozen screen with the old stage on it
        reads as a hang. */
     pub fn begin_unlock(&mut self) {
         self.unlocking = true;
-        self.stage = match self.active_yubikey() {
-            Some(_) => "unlocking…  touch your key".into(),
-            None => "unlocking…".into(),
+        self.stage = match (self.quick_ready(), self.active_yubikey()) {
+            (true, Some(_)) => "unlocking…  Touch ID, then your key".into(),
+            (true, None) => "unlocking…  Touch ID".into(),
+            (false, Some(_)) => "unlocking…  touch your key".into(),
+            (false, None) => "unlocking…".into(),
         };
         self.level = Level::Info;
         self.flash_until = None;
@@ -1698,6 +1747,11 @@ impl App {
     }
 
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
+        self.unlock_with(password, key_file, false);
+    }
+
+    // True when the vault refused the password or key file, rather than failing to open.
+    fn unlock_with(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>, from_sealed: bool) -> bool {
         self.unlocking = false;
         /* A path typed in the file box but never confirmed with Enter (Tab
            jumped to the password instead) is still the vault the user means:
@@ -1711,12 +1765,12 @@ impl App {
             // Enter on the password box skips the file box's own check.
             self.warn("another user's ~ cannot be resolved  ·  type the full path");
             password.zeroize();
-            return;
+            return false;
         }
         let Some(path) = self.db_path.clone() else {
             self.warn("no database configured  ·  run `Sennel --help` for --db");
             password.zeroize();
-            return;
+            return false;
         };
         /* Made absolute here, once, so everything downstream agrees on what
            this vault is called: `--db vault.kdbx` is relative to the
@@ -1728,7 +1782,7 @@ impl App {
         if password.is_empty() {
             self.warn("empty password  ·  type one or ^c quits");
             password.zeroize();
-            return;
+            return false;
         }
         /* Borrow, do not copy: a lossy into_owned() would leave an extra
            plaintext master password that nothing zeroizes, and it would
@@ -1738,7 +1792,7 @@ impl App {
         let Ok(pw) = std::str::from_utf8(password) else {
             self.error("password has bytes that are not text · keepass cannot use it");
             password.zeroize();
-            return;
+            return false;
         };
         let yubikey = self.active_yubikey().cloned();
         let result = if self.unlock_new {
@@ -1747,13 +1801,17 @@ impl App {
                 self.unlock_confirm.zeroize();
                 self.caret = 0;
                 password.zeroize();
-                return;
+                return false;
             }
             let mut vault = Vault::new();
             vault.save_as_with(&path, pw, key_file, yubikey.as_ref()).map(|()| vault)
         } else {
             Vault::open_with(&path, pw, key_file, yubikey.as_ref())
         };
+        // Sealed before the wipe, while these bytes are still the password.
+        let sealed = (result.is_ok() && self.touch_id && !from_sealed)
+            .then(|| crate::touchid::seal(password));
+        let refused = matches!(result, Err(VaultError::WrongPassword));
         // The typed bytes have served: the key inside the vault is a copy.
         password.zeroize();
         match result {
@@ -1792,6 +1850,19 @@ impl App {
                     let plural = if n == 1 { "entry" } else { "entries" };
                     self.say(format!("unlocked {n} {plural}"));
                 }
+                match sealed {
+                    Some(Ok(sealed)) => {
+                        self.quick = Some((path.clone(), sealed));
+                        self.quick_here = true;
+                    }
+                    // Off for the session, so a Mac without a sensor warns once, not per unlock.
+                    Some(Err(why)) => {
+                        self.quick = None;
+                        self.touch_id = false;
+                        self.warn(format!("Touch ID off this session  ·  {why}"));
+                    }
+                    None => {}
+                }
                 if let Some(what) = read_only {
                     self.error(format!(
                         "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
@@ -1810,6 +1881,7 @@ impl App {
             }
             Err(e) => self.error(format!("cannot open {}  ·  {e}", path.display())),
         }
+        refused
     }
 
     /// Tab and shift-Tab through the unlock boxes, wrapping. Three boxes, or
@@ -4156,6 +4228,13 @@ impl App {
                 if removed > 0 {
                     let plural = if removed == 1 { "backup" } else { "backups" };
                     said.push_str(&format!("  ·  {removed} {plural} under the old password deleted"));
+                }
+                // What was sealed is the old password now.
+                if let Some((db, _)) = self.quick.take() {
+                    match crate::touchid::seal(rekey.password.as_bytes()) {
+                        Ok(sealed) => self.quick = Some((db, sealed)),
+                        Err(why) => said.push_str(&format!("  ·  Touch ID off until a typed unlock  ·  {why}")),
+                    }
                 }
                 self.say(said);
             }

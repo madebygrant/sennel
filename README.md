@@ -77,6 +77,9 @@ the session at another without a restart. [More](docs/keys.md).
 **A YubiKey, if the vault has one.** `yubikey = "2"` opens KeePassXC vaults keyed to a challenge-response
 slot. Each save asks the key again, so Sennel says when to touch it. [More](docs/security.md).
 
+**Touch ID after a lock, on a Mac.** Set `touch_id = true`, and once you have typed the password, `enter` on
+the lock screen takes a fingerprint instead. It lasts until you quit. [More](docs/security.md).
+
 **SSH keys for your agent.** Off until you set `ssh_agent = true`. Then unlocking a vault gives `ssh-agent`
 the keys that KeePassXC's KeeAgent settings mark "add at database open", each with a lifetime so a crash
 cannot leave one there, and locking takes them back. [More](docs/security.md).

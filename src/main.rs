@@ -9,6 +9,7 @@ mod migration;
 mod pwned;
 mod search;
 mod theme;
+mod touchid;
 mod ui;
 mod vault;
 
@@ -230,6 +231,7 @@ fn main() -> Result<()> {
     app.set_order(cfg.sort);
     app.theme = cfg.theme;
     app.mouse = cfg.mouse;
+    app.touch_id = cfg.touch_id && cfg!(target_os = "macos");
     app.theme_overridden = cfg.theme_overridden;
     /* Said once, on the first frame, and then it is the user's screen: an
        override that measures badly is worth naming, not worth refusing. */
@@ -353,6 +355,14 @@ fn check(cfg: &Config) -> Result<()> {
         cfg.generator.describe()
     );
     say!("mouse     {}", if cfg.mouse { "on" } else { "off" });
+    say!(
+        "touch id  {}",
+        match (cfg.touch_id, cfg!(target_os = "macos")) {
+            (false, _) => "off",
+            (true, true) => "on · enter on an empty password box after a lock",
+            (true, false) => "on · macOS only, so unused here",
+        }
+    );
     say!("clear in  {}s", cfg.clipboard_timeout);
     say!("lock in   {}s (0 = off)", cfg.lock_timeout);
     say!("backups   {} kept in {} (0 = off)", cfg.backups, cfg.backup_dir.display());
@@ -1587,10 +1597,11 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
-/* Enter on the lock screen. The secret buffers live here, not in `App`: the
-   UI holds what it displays, and the secret it passes on is taken, used once,
-   and wiped — never stored beside the state it unlocks. */
+// Enter on the lock screen. The typed secret is taken, used once and wiped here;
+// the only copy `App` keeps is the one `touch_id` seals to the Enclave.
 fn unlock_now(app: &mut App) {
+    // Cleared before any early return, or the frame loop runs this again next frame.
+    app.unlocking = false;
     /* Taken, not borrowed: `try_unlock` consumes and zeroizes on every path,
        and a take leaves `App` holding nothing the moment the key is read. */
     // Replaced, not taken: `mem::take` leaves zero capacity, so the next password
@@ -1615,7 +1626,9 @@ fn unlock_now(app: &mut App) {
             }
         },
     };
-    app.try_unlock(&mut password, key_bytes.as_deref());
+    if !(password.is_empty() && app.quick_unlock(key_bytes.as_deref())) {
+        app.try_unlock(&mut password, key_bytes.as_deref());
+    }
     if let Some(b) = key_bytes.as_mut() {
         b.zeroize();
     }
@@ -1896,6 +1909,143 @@ mod tests {
         assert_eq!(app.view, crate::app::View::Unlock, "unlocked without a file");
         assert!(app.stage.contains("--db"), "{}", app.stage);
         assert!(!app.unlocking, "the busy state outlived the attempt");
+    }
+
+    // Enter on the lock screen as the frame loop runs it, which clears the flash queue.
+    fn enter(app: &mut App) {
+        app.begin_unlock();
+        unlock_now(app);
+    }
+
+    // Unlocked once by typing, then locked, the way every quick unlock starts.
+    fn typed_then_locked(touch_id: bool) -> (App, crate::app::tests::TempPath) {
+        let (mut app, tmp) = crate::app::tests::locked_app_with_db("correct horse");
+        app.touch_id = touch_id;
+        app.unlock_password = "correct horse".into();
+        enter(&mut app);
+        assert!(app.vault.is_some(), "the typed unlock failed: {}", app.stage);
+        app.expire_now();
+        app.lock_now();
+        (app, tmp)
+    }
+
+    #[test]
+    fn touch_id_opens_the_vault_after_a_lock() {
+        let (mut app, _tmp) = typed_then_locked(true);
+        assert_eq!(app.stage, "locked  ·  enter for Touch ID");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.stage, "unlocking…  Touch ID");
+        unlock_now(&mut app);
+        assert!(app.vault.is_some(), "the sealed password did not open it: {}", app.stage);
+        assert_eq!(app.view, crate::app::View::Browser);
+    }
+
+    #[test]
+    fn without_touch_id_an_empty_box_is_still_refused() {
+        let (mut app, _tmp) = typed_then_locked(false);
+        assert_eq!(app.stage, "locked  ·  password to return");
+        assert!(!app.quick_ready());
+        enter(&mut app);
+        assert!(app.vault.is_none());
+        assert!(app.stage.contains("empty password"), "{}", app.stage);
+    }
+
+    // A dismissed prompt is not a wrong password: the next Enter asks again.
+    #[test]
+    fn a_cancelled_prompt_keeps_touch_id_for_the_next_try() {
+        let (mut app, _tmp) = typed_then_locked(true);
+        refuse(Some(crate::touchid::Refused::Again("cancelled".into())));
+        enter(&mut app);
+        refuse(None);
+        assert!(app.vault.is_none());
+        assert!(!app.unlocking, "the frame loop would open the prompt again next frame");
+        assert!(app.stage.contains("cancelled"), "{}", app.stage);
+        assert!(app.quick_ready(), "a cancel forgot the sealed password");
+        enter(&mut app);
+        assert!(app.vault.is_some(), "{}", app.stage);
+    }
+
+    fn refuse(with: Option<crate::touchid::Refused>) {
+        crate::touchid::REFUSE.with_borrow_mut(|r| *r = with);
+    }
+
+    // A key voided by a change of enrolled fingers would otherwise be offered forever.
+    #[test]
+    fn a_void_key_stops_the_offer() {
+        let (mut app, _tmp) = typed_then_locked(true);
+        refuse(Some(crate::touchid::Refused::Void("item not found".into())));
+        enter(&mut app);
+        refuse(None);
+        assert!(app.vault.is_none());
+        assert!(!app.quick_ready());
+        assert!(app.stage.contains("type the password"), "{}", app.stage);
+    }
+
+    // Only a refused password drops it: a vault that cannot be read right now still opens later.
+    #[test]
+    fn a_vault_that_cannot_be_read_keeps_touch_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut app, tmp) = typed_then_locked(true);
+        std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o000)).unwrap();
+        enter(&mut app);
+        std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(app.vault.is_none(), "opened an unreadable file");
+        assert!(app.quick_ready(), "a read error dropped the sealed password");
+        enter(&mut app);
+        assert!(app.vault.is_some(), "{}", app.stage);
+    }
+
+    // ^o and the file box can name the vault through a symlinked folder.
+    #[test]
+    fn touch_id_follows_the_vault_under_another_spelling() {
+        let (mut app, tmp) = typed_then_locked(true);
+        let link = std::env::temp_dir().join(format!("sennel-test-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(tmp.0.parent().unwrap(), &link).unwrap();
+        app.set_db_path(Some(link.join(tmp.0.file_name().unwrap())));
+        let ready = app.quick_ready();
+        std::fs::remove_file(&link).unwrap();
+        assert!(ready, "the same vault through a symlink lost Touch ID");
+    }
+
+    // Re-keyed from another app: the sealed password is wrong for good, so stop offering it.
+    #[test]
+    fn a_password_changed_elsewhere_stops_the_offer() {
+        let (mut app, tmp) = typed_then_locked(true);
+        crate::vault::Vault::new().save_as(&tmp.0, "changed elsewhere", None).unwrap();
+        enter(&mut app);
+        assert!(app.vault.is_none());
+        assert!(!app.quick_ready(), "Enter would try the stale password forever");
+    }
+
+    #[test]
+    fn touch_id_follows_a_master_password_change() {
+        let (mut app, tmp) = typed_then_locked(true);
+        enter(&mut app);
+        app.open_rekey();
+        for c in "battery staple".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
+        for c in "battery staple".chars() {
+            app.rekey_insert(c);
+        }
+        app.submit_rekey();
+        assert!(crate::vault::Vault::open(&tmp.0, "battery staple", None).is_ok());
+        app.lock_now();
+        enter(&mut app);
+        assert!(app.vault.is_some(), "sealed the old password: {}", app.stage);
+    }
+
+    // Sealed for one vault, never offered for another typed into the file box.
+    #[test]
+    fn touch_id_belongs_to_the_vault_it_opened() {
+        let (mut app, _tmp) = typed_then_locked(true);
+        let (_, other) = crate::app::tests::locked_app_with_db("other");
+        app.unlock_file = other.0.display().to_string();
+        enter(&mut app);
+        assert!(app.vault.is_none());
+        assert!(app.stage.contains("empty password"), "{}", app.stage);
     }
 
     fn open_browser() -> App {

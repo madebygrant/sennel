@@ -24,6 +24,9 @@ theme = "warm"                 # warm (default), light, cool, neon · rewritten 
 mouse = true                   # wheel scrolls, click selects, menus in the header
                                # and on right-click; false gives the terminal its
                                # own text selection back
+touch_id = false               # macOS: after a lock, enter on an empty password box
+                               # takes a fingerprint · lasts until you quit
+                               # · see docs/security.md
 
 [generator]                    # the default for ^s in a form, P on its own,
                                # and sennel gen

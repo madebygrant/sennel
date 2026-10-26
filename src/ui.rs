@@ -1157,6 +1157,8 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         "enter apply path"
     } else if app.unlock_new {
         "enter create"
+    } else if app.quick_ready() {
+        "enter Touch ID"
     } else {
         "enter unlock"
     };

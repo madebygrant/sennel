@@ -90,10 +90,24 @@ twenty (P-521 more often), and says so instead of calling it a wrong passphrase.
 whether the agent answers.
 
 **Idle auto-lock.** After the idle timeout, 300 seconds by default and `0` to disable, the vault
-locks and the in-memory secrets are zeroized. `^l` does the same on demand. Time the machine spent
+locks and the in-memory secrets are zeroized, apart from the sealed password `touch_id` keeps. `^l` does the same on demand. Time the machine spent
 suspended counts: neither platform's monotonic clock advances across a suspend, so the wall clock is
 read alongside it and the longer answer wins. A vault unlocked before the lid closed is locked when
 it opens. Keeping both clocks is also what stops one set backwards from holding a vault open.
+
+**Touch ID after a lock (macOS, opt-in).** With `touch_id = true`, a typed unlock also seals the
+master password to a new Secure Enclave key, and `enter` on an empty password box after a lock asks
+for a fingerprint instead. The key is made inside the Enclave and cannot leave it. Using it takes a
+fingerprint, and adding or removing any finger voids it, so after that the password is typed again.
+It is never written to a keychain, so it dies with the process: a quit, a crash or a reboot means
+typing the password again. What survives a lock is the password encrypted to that key, so a dump of
+the process does not give the password, but a person at the unlocked machine with your finger does.
+The system's own copy of the password as it comes out of the Enclave is freed, not wiped, which is
+the one exception to the rule below. A key file is read again and a YubiKey is touched again, as for
+a typed unlock. A dismissed prompt asks again on the next `enter`. A password the vault refuses,
+because it changed somewhere else, is dropped, and `^p` seals the new one. On a Mac with no sensor
+it says so once and stays off for the session. Off by default, because it keeps something on the far
+side of a lock that the lock used to wipe.
 
 **Zeroized in memory.** The typed password, confirmation and one-time-seed boxes are overwritten, not
 merely emptied, whenever they are cleared, locked or thrown away. So are the decrypted values the
