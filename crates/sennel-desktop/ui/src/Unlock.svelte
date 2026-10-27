@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { call } from "./api.js";
+  import { call, secretCopy } from "./api.js";
 
   let { status, say, refresh } = $props();
 
@@ -71,6 +71,8 @@
         bind:value={password}
         type={reveal ? "text" : "password"}
         autocomplete="off"
+        oncopy={secretCopy("password", say)}
+        oncut={secretCopy("password", say)}
         placeholder={status.touchId ? "enter for Touch ID" : ""}
       />
     </label>
@@ -78,7 +80,13 @@
     {#if status.creates}
       <label>
         <span>Again</span>
-        <input bind:value={confirm} type={reveal ? "text" : "password"} autocomplete="off" />
+        <input
+          bind:value={confirm}
+          type={reveal ? "text" : "password"}
+          autocomplete="off"
+          oncopy={secretCopy("password", say)}
+          oncut={secretCopy("password", say)}
+        />
       </label>
     {/if}
 

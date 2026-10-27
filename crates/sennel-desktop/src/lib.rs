@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use desk::{AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Status, VersionRow};
 use tauri::{AppHandle, Emitter, Manager, State};
+use zeroize::Zeroizing;
 
 type Shared<'a> = State<'a, Arc<Desk>>;
 
@@ -75,7 +76,7 @@ async fn entry(desk: Shared<'_>, id: String) -> Result<EntryView, String> {
 }
 
 #[tauri::command]
-async fn reveal(desk: Shared<'_>, id: String) -> Result<String, String> {
+async fn reveal(desk: Shared<'_>, id: String) -> Result<Zeroizing<String>, String> {
     off_main(&desk, move |d| d.reveal(&id)).await?
 }
 
@@ -95,7 +96,7 @@ async fn copy_text(desk: Shared<'_>, label: String, text: String) -> Result<Note
 }
 
 #[tauri::command]
-async fn generate(desk: Shared<'_>) -> Result<String, String> {
+async fn generate(desk: Shared<'_>) -> Result<Zeroizing<String>, String> {
     off_main(&desk, Desk::generate).await?
 }
 

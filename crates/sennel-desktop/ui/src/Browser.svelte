@@ -123,7 +123,7 @@
     } else if (mod && event.key === "n") {
       event.preventDefault();
       form = { group };
-    } else if (mod && event.key === "c" && selected) {
+    } else if (mod && event.key === "c" && selected && !window.getSelection()?.toString()) {
       event.preventDefault();
       copy("password");
     } else if (mod && event.key === "b" && selected) {

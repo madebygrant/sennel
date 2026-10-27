@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { call } from "./api.js";
+  import { call, secretCopy } from "./api.js";
 
   let { sheet, say, reload, close, open } = $props();
 
@@ -102,7 +102,14 @@
       {#if adding}
         <form class="add" onsubmit={submitAdd}>
           <input bind:value={adding.name} placeholder="Name" />
-          <input class="mono" bind:value={adding.from} placeholder={adding.file ? "Path to the file" : "Value (stored protected)"} spellcheck="false" />
+          <input
+            class="mono"
+            bind:value={adding.from}
+            placeholder={adding.file ? "Path to the file" : "Value (stored protected)"}
+            spellcheck="false"
+            oncopy={adding.file ? undefined : secretCopy(adding.name || "the value", say)}
+            oncut={adding.file ? undefined : secretCopy(adding.name || "the value", say)}
+          />
           <button class="primary" type="submit">Add</button>
         </form>
       {:else}

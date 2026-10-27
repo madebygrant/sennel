@@ -510,12 +510,13 @@ impl Desk {
     }
 
     /// The one path that hands a password to the webview: a reveal the user asked for.
-    pub fn reveal(&self, id: &str) -> Result<String, String> {
+    // Wiped here once Tauri has serialized it; the IPC buffer that carried it is not.
+    pub fn reveal(&self, id: &str) -> Result<Zeroizing<String>, String> {
         let id = entry_id(id)?;
         let s = self.session();
         let vault = s.vault().ok_or("locked")?;
         let e = vault.get_entry(&id).ok_or("that entry is gone")?;
-        Ok(e.password().to_string())
+        Ok(Zeroizing::new(e.password().to_string()))
     }
 
     /// One of the fixed fields: password, username, url or otp.
@@ -588,8 +589,8 @@ impl Desk {
         }
     }
 
-    pub fn generate(&self) -> Result<String, String> {
-        self.settings.generator.make()
+    pub fn generate(&self) -> Result<Zeroizing<String>, String> {
+        self.settings.generator.make().map(Zeroizing::new)
     }
 
     // Every change lands on disk before the reply, the autosave the terminal app makes.

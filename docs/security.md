@@ -191,3 +191,44 @@ second opinion.
 
 **Search and `--list` stay clean.** The fuzzy index covers titles, usernames, urls and group paths,
 never notes. Printed inventories carry titles only.
+
+## The desktop app
+
+Everything above holds for [the desktop app](desktop.md) too, because the vault, saving, backups,
+the clipboard and Touch ID are the same Rust code. The window adds one more place a secret can be:
+the webview, which runs JavaScript.
+
+**A secret in the webview is not wiped.** JavaScript strings cannot be overwritten, only dropped,
+so a secret that reaches the page stays in the webview's memory until its garbage collector frees
+it, possibly long after. These put one there: the password typed on the unlock screen, a password
+revealed with Show, the password and one-time-code seed typed or generated in the entry form, the
+generator's result, and the value of a custom field added on the Fields screen. The page clears its
+boxes after use, which is as far as a webview goes. On the way across, each one also passes through
+Tauri's IPC as JSON text, and those buffers are freed, not wiped. Rust wipes the copies it holds
+itself: a revealed or generated password once it is sent, and a typed one once it is used. So the
+main process can briefly hold an unwiped copy too, and a dump of the webview process could hold
+any of them for longer.
+
+**Copying stays in Rust.** Copy reads the value inside the Rust process and hands it to the same
+board as the terminal app, with the same auto-clear. The value never reaches the page. A password
+revealed in the entry pane cannot be selected. In a box that holds a secret, on the unlock screen,
+in the entry form or in a new custom field, ⌘C and ⌘X send the selection to Rust instead of the
+system's own copy, so it clears like any other copy. The generator's Copy does the same.
+
+**What the page is given.** Lists carry titles, usernames and urls. The entry pane gets everything
+else except the password. Protected custom fields are left out, and the copy button reads them in
+Rust. A stored one-time-code seed is never sent: Copy puts the current code on the clipboard.
+The audit names a finding without the password behind it, and history shows titles, usernames and
+dates.
+
+**No server, and a locked-down page.** The page is bundled into the binary and talks to Rust over
+Tauri's in-process IPC, so there is no port for anything on the machine or the web to reach. The
+content security policy allows only the bundled files and that IPC. The page may call Sennel's own
+commands, each granted by name, and listen for events. Rust emits three: `locked`, `prompt` (touch
+your key) and `quit-asked`. Tauri's listen permission is not limited by event name. There are no file, shell or network
+plugins: a key file or an attachment is read by Rust from a typed path. Devtools exist only in debug
+builds.
+
+**The idle lock does not trust the page.** It runs on a Rust thread, so a frozen or hidden window
+cannot hold the vault open. Only keys and clicks in the window count as activity. Switching to it or
+away does not, so a window left in the background locks on time.

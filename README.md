@@ -135,6 +135,7 @@ working rather than a vault nobody can open.
 - [Older KDBX files](docs/kdbx3.md) and `sennel convert`
 - [Keys and the unlock screen](docs/keys.md)
 - [Security](docs/security.md), the interesting one: what is wiped, when, and why
+- [The desktop app](docs/desktop.md), the same vaults in a native window
 - [Themes](docs/themes.md) and how the colours are measured
 - [Configuration](docs/configuration.md)
 - [CLI reference for AI agents](docs/agents.md), also indexed in [`llms.txt`](llms.txt)
@@ -147,12 +148,15 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-Rust 1.85+, 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
+Rust 1.88+, 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
 
 ```sh
 sennel completions zsh > ~/.zfunc/_sennel    # bash, zsh, fish, elvish
 sennel man > /usr/local/share/man/man1/sennel.1
 ```
+
+The repository also holds `sennel-desktop`, a native window over the same core. Building it needs
+Node.js as well: see [docs/desktop.md](docs/desktop.md).
 
 ## License
 

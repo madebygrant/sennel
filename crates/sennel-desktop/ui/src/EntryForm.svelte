@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from "svelte";
-  import { call } from "./api.js";
+  import { call, secretCopy } from "./api.js";
 
   // `form.id` edits that entry; otherwise a new one goes in `form.group`.
   let { form, say, close } = $props();
@@ -93,6 +93,8 @@
         type={reveal ? "text" : "password"}
         bind:value={password}
         oninput={() => (passwordTouched = true)}
+        oncopy={secretCopy("password", say)}
+        oncut={secretCopy("password", say)}
         placeholder={form.id && !passwordTouched ? "unchanged" : ""}
         autocomplete="off"
       />
@@ -109,6 +111,8 @@
         type="password"
         bind:value={otp}
         oninput={() => (otpTouched = true)}
+        oncopy={secretCopy("the seed", say)}
+        oncut={secretCopy("the seed", say)}
         placeholder={form.detail?.hasOtp ? "unchanged · clear it to remove" : "base32 or otpauth:// URL"}
         autocomplete="off"
       />

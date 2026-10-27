@@ -40,7 +40,7 @@ fn the_tree_and_rows_carry_no_passwords() {
     assert!(view.has_password && view.group == "Banks");
     let shown = format!("{rows:?}{view:?}");
     assert!(!shown.contains("hunter2"), "a password reached a row or the detail: {shown}");
-    assert_eq!(desk.reveal(&rows[0].id).unwrap(), "hunter2");
+    assert_eq!(desk.reveal(&rows[0].id).unwrap().as_str(), "hunter2");
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn an_entry_is_added_edited_and_undone() {
     assert_eq!(desk.entry(&id).unwrap().tags, "a, b");
     // An untouched password box keeps what is stored.
     desk.save_entry(Some(&id), None, &form("savings 2", None)).unwrap();
-    assert_eq!(desk.reveal(&id).unwrap(), "pw");
+    assert_eq!(desk.reveal(&id).unwrap().as_str(), "pw");
     let refused = desk.save_entry(None, Some(&banks), &form(" ", None)).unwrap();
     assert!(!refused.ok && refused.notes[0].level == Level::Warn);
     desk.undo();

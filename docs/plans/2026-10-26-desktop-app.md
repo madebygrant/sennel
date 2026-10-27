@@ -69,7 +69,7 @@ The blocker is `src/app.rs` (about 8.1k lines). Every action follows the same pa
   - Enable only the Tauri capabilities the commands need. No fs or shell plugins.
 - **Exit criterion:** the app can unlock the fixture vault, copy a password that auto-clears, add and edit an entry, auto-lock and Touch ID unlock, and KeePassXC still opens the file afterwards.
 
-## Wave 4: Unsigned builds and docs
+## Wave 4: Unsigned builds and docs [done 2026-10-27]
 - `cargo tauri build` produces a `.app` and `.dmg` on macOS, an AppImage or `.deb` on Linux, and an MSI on Windows, all unsigned. A build runs on the Mac that made it. A copy on another Mac must be allowed once in System Settings › Privacy & Security, and Windows shows a SmartScreen warning.
 - Add a `docs/desktop.md`. Add a section to `docs/security.md` covering two things:
   - JavaScript strings cannot be zeroized, so a revealed or edited password lives in the webview until it is garbage-collected.
