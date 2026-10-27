@@ -44,6 +44,16 @@ sennel gen --kind passphrase --stdout   # six words off the EFF list
 Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
 and `^v` keeps them both.
 
+Rather have a window? The desktop app opens the same vaults with the same core. From a clone, with
+Rust and Node.js installed:
+
+```sh
+scripts/install-desktop.sh
+```
+
+It builds the app and installs it: `Sennel.app` in `/Applications` on a Mac, or the AppImage as
+`~/.local/bin/sennel-desktop` with a menu entry on Linux. [More](docs/desktop.md).
+
 ## The keys you need on day one
 
 | Key         | Action                                          |
