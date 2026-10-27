@@ -41,8 +41,8 @@ async fn choose(desk: Shared<'_>, path: String) -> Result<Status, String> {
     off_main(&desk, move |d| d.choose(&path)).await?
 }
 
-// Keys and clicks only. Focus and blur never call this, so a window left in the background ages
-// toward the lock like an idle one.
+// Keys, clicks and pointer moves over the window. Focus and blur never call this, so a window
+// left in the background ages toward the lock like an idle one.
 #[tauri::command]
 async fn touch(desk: Shared<'_>) -> Result<(), String> {
     off_main(&desk, Desk::touch).await
@@ -108,6 +108,11 @@ async fn copy_field(desk: Shared<'_>, id: String, name: String) -> Result<Note, 
 #[tauri::command]
 async fn copy_text(desk: Shared<'_>, label: String, text: String) -> Result<Note, String> {
     off_main(&desk, move |d| d.copy_text(&label, text)).await
+}
+
+#[tauri::command]
+async fn clear_clipboard(desk: Shared<'_>) -> Result<(), String> {
+    off_main(&desk, Desk::clear_clipboard).await
 }
 
 #[tauri::command]
@@ -307,6 +312,7 @@ pub fn run(context: tauri::Context) {
             copy,
             copy_field,
             copy_text,
+            clear_clipboard,
             generate,
             save_entry,
             delete_entry,

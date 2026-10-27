@@ -9,12 +9,16 @@
   // `value` is null while hidden, and `length` dots stand in, so revealing swaps each in place.
   let { value, length = 12, textId } = $props();
 
-  const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ0123456789ABCDEF<>*=+";
+  // Each cell rolls through its own kind of character, so the row's makeup shows before it settles.
+  const POOLS = { "": "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ", digit: "0123456789", symbol: "!#$%&*+-=?@^_~" };
+  const STEP = 30;
+  const FLASH = 140;
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const chars = $derived(value === null ? null : [...value]);
 
-  // While decoding, each cell shows a passing glyph until its turn comes.
+  // While settling, each cell shows a passing glyph until its turn, then flashes once as it lands.
   let glyphs = $state(null);
+  let landing = $state(null);
   let row;
 
   // Cells narrow so most passwords keep to one line; CSSOM, since the CSP refuses style attributes.
@@ -31,12 +35,21 @@
     const start = performance.now();
     let frame;
     const step = (now) => {
-      const next = Array.from({ length: n }, (_, i) => (now - start < 180 + i * 45 ? GLYPHS[(Math.random() * GLYPHS.length) | 0] : null));
-      glyphs = next.some(Boolean) ? next : null;
-      if (glyphs) frame = requestAnimationFrame(step);
+      const t = now - start;
+      glyphs = chars.map((c, i) => {
+        if (t >= 180 + i * STEP) return null;
+        const pool = POOLS[kind(c)];
+        return pool[(Math.random() * pool.length) | 0];
+      });
+      landing = chars.map((_, i) => t >= 180 + i * STEP && t < 180 + i * STEP + FLASH);
+      if (t < 180 + n * STEP + FLASH) frame = requestAnimationFrame(step);
+      else glyphs = landing = null;
     };
     frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      cancelAnimationFrame(frame);
+      landing = null;
+    };
   });
 </script>
 
@@ -45,7 +58,7 @@
   {#each chars ?? Array(length).fill("•") as c, i}
     {#if i && i % 5 === 0}<span class="split"></span>{/if}
     <span class="cell">
-      <b class={chars ? kind(c) : ""} class:scrambled={glyphs?.[i]}>{glyphs?.[i] ?? c}</b>
+      <b class={chars ? kind(c) : ""} class:scrambled={glyphs?.[i]} class:landing={landing?.[i]}>{glyphs?.[i] ?? c}</b>
       <small>{chars ? i + 1 : ""}</small>
     </span>
   {/each}
@@ -104,5 +117,21 @@
 
   .open b.scrambled {
     color: var(--dim);
+  }
+
+  b {
+    transition: background 260ms ease-out, color 260ms ease-out;
+  }
+
+  .open b.landing {
+    background: var(--accent);
+    color: var(--accent-ink);
+    transition: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    b {
+      transition: none;
+    }
   }
 </style>

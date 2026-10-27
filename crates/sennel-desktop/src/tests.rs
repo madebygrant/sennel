@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use sennel_core::vault::Vault;
 
-use crate::desk::{Desk, EntryForm, Level, open_with};
+use crate::desk::{Desk, EntryForm, Level, OtpShape, open_with};
 use crate::settings::Settings;
 
 fn vault() -> Vault {
@@ -116,6 +116,32 @@ fn copying_never_returns_the_secret() {
         note.text
     );
     assert_eq!(desk.copy(&id, "otp").level, Level::Warn);
+}
+
+#[test]
+fn an_entry_carries_its_code_timing_and_never_the_code() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let mut with_otp = form("totp", Some("pw"));
+    with_otp.otp = Some("JBSWY3DPEHPK3PXP".into());
+    let id = desk
+        .save_entry(None, Some(&banks), &with_otp)
+        .unwrap()
+        .select
+        .unwrap();
+    let view = desk.entry(&id).unwrap();
+    assert!(view.has_otp);
+    assert_eq!(
+        view.otp,
+        Some(OtpShape {
+            period: 30,
+            digits: 6
+        })
+    );
+    assert!(
+        !format!("{view:?}").contains("JBSWY3DP"),
+        "the seed reached the detail"
+    );
 }
 
 #[test]

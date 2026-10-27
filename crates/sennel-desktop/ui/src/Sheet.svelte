@@ -5,7 +5,7 @@
   import { copyFeedback } from "./copied.svelte.js";
   import Modal from "./Modal.svelte";
 
-  let { sheet, say, reload, close, open } = $props();
+  let { sheet, say, reload, refresh, close, open } = $props();
 
   let rows = $state(null);
   let adding = $state(null);
@@ -48,6 +48,7 @@
     try {
       const note = await call(cmd, args);
       say([note]);
+      await refresh();
       if (note.level !== "error") fb.mark(key);
     } catch (why) {
       say([{ level: "error", text: String(why) }]);

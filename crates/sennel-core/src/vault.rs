@@ -196,6 +196,13 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
     Some((code.code, code.valid_for.as_secs()))
 }
 
+/// Seconds each code lasts, and its digits. Codes roll over on multiples of the period since the
+/// Unix epoch, so a countdown to the next one needs only the clock, never the code.
+pub fn totp_shape(entry: &EntryRef<'_>) -> Option<(u64, u32)> {
+    let totp: keepass::db::TOTP = with_digits(entry.get_raw_otp_value()?).parse().ok()?;
+    Some((totp.period, totp.digits))
+}
+
 /* KDBX carries an expiry on every entry and Sennel read neither half of it,
 so an entry KeePassXC shows as expired looked perfectly healthy here. Both
 halves matter: `expires` is the switch and `expiry` is the date, and a date

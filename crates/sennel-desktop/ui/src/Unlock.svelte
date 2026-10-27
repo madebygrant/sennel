@@ -2,6 +2,8 @@
   import { onMount, untrack } from "svelte";
   import { call, secretCopy } from "./api.js";
   import HexField from "./HexField.svelte";
+  import Mark from "./Mark.svelte";
+  import SecretInput from "./SecretInput.svelte";
 
   let { status, say, refresh } = $props();
 
@@ -14,7 +16,7 @@
   let busy = $state(false);
   // Shown under the password box, where the eye already is, instead of in the footer.
   let error = $state(null);
-  let passwordBox;
+  let passwordBox = $state();
 
   onMount(() => passwordBox?.focus());
 
@@ -67,20 +69,7 @@
   <HexField />
   <form onsubmit={submit}>
     <h1>
-      <!-- The app icon's mark without its tile, so it sits on the page in either theme. -->
-      <svg class="mark" viewBox="230 192 564 640" aria-hidden="true">
-        <defs>
-          <radialGradient id="mark-glow" cx=".5" cy=".58" r=".5">
-            <stop offset="0" stop-opacity=".45" />
-            <stop offset="1" stop-opacity="0" />
-          </radialGradient>
-        </defs>
-        <polygon points="512,232 754.5,372 754.5,652 512,792 269.5,652 269.5,372" class="body" />
-        <ellipse cx="512" cy="560" rx="200" ry="230" fill="url(#mark-glow)" />
-        <polygon points="512,232 754.5,372 754.5,652 512,792 269.5,652 269.5,372" class="edge" />
-        <circle cx="512" cy="468" r="62" class="hole" />
-        <path d="M482 500 H542 L566 652 H458 Z" class="hole" />
-      </svg>
+      <Mark />
       Sennel
     </h1>
 
@@ -94,17 +83,17 @@
         {status.creates ? "New master password" : "Master password"}
         <button type="button" class="small" onclick={() => (reveal = !reveal)}>{reveal ? "Hide" : "Show"}</button>
       </span>
-      <input
-        bind:this={passwordBox}
+      <SecretInput
+        bind:box={passwordBox}
         bind:value={password}
-        type={reveal ? "text" : "password"}
+        {reveal}
+        hint={status.touchId ? "enter for Touch ID" : ""}
         autocomplete="off"
         oncopy={secretCopy("password", say)}
         oncut={secretCopy("password", say)}
         oninput={() => (error = null)}
         aria-invalid={error ? "true" : undefined}
         aria-describedby={error ? "unlock-error" : undefined}
-        placeholder={status.touchId ? "enter for Touch ID" : ""}
       />
     </label>
 
@@ -115,9 +104,9 @@
     {#if status.creates}
       <label>
         <span>Again</span>
-        <input
+        <SecretInput
           bind:value={confirm}
-          type={reveal ? "text" : "password"}
+          {reveal}
           autocomplete="off"
           oncopy={secretCopy("password", say)}
           oncut={secretCopy("password", say)}
@@ -179,31 +168,6 @@
     font-family: var(--action);
     font-weight: 600;
     color: var(--accent-text);
-  }
-
-  .mark {
-    width: 40px;
-    height: 46px;
-    flex: none;
-  }
-
-  .mark stop {
-    stop-color: var(--accent);
-  }
-
-  .mark .body {
-    fill: var(--panel);
-  }
-
-  .mark .edge {
-    fill: none;
-    stroke: var(--accent-text);
-    stroke-width: 34;
-    stroke-linejoin: round;
-  }
-
-  .mark .hole {
-    fill: var(--accent-text);
   }
 
   h2 {

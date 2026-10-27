@@ -70,6 +70,10 @@ pub struct Status {
     pub dirty: bool,
     pub conflict: bool,
     pub clears_in: Option<u64>,
+    /// What the clipboard holds while it counts down, as the copy named it.
+    pub clipboard: Option<String>,
+    pub locks_in: Option<u64>,
+    pub lock_after: Option<u64>,
     pub undo: Option<String>,
 }
 
@@ -105,8 +109,17 @@ pub struct EntryView {
     /// In chars, so the hidden password draws as many dots as the revealed one has cells.
     pub password_length: usize,
     pub has_otp: bool,
+    /// None when the stored code does not parse, while `has_otp` still says there is one.
+    pub otp: Option<OtpShape>,
     pub extras: usize,
     pub recycled: bool,
+}
+
+// The timing of an entry's codes and never a code, so the window can count down without one.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct OtpShape {
+    pub period: u64,
+    pub digits: u32,
 }
 
 #[derive(Serialize, Debug)]
@@ -199,6 +212,7 @@ pub struct Desk {
     recent: Mutex<Vec<PathBuf>>,
     /// None in tests, which must not touch the system clipboard.
     board: Option<Board>,
+    held: Mutex<Option<String>>,
     settings: Settings,
     rows: Mutex<(Option<RowsKey>, Vec<EntryId>, Searcher)>,
     // Says "touch your key" before a write that blocks on one, since nothing else would.
@@ -242,6 +256,7 @@ impl Desk {
             db: Mutex::new(db),
             recent: Mutex::new(settings.recent.clone()),
             board,
+            held: Mutex::new(None),
             settings,
             rows: Mutex::new((None, Vec::new(), Searcher::new())),
             prompt: None,
@@ -295,6 +310,7 @@ impl Desk {
             Undo::AddEntry { title, .. } => format!("remove {title}"),
             Undo::Rename { before, .. } => format!("name {before}"),
         });
+        let clears_in = self.board.as_ref().and_then(Board::clears_in);
         Status {
             open: s.is_open(),
             vault_name: db.as_deref().filter(|_| s.is_open()).map(name_of),
@@ -311,7 +327,13 @@ impl Desk {
             yubikey: self.settings.yubikey.as_ref().map(ToString::to_string),
             dirty: s.is_dirty(),
             conflict: s.in_conflict(),
-            clears_in: self.board.as_ref().and_then(Board::clears_in),
+            clears_in,
+            clipboard: clears_in
+                .and_then(|_| self.held.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+            locks_in: s
+                .locks_in(Instant::now())
+                .map(|left| left.as_secs() + u64::from(left.subsec_millis() > 0)),
+            lock_after: (self.settings.lock_timeout > 0).then_some(self.settings.lock_timeout),
             undo,
         }
     }
@@ -606,6 +628,8 @@ impl Desk {
             has_password: !e.password().is_empty(),
             password_length: e.password().chars().count(),
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
+            otp: sennel_core::vault::totp_shape(&e)
+                .map(|(period, digits)| OtpShape { period, digits }),
             extras: sennel_core::vault::extra_rows(&e).len(),
             recycled: vault.is_recycled(&id),
         })
@@ -682,7 +706,11 @@ impl Desk {
         let Some(board) = &self.board else {
             return info(format!("copied {label}"));
         };
-        match board.copy(text) {
+        let copied = board.copy(text);
+        if copied.is_ok() {
+            *self.held.lock().unwrap_or_else(|e| e.into_inner()) = Some(label.to_string());
+        }
+        match copied {
             Ok(()) => match board.timeout_secs() {
                 Some(secs) => info(format!("copied {label} · clears in {secs}s")),
                 None => info(format!("copied {label}")),
@@ -1065,6 +1093,12 @@ impl Desk {
             Ok(None) => info("locked"),
             Err(why) => warn(format!("ssh agent: {why}")),
         })
+    }
+
+    pub fn clear_clipboard(&self) {
+        if let Some(board) = &self.board {
+            board.clear_now();
+        }
     }
 
     /// On the way out: wipe what is still ours on the clipboard, and lock.

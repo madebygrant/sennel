@@ -36,6 +36,7 @@
   import EntryForm from "./EntryForm.svelte";
   import HexField from "./HexField.svelte";
   import Modal from "./Modal.svelte";
+  import OtpCells from "./OtpCells.svelte";
   import Sheet from "./Sheet.svelte";
 
   let { status, say, refresh, clears } = $props();
@@ -75,7 +76,20 @@
   const current = $derived(groups.find((g) => g.id === group));
   const chars = $derived(revealed === null ? null : [...revealed]);
   const attention = $derived(Object.keys(issues).length);
-  const segments = $derived(clears.total ? Math.ceil((clears.left / clears.total) * 10) : 0);
+  const STRIP = 12;
+  const lit = $derived(clears.total ? Math.ceil((clears.left / clears.total) * STRIP) : 0);
+  const NAMES = { password: "Password", username: "Username", url: "Website", otp: "One-time code" };
+  const held = $derived(status.clipboard && (NAMES[status.clipboard] ?? status.clipboard.replace(/^the /, "").replace(/^./, (c) => c.toUpperCase())));
+  // The entry and field this window last copied, so that field drains in step with the strip.
+  let copiedFrom = $state(null);
+  const holding = (field) => clears.left > 0 && copiedFrom?.id === detail?.id && copiedFrom?.field === field && copiedFrom?.copy === clears.copies;
+
+  // CSSOM, since the CSP refuses style attributes.
+  function meter(node, fraction) {
+    const set = (f) => node.style.setProperty("--held", f);
+    set(fraction);
+    return { update: set };
+  }
 
   async function loadTree() {
     groups = await call("tree");
@@ -123,7 +137,10 @@
     const note = await call("copy", { id: selected, field });
     say([note]);
     await refresh();
-    if (note.level !== "error") fb.mark(field);
+    if (note.level !== "error") {
+      copiedFrom = { id: selected, field, copy: clears.copies };
+      fb.mark(field);
+    }
   }
 
   async function toggleReveal() {
@@ -238,9 +255,10 @@
     </label>
     <span class="gap"></span>
     {#if clears.left}
-      <span class="clip" title="The clipboard clears itself">
-        <span class="segs">{#each { length: 10 } as _, i}<i class:off={i >= segments}></i>{/each}</span>
-        Clears in {clears.left}s
+      <span class="clip">
+        <span class="strip" aria-hidden="true">{#each { length: STRIP } as _, i}<i class:off={i >= lit}></i>{/each}</span>
+        <span>{held ?? "Copied text"} on the clipboard, clears in {clears.left}s</span>
+        <button class="clear" onclick={async () => { await call("clear_clipboard"); await refresh(); }}>Clear now</button>
       </span>
     {:else if cleared}
       <span class="clip cleared"><Check />Clipboard cleared</span>
@@ -348,7 +366,7 @@
       {/if}
 
       {#if detail.hasPassword}
-        <div class="password" use:fb.spot={"password"}>
+        <div class="password" class:held={holding("password")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"password"}>
           <!-- Out of the tab order: the Copy button and ⌘C already cover the keyboard. -->
           <button class="grab" tabindex="-1" onclick={() => copy("password")} title="Click to copy" aria-label="Copy the password" aria-describedby="password-text">
             <Cells value={revealed} length={detail.passwordLength} textId="password-text" />
@@ -373,20 +391,20 @@
 
       <div class="fields">
         {#if detail.username}
-          <button class="field" class:done={fb.copied === "username"} use:fb.spot={"username"} onclick={() => copy("username")}>
+          <button class="field" class:done={fb.copied === "username"} class:held={holding("username")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"username"} onclick={() => copy("username")}>
             <span class="label"><User />Username</span><span class="value lit">{detail.username}</span>
             <span class="hint">{#if fb.copied === "username"}<Check />Copied{:else}<Copy />⌘B{/if}</span>
           </button>
         {/if}
         {#if detail.url}
-          <button class="field" class:done={fb.copied === "url"} use:fb.spot={"url"} onclick={() => copy("url")}>
+          <button class="field" class:done={fb.copied === "url"} class:held={holding("url")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"url"} onclick={() => copy("url")}>
             <span class="label"><Globe />Website</span><span class="value lit">{detail.url}</span>
             <span class="hint">{#if fb.copied === "url"}<Check />Copied{:else}<Copy />{/if}</span>
           </button>
         {/if}
         {#if detail.hasOtp}
-          <button class="field" class:done={fb.copied === "otp"} use:fb.spot={"otp"} onclick={() => copy("otp")}>
-            <span class="label"><Timer />One-time code</span><span class="value quiet lit">Copied, never shown</span>
+          <button class="field" class:done={fb.copied === "otp"} class:held={holding("otp")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"otp"} onclick={() => copy("otp")} title="Copied, never shown">
+            <span class="label"><Timer />One-time code</span>{#if detail.otp}<span class="value"><OtpCells period={detail.otp.period} digits={detail.otp.digits} /></span>{:else}<span class="value quiet">Can't read this code</span>{/if}
             <span class="hint">{#if fb.copied === "otp"}<Check />Copied{:else}<Copy />⌘O{/if}</span>
           </button>
         {/if}
@@ -425,7 +443,7 @@
 {/if}
 
 {#if sheet}
-  <Sheet {sheet} {say} {reload} close={() => (sheet = null)} open={(id) => { sheet = null; group = null; needle = ""; pick(id); }} />
+  <Sheet {sheet} {say} {reload} {refresh} close={() => (sheet = null)} open={(id) => { sheet = null; group = null; needle = ""; pick(id); }} />
 {/if}
 
 {#if prompt}
@@ -490,7 +508,9 @@
   }
 
   .search:focus-within {
-    box-shadow: inset 0 -2px var(--accent-text);
+    background: var(--raised);
+    color: var(--accent-text);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent-text) 55%, transparent);
   }
 
   kbd {
@@ -535,20 +555,44 @@
     background: color-mix(in oklab, var(--ok) 12%, var(--bg));
   }
 
-  .segs {
+  .strip {
     display: flex;
     gap: 2px;
   }
 
-  .segs i {
-    width: 4px;
+  .strip i {
+    width: 6px;
     height: 12px;
-    background: var(--accent-text);
-    transition: opacity 300ms;
+    border-radius: 1.5px;
+    background: var(--accent);
+    transition: background 300ms;
   }
 
-  .segs i.off {
-    opacity: 0.15;
+  .strip i.off {
+    background: var(--raised);
+  }
+
+  .clip .clear {
+    padding: 2px 8px;
+    font-size: 11.5px;
+    background: var(--raised);
+  }
+
+  .password,
+  .field {
+    position: relative;
+  }
+
+  .held::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: calc(var(--held, 0) * 100%);
+    background: var(--accent);
+    border-radius: 1px;
+    transition: width 1s linear;
   }
 
   .conflict {
@@ -660,15 +704,30 @@
     transform: rotate(45deg);
   }
 
+  /* Solid, so the hex field never shows through the buttons. */
   .group-actions {
-    margin-top: auto;
+    margin: auto -8px -10px;
+    padding: 8px;
     display: flex;
     gap: 4px;
+    background: var(--panel);
+    box-shadow: 0 -14px 14px var(--panel);
   }
 
   .group-actions button {
     padding: 4px 8px;
     font-size: 12px;
+    color: var(--text);
+  }
+
+  .group-actions button.danger {
+    color: var(--error);
+  }
+
+  /* Dimmed by colour: opacity would let the hexes through again. */
+  .group-actions button:disabled {
+    opacity: 1;
+    color: var(--faint);
   }
 
   .list {
@@ -984,7 +1043,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .segs i,
+    .strip i,
+    .held::before,
     .hint {
       transition: none;
     }

@@ -518,14 +518,17 @@ impl<S: Seal> Session<S> {
     // without sleeping. Whichever clock says more time passed wins: the monotonic one alone sleeps
     // through a suspend, and the wall one alone can be set back.
     pub fn idle_expired(&self, now: Instant) -> bool {
-        let Some(after) = self.lock_after else {
-            return false;
-        };
+        self.locks_in(now).is_some_and(|left| left.is_zero())
+    }
+
+    /// Time left before the idle lock, or None while nothing is open or the lock is off.
+    pub fn locks_in(&self, now: Instant) -> Option<Duration> {
+        let after = self.lock_after.filter(|_| self.vault.is_some())?;
         let idle = now
             .duration_since(self.last_activity)
             // A backwards jump reads as no time passed, not as negative time.
             .max(self.last_activity_wall.elapsed().unwrap_or_default());
-        self.vault.is_some() && idle >= after
+        Some(after.saturating_sub(idle))
     }
 
     // Drops the vault. Dropping is the wipe: secrets live in `ProtectedString` and the retained key,
@@ -1507,5 +1510,29 @@ mod tests {
         assert!(!s.idle_expired(Instant::now()));
         s.lock();
         assert!(!s.idle_expired(later));
+    }
+
+    #[test]
+    fn the_time_left_counts_down_to_the_lock() {
+        let (mut s, ..) = open();
+        assert_eq!(
+            s.locks_in(Instant::now()),
+            None,
+            "no timeout set, yet a lock is due"
+        );
+        s.set_lock_timeout(60);
+        s.touch();
+        let now = Instant::now();
+        let left = s.locks_in(now + Duration::from_secs(20)).unwrap();
+        assert!(
+            left <= Duration::from_secs(40) && left > Duration::from_secs(38),
+            "{left:?}"
+        );
+        assert_eq!(
+            s.locks_in(now + Duration::from_secs(90)),
+            Some(Duration::ZERO)
+        );
+        s.lock();
+        assert_eq!(s.locks_in(now), None);
     }
 }
