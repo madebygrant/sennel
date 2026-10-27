@@ -51,7 +51,7 @@ behind it creates a new vault, asking for the password twice. With `touch_id = t
 empty password box after a lock asks for a fingerprint, as in the terminal.
 
 The main window has groups on the left, entries in the middle and the selected entry on the right.
-Typing in the search box searches the whole vault. `#wo` instead lists the entries with a tag
+Typing in the search box at the top searches the whole vault. `#wo` instead lists the entries with a tag
 starting `wo`, so `#work` finds what is tagged work and not "homework". Drag an entry onto a group to move it.
 
 | Key | Does                                  |
@@ -62,9 +62,15 @@ starting `wo`, so `#work` finds what is tagged work and not "homework". Drag an 
 | ⌘N  | new entry                             |
 | ⌘Z  | undo the last change to the vault     |
 | ⌘L  | lock                                  |
+| ↑ ↓ | move through the entries              |
 
 In a text box ⌘C, ⌘Z and the rest keep their usual meaning, and with text selected anywhere ⌘C
-copies that text. Double-clicking an entry copies its password.
+copies that text. Double-clicking an entry copies its password, and clicking the username, website
+or one-time code row copies that field. The clipboard's countdown sits at the top right.
+
+Show lays the password out one character per numbered cell, with digits and symbols in their own
+colours, so it can be read out or typed elsewhere without counting. Entries that the audit flags
+(reused, weak, expired, empty or old) carry a red mark, and **Needs attention** lists them all.
 
 Every change saves at once, as in the terminal. If somebody else wrote the file meanwhile, a bar
 offers to merge both, overwrite theirs, or reload theirs. Closing the window with changes that could

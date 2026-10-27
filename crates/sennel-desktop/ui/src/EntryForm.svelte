@@ -141,8 +141,8 @@
 
   form {
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
     padding: 18px 20px;
     width: min(520px, 100%);
     max-height: 100%;

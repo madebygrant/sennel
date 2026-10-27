@@ -135,15 +135,15 @@
 
   h1 {
     margin: 0 0 6px;
-    font-size: 22px;
-    letter-spacing: 0.02em;
+    font-size: 34px;
+    font-family: var(--action);
+    font-weight: 600;
+    color: var(--accent);
   }
 
   h2 {
     margin: 10px 0 6px;
     font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
     color: var(--dim);
   }
 
@@ -185,7 +185,7 @@
   }
 
   .row.current {
-    border-color: var(--accent);
+    box-shadow: inset 3px 0 var(--accent);
   }
 
   p {

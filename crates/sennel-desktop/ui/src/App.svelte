@@ -9,12 +9,16 @@
   let asking = $state(false);
   // Counted down here from the last status, so the clock needs no call into Rust each second.
   let clearsAt = $state(0);
+  let clearsFrom = $state(0);
   let now = $state(Date.now());
   const clearsIn = $derived(Math.max(0, Math.ceil((clearsAt - now) / 1000)));
 
   async function refresh() {
     status = await call("status");
-    clearsAt = status.clearsIn ? Date.now() + status.clearsIn * 1000 : 0;
+    const at = status.clearsIn ? Date.now() + status.clearsIn * 1000 : 0;
+    // A later deadline means a fresh copy, so the countdown starts over from full.
+    if (at > clearsAt + 1500) clearsFrom = status.clearsIn;
+    clearsAt = at;
   }
 
   function say(notes) {
@@ -54,14 +58,14 @@
 {#if status === null}
   <main class="loading dim">…</main>
 {:else if status.open}
-  <Browser {status} {say} {refresh} />
+  <Browser {status} {say} {refresh} clears={{ left: clearsIn, total: clearsFrom }} />
 {:else}
   <Unlock {status} {say} {refresh} />
 {/if}
 
 <footer class:level-warn={note?.level === "warn"} class:level-error={note?.level === "error"}>
   <span class="note">{note?.text ?? ""}</span>
-  {#if clearsIn}
+  {#if clearsIn && !status?.open}
     <span class="dim">clipboard clears in {clearsIn}s</span>
   {/if}
   {#if status?.vaultName}
@@ -92,8 +96,8 @@
 
   .ask {
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
     padding: 18px;
     width: min(380px, 92vw);
   }

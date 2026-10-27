@@ -134,8 +134,8 @@
 
   section {
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
     padding: 16px 18px;
     width: min(620px, 100%);
     max-height: 100%;
@@ -161,10 +161,11 @@
     align-items: center;
     gap: 12px;
     padding: 6px 8px;
-    border-radius: var(--radius);
     background: var(--bg);
-    border: 1px solid var(--line);
+    border-radius: var(--radius);
     text-align: left;
+    font-family: var(--font);
+    font-weight: 400;
     width: 100%;
   }
 
