@@ -65,7 +65,7 @@
     </header>
 
     {#if sheet.kind === "generate"}
-      <div class="secret" class:glitch={fb.glitch === "generated"}><Cells {value} /></div>
+      <div class="secret" use:fb.spot={"generated"}><Cells {value} /></div>
       <div class="row">
         <button onclick={async () => (value = await call("generate"))}>Another</button>
         <button class="primary" onclick={() => copyOut("generated", "copy_text", { label: "the generated password", text: value })}>
@@ -96,10 +96,10 @@
       {/if}
     {:else if sheet.kind === "fields"}
       {#each rows as r}
-        <div class="line" class:glitch={fb.glitch === r.name}>
+        <div class="line" use:fb.spot={r.name}>
           <span>
             <strong>{r.name}</strong>
-            {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono">{r.secret ? "••••••" : r.value}</span>{/if}
+            {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono lit">{r.secret ? "••••••" : r.value}</span>{/if}
           </span>
           <span class="actions">
             {#if r.file}

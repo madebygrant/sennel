@@ -47,6 +47,7 @@ fn the_tree_and_rows_carry_no_passwords() {
     assert_eq!(rows.len(), 1);
     let view = desk.entry(&rows[0].id).unwrap();
     assert!(view.has_password && view.group == "Banks");
+    assert_eq!(view.password_length, "hunter2".chars().count());
     let shown = format!("{rows:?}{view:?}");
     assert!(
         !shown.contains("hunter2"),

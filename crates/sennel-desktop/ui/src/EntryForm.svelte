@@ -116,7 +116,6 @@
       </span>
       <input
         class="mono"
-        class:glitch={fb.glitch === "password"}
         type={reveal ? "text" : "password"}
         bind:value={password}
         oninput={() => (passwordTouched = true)}

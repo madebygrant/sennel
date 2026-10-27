@@ -348,14 +348,17 @@
       {/if}
 
       {#if detail.hasPassword}
-        <div class="password" class:glitch={fb.glitch === "password"}>
-          <Cells value={revealed} />
+        <div class="password" use:fb.spot={"password"}>
+          <!-- Out of the tab order: the Copy button and ⌘C already cover the keyboard. -->
+          <button class="grab" tabindex="-1" onclick={() => copy("password")} title="Click to copy" aria-label="Copy the password" aria-describedby="password-text">
+            <Cells value={revealed} length={detail.passwordLength} textId="password-text" />
+          </button>
           <div class="bar">
             <span class="meta">
               {#if chars}
                 {chars.length} characters, {chars.filter((c) => kind(c) === "digit").length} digits, {chars.filter((c) => kind(c) === "symbol").length} symbols
               {:else}
-                Hidden
+                {detail.passwordLength} characters, hidden
               {/if}
             </span>
             <button class="icon" onclick={toggleReveal} title={revealed === null ? "Show" : "Hide"} aria-label={revealed === null ? "Show the password" : "Hide the password"}>
@@ -370,20 +373,20 @@
 
       <div class="fields">
         {#if detail.username}
-          <button class="field" class:done={fb.copied === "username"} class:glitch={fb.glitch === "username"} onclick={() => copy("username")}>
-            <span class="label"><User />Username</span><span class="value">{detail.username}</span>
+          <button class="field" class:done={fb.copied === "username"} use:fb.spot={"username"} onclick={() => copy("username")}>
+            <span class="label"><User />Username</span><span class="value lit">{detail.username}</span>
             <span class="hint">{#if fb.copied === "username"}<Check />Copied{:else}<Copy />⌘B{/if}</span>
           </button>
         {/if}
         {#if detail.url}
-          <button class="field" class:done={fb.copied === "url"} class:glitch={fb.glitch === "url"} onclick={() => copy("url")}>
-            <span class="label"><Globe />Website</span><span class="value">{detail.url}</span>
+          <button class="field" class:done={fb.copied === "url"} use:fb.spot={"url"} onclick={() => copy("url")}>
+            <span class="label"><Globe />Website</span><span class="value lit">{detail.url}</span>
             <span class="hint">{#if fb.copied === "url"}<Check />Copied{:else}<Copy />{/if}</span>
           </button>
         {/if}
         {#if detail.hasOtp}
-          <button class="field" class:done={fb.copied === "otp"} class:glitch={fb.glitch === "otp"} onclick={() => copy("otp")}>
-            <span class="label"><Timer />One-time code</span><span class="value quiet">Copied, never shown</span>
+          <button class="field" class:done={fb.copied === "otp"} use:fb.spot={"otp"} onclick={() => copy("otp")}>
+            <span class="label"><Timer />One-time code</span><span class="value quiet lit">Copied, never shown</span>
             <span class="hint">{#if fb.copied === "otp"}<Check />Copied{:else}<Copy />⌘O{/if}</span>
           </button>
         {/if}
@@ -817,6 +820,18 @@
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
+  }
+
+  .grab {
+    display: block;
+    width: 100%;
+    padding: 0;
+    background: none;
+    text-align: left;
+  }
+
+  .grab:hover :global(.cells b) {
+    background: var(--raised);
   }
 
   .bar {

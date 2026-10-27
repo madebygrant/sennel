@@ -6,8 +6,8 @@
 </script>
 
 <script>
-  // `value` is null while hidden, and a fixed row of dots stands in so the length stays private.
-  let { value } = $props();
+  // `value` is null while hidden, and `length` dots stand in, so revealing swaps each in place.
+  let { value, length = 12, textId } = $props();
 
   const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ0123456789ABCDEF<>*=+";
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -16,25 +16,12 @@
   // While decoding, each cell shows a passing glyph until its turn comes.
   let glyphs = $state(null);
   let row;
-  let before = 0;
 
-  // A password too long for one line still wraps, so the box eases open instead of jumping.
-  $effect.pre(() => {
-    chars;
-    before = row?.offsetHeight ?? 0;
-  });
+  // Cells narrow so most passwords keep to one line; CSSOM, since the CSP refuses style attributes.
   $effect(() => {
-    // Cells narrow so most passwords keep to one line; CSSOM, since the CSP refuses style attributes.
-    // Set before measuring, or `after` is taken at the old widths.
-    const n = chars?.length ?? 12;
+    const n = chars?.length ?? length;
     row.style.setProperty("--n", n);
     row.style.setProperty("--splits", Math.floor((n - 1) / 5));
-    const after = row.offsetHeight;
-    if (still || !before || before === after) return;
-    row.animate([{ height: `${before}px`, overflow: "clip" }, { height: `${after}px`, overflow: "clip" }], {
-      duration: 300,
-      easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
-    });
   });
 
   $effect(() => {
@@ -55,7 +42,7 @@
 
 <!-- Not selectable: a native copy would skip the clipboard clear, so Copy is the way out. -->
 <div class="cells" bind:this={row} class:open={chars !== null} aria-hidden="true">
-  {#each chars ?? Array(12).fill("•") as c, i}
+  {#each chars ?? Array(length).fill("•") as c, i}
     {#if i && i % 5 === 0}<span class="split"></span>{/if}
     <span class="cell">
       <b class={chars ? kind(c) : ""} class:scrambled={glyphs?.[i]}>{glyphs?.[i] ?? c}</b>
@@ -63,7 +50,7 @@
     </span>
   {/each}
 </div>
-<span class="sr">{chars === null ? "Password hidden" : `Password: ${value}`}</span>
+<span class="sr" id={textId}>{chars === null ? "Password hidden" : `Password: ${value}`}</span>
 
 <style>
   .cells {

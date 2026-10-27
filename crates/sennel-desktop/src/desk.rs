@@ -102,6 +102,8 @@ pub struct EntryView {
     pub tags: String,
     pub expires: String,
     pub has_password: bool,
+    /// In chars, so the hidden password draws as many dots as the revealed one has cells.
+    pub password_length: usize,
     pub has_otp: bool,
     pub extras: usize,
     pub recycled: bool,
@@ -602,6 +604,7 @@ impl Desk {
                 .map(|at| at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default(),
             has_password: !e.password().is_empty(),
+            password_length: e.password().chars().count(),
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
             extras: sennel_core::vault::extra_rows(&e).len(),
             recycled: vault.is_recycled(&id),

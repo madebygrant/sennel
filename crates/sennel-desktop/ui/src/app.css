@@ -167,32 +167,49 @@ button:disabled {
   user-select: none;
 }
 
-.glitch {
-  animation: glitch 300ms steps(2) both;
+.sweep {
+  position: relative;
+  overflow: clip;
 }
 
-@keyframes glitch {
-  0% {
-    clip-path: inset(10% 0 60% 0);
-    transform: translateX(-6px);
+.sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--accent) 22%, transparent) 50%, transparent);
+  animation: sweep var(--sweep, 500ms) linear both;
+}
+
+.sweep .cells b,
+.sweep .lit {
+  animation: lit 275ms ease-out both;
+  animation-delay: var(--lit-at, 0ms);
+}
+
+.sweep .lit {
+  animation-name: ink;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
   }
-  33% {
-    clip-path: inset(55% 0 10% 0);
-    transform: translateX(5px);
-  }
-  66% {
-    clip-path: inset(30% 0 35% 0);
-    transform: translateX(-2px);
-  }
-  100% {
-    clip-path: none;
-    transform: none;
+  to {
+    transform: translateX(100%);
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .glitch {
-    animation: none;
+@keyframes lit {
+  from {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+}
+
+@keyframes ink {
+  from {
+    color: var(--accent);
   }
 }
 
