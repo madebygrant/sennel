@@ -20,7 +20,8 @@ backup_dir = "~/.local/state/sennel/backups"
                                # where they go · never beside the vault, which a sync
                                # client watches · XDG_STATE_HOME moves the default
 sort = "name"                  # entries order at startup: stored, name, recent, updated
-theme = "warm"                 # warm (default), light, cool, neon · rewritten by ^t
+theme = "graphite"             # graphite (default), graphite-light, warm, light,
+                               # cool, neon · rewritten by ^t
 mouse = true                   # wheel scrolls, click selects, menus in the header
                                # and on right-click; false gives the terminal its
                                # own text selection back

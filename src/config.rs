@@ -43,7 +43,7 @@ pub struct Cli {
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<String>,
 
-    /// Colours to draw in: warm, light, cool or neon
+    /// Colours to draw in: graphite, graphite-light, warm, light, cool or neon
     #[arg(long, value_name = "THEME")]
     pub theme: Option<String>,
 
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(cfg.theme, crate::theme::LIGHT, "the flag lost to the file");
 
         let cfg = build("", &[]);
-        assert_eq!(cfg.theme, crate::theme::WARM, "the default moved");
+        assert_eq!(cfg.theme, crate::theme::GRAPHITE, "the default moved");
 
         let mut file = temp("theme");
         writeln!(file.handle, "theme = \"dracula\"").unwrap();
@@ -759,7 +759,14 @@ mod tests {
         };
         assert!(err.contains("unknown theme"), "{err}");
         // The message names what does exist, so the next try can work.
-        for name in ["warm", "light", "cool", "neon"] {
+        for name in [
+            "graphite",
+            "graphite-light",
+            "warm",
+            "light",
+            "cool",
+            "neon",
+        ] {
             assert!(err.contains(name), "{err} does not name {name}");
         }
     }
@@ -779,7 +786,7 @@ mod tests {
         // Without a theme named, overrides land on the default.
         let cfg = build("[colors]\ntext = \"#ffffff\"\n", &[]);
         assert_eq!(cfg.theme.text, ratatui::style::Color::Rgb(255, 255, 255));
-        assert_eq!(cfg.theme.accent, crate::theme::WARM.accent);
+        assert_eq!(cfg.theme.accent, crate::theme::GRAPHITE.accent);
     }
 
     /* A colour that cannot work stops startup; one that merely measures badly

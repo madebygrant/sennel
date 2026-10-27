@@ -98,6 +98,42 @@ impl Palette {
     }
 }
 
+// The desktop app's colours: neutral greys, amber for structure, teal for where you are. Its
+// background is flat; here the gradient stays, faint enough to read as the same near-black.
+pub const GRAPHITE: Palette = Palette {
+    text: Color::Rgb(235, 235, 234),
+    accent: Color::Rgb(226, 166, 90),
+    cursor: Color::Rgb(111, 194, 168),
+    warn: Color::Rgb(232, 193, 90),
+    error: Color::Rgb(255, 90, 78),
+    muted: Color::Rgb(165, 165, 163),
+    rule: Color::Rgb(78, 78, 76),
+    surface: Color::Rgb(35, 35, 35),
+    masked: Color::Rgb(140, 140, 138),
+    ink: Color::Rgb(26, 23, 20),
+    near: (30, 30, 30),
+    far: (14, 14, 14),
+    stop: 0.76,
+};
+
+// The desktop's light theme. Its amber fill is too pale for text on a light ground, so
+// structure draws in the dark gold the desktop uses for text.
+pub const GRAPHITE_LIGHT: Palette = Palette {
+    text: Color::Rgb(32, 32, 31),
+    accent: Color::Rgb(138, 90, 0),
+    cursor: Color::Rgb(35, 108, 90),
+    warn: Color::Rgb(160, 70, 8),
+    error: Color::Rgb(178, 58, 42),
+    muted: Color::Rgb(95, 95, 92),
+    rule: Color::Rgb(168, 168, 165),
+    surface: Color::Rgb(252, 252, 251),
+    masked: Color::Rgb(113, 113, 109),
+    ink: Color::Rgb(250, 250, 249),
+    near: (245, 245, 244),
+    far: (230, 230, 228),
+    stop: 0.76,
+};
+
 /* Ink on parchment, for a terminal with a light background — where every
 other palette here is unreadable. The inversion is the whole palette, not
 the text: the gradient's ends go light too, and `surface` is lighter than
@@ -160,7 +196,9 @@ pub const NEON: Palette = Palette {
 /* Every palette Sennel ships. The list is what the contrast, quantise and
 NO_COLOR checks iterate, so a new theme is covered the moment it is added
 here and cannot be shipped unmeasured. */
-pub const BUILT_INS: [(&str, Palette); 4] = [
+pub const BUILT_INS: [(&str, Palette); 6] = [
+    ("graphite", GRAPHITE),
+    ("graphite-light", GRAPHITE_LIGHT),
     ("warm", WARM),
     ("light", LIGHT),
     ("cool", COOL),
@@ -297,7 +335,7 @@ impl Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        WARM
+        GRAPHITE
     }
 }
 
@@ -604,12 +642,71 @@ mod tests {
         }
     }
 
-    /* The default palette is the one this app has always drawn in: the move
-    to role names was a rename, and a rename that changes a colour is not a
-    rename. Pinned by value so a future edit has to mean it. */
+    // The default is the desktop's palette, so both apps open looking the same.
     #[test]
-    fn the_default_palette_is_the_warm_one_unchanged() {
-        assert_eq!(Palette::default(), WARM);
+    fn the_default_palette_is_the_desktop_one() {
+        assert_eq!(Palette::default(), GRAPHITE);
+        assert_eq!(BUILT_INS[0].1, GRAPHITE, "^t should start from the default");
+        assert_eq!(
+            GRAPHITE.accent,
+            Color::Rgb(226, 166, 90),
+            "the desktop's --accent"
+        );
+        assert_eq!(
+            GRAPHITE_LIGHT.accent,
+            Color::Rgb(138, 90, 0),
+            "the desktop's light --accent-text"
+        );
+    }
+
+    // Graphite is the desktop's palette, read here from the desktop's own stylesheet so the two
+    // apps cannot drift. The exceptions are shades the contrast checks above refused.
+    #[test]
+    fn graphite_matches_the_desktop_stylesheet() {
+        let css = include_str!("../crates/sennel-desktop/ui/src/app.css");
+        let (dark, light) = css.split_once("prefers-color-scheme: light").unwrap();
+        let token = |block: &str, name: &str| -> Color {
+            let line = block
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("--{name}:")))
+                .unwrap_or_else(|| panic!("--{name} is gone from app.css"));
+            let hex = line.split('#').nth(1).unwrap().trim_end_matches(';').trim();
+            let [r, g, b] = [0, 2, 4].map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap());
+            Color::Rgb(r, g, b)
+        };
+        let pairs = [
+            ("text", "text"),
+            ("accent", "accent-text"),
+            ("cursor", "data"),
+            ("warn", "warn"),
+            ("error", "error"),
+            ("muted", "dim"),
+        ];
+        // Too light for text on a light ground in a terminal; darkened until they clear 4.5:1.
+        let darker_here = [("graphite-light", "cursor"), ("graphite-light", "warn")];
+        for (name, palette, block) in [
+            ("graphite", GRAPHITE, dark),
+            ("graphite-light", GRAPHITE_LIGHT, light),
+        ] {
+            let slots = palette.slots();
+            for (slot, var) in pairs {
+                if darker_here.contains(&(name, slot)) {
+                    continue;
+                }
+                let ours = slots.iter().find(|(s, _)| *s == slot).unwrap().1;
+                assert_eq!(
+                    ours,
+                    token(block, var),
+                    "{name}: {slot} has drifted from --{var}"
+                );
+            }
+        }
+    }
+
+    // Warm was the default before graphite, and anyone who set it keeps it as it was. Pinned by
+    // value so a future edit has to mean it.
+    #[test]
+    fn the_warm_palette_is_unchanged() {
         assert_eq!(WARM.text, Color::Rgb(236, 223, 192));
         assert_eq!(WARM.accent, Color::Rgb(214, 180, 96));
         assert_eq!(WARM.cursor, Color::Rgb(96, 178, 158));
@@ -627,7 +724,7 @@ mod tests {
     }
 
     /* A palette with [colors] on it is in no walk. Stepping off it has to
-    reach the first built-in, or `warm` becomes the one theme `^t` can
+    reach the first built-in, or the default becomes the one theme `^t` can
     never get back to. */
     #[test]
     fn a_repainted_palette_steps_onto_the_first_built_in() {
@@ -636,11 +733,11 @@ mod tests {
         assert_eq!(custom.name(), "custom");
         assert_eq!(custom.next(), BUILT_INS[0].1);
         // And the walk itself still goes round the houses and back.
-        let mut at = WARM;
+        let mut at = GRAPHITE;
         for _ in 0..BUILT_INS.len() {
             at = at.next();
         }
-        assert_eq!(at, WARM);
+        assert_eq!(at, GRAPHITE);
     }
 
     /* A key that parses and repaints nothing is worse than a key that is

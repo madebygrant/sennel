@@ -119,9 +119,9 @@ account in it.
 newline pressing Enter. Pasted into the entry list it does nothing, so a clipboard full of letters
 cannot run commands.
 
-**Themes you pick by looking at them.** `^t` walks four palettes with the screen in front of you and
-keeps the one you stop on. Every colour clears WCAG 4.5:1 before it ships, and `NO_COLOR` still
-gives you a usable app.
+**Themes you pick by looking at them.** `^t` walks six palettes with the screen in front of you and
+keeps the one you stop on. The default, graphite, is the desktop app's. Every colour clears WCAG
+4.5:1 before it ships, and `NO_COLOR` still gives you a usable app.
 
 **Custom fields and attachments, not a count of them.** `F` opens what the five fixed rows cannot
 show: KeePassXC's custom string fields, and the files on an entry. `y` copies a field, `s` writes an

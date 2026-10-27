@@ -803,7 +803,7 @@ impl App {
             tick: 0,
             view: View::Unlock,
             show_help: false,
-            theme: crate::theme::WARM,
+            theme: crate::theme::Palette::default(),
             theme_overridden: false,
             stage: "locked".into(),
             resting: "locked".into(),
@@ -5983,9 +5983,9 @@ pub mod tests {
         std::fs::write(&config.0, "lock_timeout = 90\n").unwrap();
         app.config_file = Some(config.0.clone());
 
-        assert_eq!(app.theme, crate::theme::WARM);
+        assert_eq!(app.theme, crate::theme::GRAPHITE);
         app.cycle_theme();
-        assert_ne!(app.theme, crate::theme::WARM, "^t did not move");
+        assert_ne!(app.theme, crate::theme::GRAPHITE, "^t did not move");
         let landed = app.theme.name();
         assert!(app.stage.contains(landed), "{}", app.stage);
 
@@ -6004,9 +6004,9 @@ pub mod tests {
             app.cycle_theme();
             seen.push(app.theme.name());
         }
-        assert_eq!(app.theme, crate::theme::WARM, "the cycle did not wrap");
+        assert_eq!(app.theme, crate::theme::GRAPHITE, "the cycle did not wrap");
         for (name, _) in crate::theme::BUILT_INS {
-            if name != "warm" {
+            if name != "graphite" {
                 assert!(seen.contains(&name), "{name} is not reachable by ^t");
             }
         }
@@ -6037,7 +6037,7 @@ pub mod tests {
         let mut app = open_app();
         app.config_file = None;
         app.cycle_theme();
-        assert_ne!(app.theme, crate::theme::WARM);
+        assert_ne!(app.theme, crate::theme::GRAPHITE);
         assert!(!app.stage.contains("remembered"), "{}", app.stage);
     }
 

@@ -26,7 +26,7 @@ pub struct FileConfig {
     /// stored · name · recent · updated. `o` cycles from here rather than
     /// from the built-in default, so the order survives a restart.
     pub sort: Option<String>,
-    /// warm · light · cool · neon
+    /// graphite · graphite-light · warm · light · cool · neon
     pub theme: Option<String>,
     /// `#rrggbb` per slot, on top of whichever theme is named.
     /* Ordered, not hashed: with two unusable colours in the table, a HashMap

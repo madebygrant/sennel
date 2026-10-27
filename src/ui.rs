@@ -3007,7 +3007,7 @@ mod tests {
         let x = rows[at].find("Recycle").unwrap() as u16;
         assert_eq!(
             buf[(x, at as u16)].fg,
-            crate::theme::WARM.muted,
+            crate::theme::Palette::default().muted,
             "the bin drew like a live group"
         );
         // A live group beside it does not, so this is the bin and not the pane.
@@ -3015,7 +3015,7 @@ mod tests {
         let lx = rows[live].find("Banks").unwrap() as u16;
         assert_ne!(
             buf[(lx, live as u16)].fg,
-            crate::theme::WARM.muted,
+            crate::theme::Palette::default().muted,
             "a live group drew like the bin"
         );
     }
@@ -3064,7 +3064,7 @@ mod tests {
         let x = stale_row.chars().take_while(|c| *c != '⧖').count() as u16;
         assert_eq!(
             buf[(x, y)].fg,
-            crate::theme::WARM.warn,
+            crate::theme::Palette::default().warn,
             "the marker is not in warn"
         );
 
@@ -4497,9 +4497,11 @@ mod tests {
     #[test]
     fn the_background_comes_from_the_palette() {
         use crate::vault::Vault;
-        let mut pale = crate::theme::WARM;
-        pale.near = (250, 250, 250);
-        pale.far = (250, 250, 250);
+        let pale = crate::theme::Palette {
+            near: (250, 250, 250),
+            far: (250, 250, 250),
+            ..Default::default()
+        };
         let backend = TestBackend::new(40, 10);
         let mut t = Terminal::new(backend).unwrap();
         let mut app = App::new();
@@ -4649,7 +4651,6 @@ mod tests {
     #[test]
     fn search_lights_the_characters_it_matched() {
         use crate::vault::Vault;
-        use ratatui::style::Color;
         let backend = TestBackend::new(100, 24);
         let mut t = Terminal::new(backend).unwrap();
         let mut app = App::new();
@@ -4667,7 +4668,7 @@ mod tests {
         let buf = t.backend().buffer().clone();
         let lit: String = (0..buf.area.width)
             .flat_map(|x| (0..buf.area.height).map(move |y| (x, y)))
-            .filter(|(x, y)| buf[(*x, *y)].fg == Color::Rgb(96, 178, 158))
+            .filter(|(x, y)| buf[(*x, *y)].fg == crate::theme::Palette::default().cursor)
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
         /* c, h and k of "checking" are lit; the marker is teal too, so the
