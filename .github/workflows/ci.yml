@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf file
+            libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -69,8 +69,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Runners have no display, and `sennel --check` exits 1 with no clipboard to copy to.
       - name: Test
-        run: cargo test --workspace
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a' || '' }} cargo test --workspace
 
       - name: Bundle the desktop app
         working-directory: crates/sennel-desktop
