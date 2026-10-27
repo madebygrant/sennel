@@ -19,6 +19,9 @@
 - [Exporting](docs/export.md): `sennel export`, CSV or JSON, plaintext
 - [Older KDBX files](docs/kdbx3.md): `sennel convert`
 - [Configuration](docs/configuration.md): config file keys and defaults
+- [Finding entries](docs/search.md): fuzzy search, tags, expiry and sort order
+- [One-time codes](docs/one-time-codes.md): adding TOTP seeds and copying codes
+- [Vaults](docs/vaults.md): several vaults, merging, backups, undo and history
 - [Security](docs/security.md): what is wiped, when, and why
 
 ## Optional

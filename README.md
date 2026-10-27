@@ -1,156 +1,164 @@
-# Sennel
-
 <div align="center">
-  <img src="docs/images/sennel.gif" alt="Sennel: open a vault, search, copy, generate" width="720">
+  <img src="docs/images/logo.svg" alt="" width="112">
+  <h1>Sennel</h1>
+  <p>
+    <strong>A KeePass password manager for your terminal and your desktop.</strong><br>
+    It opens the KeePass file you already have, and every copy wipes itself after 30 seconds.
+  </p>
+  <p>
+    <a href="https://github.com/madebygrant/sennel/actions/workflows/ci.yml"><img src="https://github.com/madebygrant/sennel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555" alt="macOS and Linux">
+    <img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-555" alt="MIT or Apache-2.0">
+  </p>
+  <p>
+    <a href="#install">Install</a> ·
+    <a href="#features">Features</a> ·
+    <a href="#documentation">Documentation</a>
+  </p>
+  <img src="docs/images/sennel.gif" alt="The terminal app: unlocking a vault, searching, copying a password and generating one" width="760">
 </div>
 
-Your vault, in your terminal. Real KeePass files. A clipboard that cleans up after itself.
+## Why Sennel
 
-## Why you'll like it
+**No account, no server.** The vault is a `.kdbx` file, the format KeePassXC uses. It stays where
+you put it, and you sync it with anything.
 
-- **Real KDBX4 files.** KeePassXC opens what Sennel writes, Sennel opens what KeePassXC writes. No plugins, no lock-in.
-- **One key per secret.** `y p U t` copy the username, password, url or one-time code.
-- **A clipboard with a timer.** Every copy wipes after 30 seconds, and the status bar counts it down.
-- **Fuzzy search that shows its work.** The matched characters light up in each row, so you can see why it is there. Titles, usernames, urls and group paths. Never your notes.
-- **Import without regret.** `sennel import` reads KeePassXC, Bitwarden and 1Password exports into one group. Changed your mind? Delete the group. `sennel export` takes everything back out as CSV or JSON.
-- **A generator on call.** `P` shows a password, passphrase or PIN (`t` switches), what it is worth in bits, and one key per class for whatever rule the site has this week. `^s` in the entry form fills the password box, and `^y` copies it before you save.
-- **It audits itself.** `!` lists every reused, weak, expired, empty or old password, worst first, and puts the cursor two keys from the fix.
-- **Deletes are never losses.** `D` moves to the same recycle bin KeePassXC uses. One `u` brings it back.
-- **It locks itself.** Five idle minutes and every secret in memory is overwritten, not dropped. Any SSH keys it gave your agent are taken back out.
-- **It keeps a copy.** The first save of a session keeps the file as it was, outside the folder your sync client watches.
+**Two keys to a password.** `/` and a few letters finds the entry, `p` copies it. The terminal app
+and the desktop app share the keys.
 
-macOS and Linux.
+**Careful by default.** An idle vault locks after five minutes and overwrites its secrets in memory.
+If another app changed the file, Sennel won't save over it.
+
+## Features
+
+### Two apps, one vault
+
+<img src="docs/images/desktop.png" alt="The desktop app: groups, entries and an entry with its password hidden, a one-time code counting down and the clipboard countdown at the top" width="760">
+
+A terminal app and a native desktop app, built on one Rust core. They open the same vaults, read the
+same settings and share the same list of recent vaults, with the same keys and the same colours. Run
+both at once if you like. [The desktop app](docs/desktop.md)
+
+### Copy, then forget
+
+- **One key per field.** `y` `p` `U` `t` copy the username, password, website or one-time code.
+- **A clipboard with a timer.** Sennel wipes every copy after 30 seconds and shows the countdown.
+  Quitting wipes it too.
+- **Two-factor codes built in.** `t` copies the current code, never the seed behind it. The desktop
+  app reads a code straight from a screenshot of the site's QR code. [One-time codes](docs/one-time-codes.md)
+- **A generator on call.** `P` makes a password, passphrase or PIN and shows its strength in bits.
+  One key each turns capitals, digits and symbols on or off for a site's rules. [Generating](docs/generate.md)
+
+### Find anything
+
+- **Fuzzy search that shows its work.** The letters that matched light up, so you can see why each
+  result is there. It covers titles, usernames, websites and groups, never your notes.
+- **Tags and expiry dates.** `#work` filters by tag. Expired entries are marked. [Finding entries](docs/search.md)
+- **Every vault you use.** Work and personal can be two vaults. `^v` switches between them.
+  [Vaults](docs/vaults.md)
+- **Any action by name.** `:` opens a command palette that also tells you each action's key.
+  [Keys](docs/keys.md)
+
+### Safety nets
+
+- **It audits itself.** `!` lists reused, weak, expired, empty and old passwords, worst first.
+  `sennel audit --pwned` checks for breached passwords by sending five characters of a hash, never
+  the password. [Auditing](docs/audit.md)
+- **Deletes are never losses.** `D` moves to the recycle bin, and `u` undoes, step by step.
+- **Safe with sync and with KeePassXC.** If another app changes the vault while it is open, Sennel
+  won't overwrite it. It offers to merge both sets of changes instead.
+- **Backups that stay home.** Sennel keeps three copies of the vault outside your sync folder, so
+  Dropbox never uploads an old password. [Vaults, sync and safety nets](docs/vaults.md)
+- **It locks itself.** After five idle minutes it overwrites every secret held in memory.
+  [Security](docs/security.md)
+
+### Works with what you have
+
+- **KeePassXC opens what Sennel writes, and the other way round.** KDBX 4 throughout. Older KDBX 3.1
+  vaults open read-only and convert in one command. [Older files](docs/kdbx3.md)
+- **Bring your passwords along.** Import from KeePassXC, Bitwarden or 1Password, and export to CSV
+  or JSON whenever you want to leave. [Importing](docs/import.md) · [Exporting](docs/export.md)
+- **Hardware keys and fingerprints.** YubiKey challenge-response slots and key files, plus Touch ID
+  to reopen a vault after a lock on a Mac. [Security](docs/security.md)
+- **SSH keys for your agent.** Unlocking can hand `ssh-agent` the keys stored in your vault, and
+  locking takes them back. [Security](docs/security.md)
+- **Custom fields and attachments.** `F` reads and edits them, and `H` shows or clears an entry's
+  old versions. [Vaults](docs/vaults.md)
+
+### Scriptable
+
+```sh
+sennel get github -p            # copy a password, wiped after 30 seconds
+sennel get github --otp         # copy the current one-time code
+sennel gen --stdout             # a new password, stored nowhere
+sennel audit                    # what needs changing
+```
+
+`get` exits with codes a script can branch on, and `--stdout` pipes the value instead of copying it.
+[sennel get](docs/get.md) · [Reference for AI agents](docs/agents.md)
 
 ## Install
+
+Sennel runs on macOS and Linux.
+
+### Terminal app
+
+With [Rust](https://rustup.rs) 1.88 or later:
 
 ```sh
 cargo install --git https://github.com/madebygrant/sennel.git
 ```
 
-Then open a vault, created on first unlock:
+### Desktop app
 
-```sh
-sennel --db vault.kdbx
-```
-
-Or never open the TUI at all:
-
-```sh
-sennel get github -p        # copy one secret and exit
-sennel gen --stdout         # a password, stored nowhere
-sennel gen --kind passphrase --stdout   # six words off the EFF list
-```
-
-Open a vault once and Sennel remembers the path, so the next launch is just `sennel`. Open a second
-and `^v` keeps them both.
-
-Rather have a window? The desktop app opens the same vaults with the same core. From a clone, with
-Rust and Node.js installed:
+From a clone, with Rust 1.90 or later and [Node.js](https://nodejs.org):
 
 ```sh
 scripts/install-desktop.sh
 ```
 
-It builds the app and installs it: `Sennel.app` in `/Applications` on a Mac, or the AppImage as
-`~/.local/bin/sennel-desktop` with a menu entry on Linux. [More](docs/desktop.md).
+It puts `Sennel.app` in `/Applications` on a Mac. On Linux it installs the AppImage as
+`~/.local/bin/sennel-desktop`, with a menu entry. [More](docs/desktop.md)
 
-## The keys you need on day one
+## Quick start
 
-| Key         | Action                                          |
-| ----------- | ----------------------------------------------- |
-| `j k` `Tab` | move in a pane, switch panes                    |
-| `enter`     | open the entry                                  |
-| `y p U t`   | copy username, password, url, one-time code     |
-| `^v`        | the vaults you have opened (unlock screen)      |
-| `/`         | search                                          |
-| `a e D`     | add, edit, delete an entry (to the bin)         |
-| `P`         | generate a password, passphrase or PIN          |
-| `!`         | passwords worth changing                        |
-| `F`         | custom fields and attachments                   |
-| `u`         | undo, as many steps as you made                 |
-| `:`         | any action, found by name                       |
-| `h`         | every other key                                 |
+```sh
+sennel --db ~/vault.kdbx        # opens a vault, or creates it on first unlock
+```
 
-[The full key map](docs/keys.md) covers the unlock screen, groups, cut and paste, and the ordering
-keys.
+Sennel remembers the vault, so next time it is just `sennel`. The keys for day one:
 
-## What it does
+| Key       | Does                                         |
+| --------- | -------------------------------------------- |
+| `/`       | search                                       |
+| `j` `k`   | move up and down                             |
+| `p`       | copy the password                            |
+| `y` `t`   | copy the username, the one-time code         |
+| `a` `e`   | add, edit an entry                           |
+| `P`       | generate a password                          |
+| `u`       | undo                                         |
+| `h`       | every other key                              |
 
-**Scriptable.** `sennel get github -p` copies a password without opening the TUI, wipes it on the
-same timer, and exits with a code a script can branch on. `--stdout` pipes it instead, and refuses
-to print into a terminal where it would sit in your scrollback. [More](docs/get.md).
+## Documentation
 
-**A vault library, not one favourite.** Work and personal are two vaults, and `db` in a config file
-only ever held one. `^v` lists every vault this machine has opened, newest first, and `enter` points
-the session at another without a restart. [More](docs/keys.md).
+| Guide                                         | What it covers                                              |
+| --------------------------------------------- | ----------------------------------------------------------- |
+| [Keys](docs/keys.md)                          | every key, the unlock screen, the mouse and the menus       |
+| [The desktop app](docs/desktop.md)            | building, installing and using the window                   |
+| [Finding entries](docs/search.md)             | fuzzy search, tags, expiry dates and sort order             |
+| [One-time codes](docs/one-time-codes.md)      | adding codes, including from a QR screenshot                |
+| [Vaults, sync and safety nets](docs/vaults.md) | several vaults, merging, backups, undo and history         |
+| [Generating passwords](docs/generate.md)      | passwords, passphrases and PINs, in the app and from a script |
+| [Auditing](docs/audit.md)                     | what gets flagged, and the breach check                     |
+| [Importing](docs/import.md) · [Exporting](docs/export.md) | moving between password managers              |
+| [Older KDBX files](docs/kdbx3.md)             | KDBX 3.1 and `sennel convert`                               |
+| [sennel get](docs/get.md)                     | secrets from the command line                               |
+| [Themes](docs/themes.md)                      | six palettes, and how their contrast is measured            |
+| [Configuration](docs/configuration.md)        | every setting in the config file                            |
+| [Security](docs/security.md)                  | what is wiped, when, and why                                |
+| [Reference for AI agents](docs/agents.md)     | every scriptable command, also indexed in [`llms.txt`](llms.txt) |
 
-**A YubiKey, if the vault has one.** `yubikey = "2"` opens KeePassXC vaults keyed to a challenge-response
-slot. Each save asks the key again, so Sennel says when to touch it. [More](docs/security.md).
-
-**Touch ID after a lock, on a Mac.** Set `touch_id = true`, and once you have typed the password, `enter` on
-the lock screen takes a fingerprint instead. It lasts until you quit. [More](docs/security.md).
-
-**SSH keys for your agent.** Off until you set `ssh_agent = true`. Then unlocking a vault gives `ssh-agent`
-the keys that KeePassXC's KeeAgent settings mark "add at database open", each with a lifetime so a crash
-cannot leave one there, and locking takes them back. [More](docs/security.md).
-
-**Backups that stay home.** `backups = 3` keeps copies in `~/.local/state/sennel/backups`, never beside the
-vault where Dropbox or Drive would upload them. A password change deletes them, because they still open with
-the old one. [More](docs/security.md).
-
-**Older vaults are welcome.** KDBX 3.1 opens read-only. `sennel convert` writes a verified KDBX 4
-copy beside the original. [More](docs/kdbx3.md).
-
-**It will not clobber another writer.** If KeePassXC or a sync client writes the vault while you
-have it open, the next autosave refuses rather than quietly winning. `^f` merges both sides' changes,
-`^s` keeps yours, `^r` takes theirs.
-
-**Tags and expiry dates it reads.** A needle starting with `#` filters by tag instead of fuzzy
-matching, and lists the tags you have while you type it. Expired rows are marked `⧖`, and `!` puts
-them above the merely weak ones, because an expiry is a decision its owner already made.
-
-**One-time codes without handing over the seed.** Entries with a code are marked `⊙` and show the
-digits with a countdown. `t` copies them. The seed stays in the vault, because putting a permanent
-credential on the clipboard to save typing six digits is a bad trade. The seed box takes an
-`otpauth://` URL, the printed secret, or a Google Authenticator "export accounts" link with one
-account in it.
-
-**Pasting works.** Terminals that support it paste into the focused box as text, without the final
-newline pressing Enter. Pasted into the entry list it does nothing, so a clipboard full of letters
-cannot run commands.
-
-**Themes you pick by looking at them.** `^t` walks six palettes with the screen in front of you and
-keeps the one you stop on. The default, graphite, is the desktop app's. Every colour clears WCAG
-4.5:1 before it ships, and `NO_COLOR` still gives you a usable app.
-
-**Custom fields and attachments, not a count of them.** `F` opens what the five fixed rows cannot
-show: KeePassXC's custom string fields, and the files on an entry. `y` copies a field, `s` writes an
-attachment out, `a` and `f` add them.
-
-**It can forget, too.** Sennel's own edits write no history, so an old password is never kept behind
-your back. Entries from KeePassXC often arrive carrying one. `H` shows every version, and clears
-them for good.
-
-**Change the master password without leaving.** `^p` re-keys the vault in place, writing the file
-under the new password before the session swaps to it. A failed write leaves the old password
-working rather than a vault nobody can open.
-
-## More
-
-- [`sennel get`](docs/get.md), the non-interactive path
-- [Generating passwords](docs/generate.md), in the TUI and from a script
-- [Importing](docs/import.md) from KeePassXC, Bitwarden or 1Password
-- [Exporting](docs/export.md) to CSV or JSON
-- [Auditing](docs/audit.md), including the breach check
-- [Older KDBX files](docs/kdbx3.md) and `sennel convert`
-- [Keys and the unlock screen](docs/keys.md)
-- [Security](docs/security.md), the interesting one: what is wiped, when, and why
-- [The desktop app](docs/desktop.md), the same vaults in a native window
-- [Themes](docs/themes.md) and how the colours are measured
-- [Configuration](docs/configuration.md)
-- [CLI reference for AI agents](docs/agents.md), also indexed in [`llms.txt`](llms.txt)
-
-## Building
+## Building from source
 
 ```sh
 cargo build --release
@@ -158,19 +166,19 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-Rust 1.88+ (1.90+ for the desktop app), 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
+`sennel --check` prints what Sennel can see, such as the config, the vault and the clipboard, and
+needs no terminal. Shell completions and a man page come from the binary:
 
 ```sh
 sennel completions zsh > ~/.zfunc/_sennel    # bash, zsh, fish, elvish
 sennel man > /usr/local/share/man/man1/sennel.1
 ```
 
-The repository also holds `sennel-desktop`, a native window over the same core. Building it needs
-Node.js as well: see [docs/desktop.md](docs/desktop.md).
+The desktop app also needs Node.js. See [the desktop app](docs/desktop.md#building).
 
 ## License
 
-MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE.
+MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
 
 The passphrase wordlist is the [EFF large wordlist](https://www.eff.org/dice), CC-BY 3.0, minus four
 hyphenated entries.
