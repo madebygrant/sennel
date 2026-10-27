@@ -3,6 +3,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { call, secretCopy } from "./api.js";
   import { copyFeedback } from "./copied.svelte.js";
+  import { generate as makePassword } from "./generator.svelte.js";
   import Modal from "./Modal.svelte";
   import OtpCells from "./OtpCells.svelte";
 
@@ -62,7 +63,9 @@
 
   async function generate() {
     try {
-      password = await call("generate");
+      const made = await makePassword();
+      if (!made) return;
+      password = made.value;
       passwordTouched = true;
       reveal = true;
     } catch (why) {

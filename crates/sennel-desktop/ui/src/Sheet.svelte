@@ -1,20 +1,22 @@
 <script>
-  import { onMount, untrack } from "svelte";
+  import { onMount } from "svelte";
   import { call, secretCopy } from "./api.js";
   import Cells from "./Cells.svelte";
   import { copyFeedback } from "./copied.svelte.js";
+  import { KINDS, STYLES, chosen, generate } from "./generator.svelte.js";
   import Modal from "./Modal.svelte";
 
   let { sheet, say, reload, refresh, close, open } = $props();
 
   let rows = $state(null);
   let adding = $state(null);
-  let value = $state(untrack(() => sheet.value ?? ""));
+  let made = $state(null);
 
   const titles = { audit: "Needs attention", history: "History", fields: "Fields and attachments", generate: "Generated password" };
 
   async function load() {
     try {
+      if (sheet.kind === "generate") await another();
       if (sheet.kind === "audit") rows = await call("audit");
       if (sheet.kind === "history") rows = await call("history", { id: sheet.id });
       if (sheet.kind === "fields") rows = await call("fields", { id: sheet.id });
@@ -55,25 +57,80 @@
     }
   }
 
+  async function another(kind, size, style) {
+    try {
+      made = (await generate(kind, size, style)) ?? made;
+    } catch (why) {
+      say([{ level: "error", text: String(why) }]);
+    }
+  }
+
+  // These build on what was last asked for, not on `made`, which lags while a reply is in flight.
+  function resize(by) {
+    const kind = chosen.kind;
+    const [min, max] = chosen.bounds[kind] ?? [];
+    const size = chosen.sizes[kind];
+    if (size == null || min == null) return;
+    const want = Math.min(max, Math.max(min, size + by));
+    if (want !== size) another(kind, want);
+  }
+
+  function restyle(key) {
+    if (chosen.kind === "complex" && chosen.style) another("complex", undefined, { ...chosen.style, [key]: !chosen.style[key] });
+  }
+
+  // The terminal app's generator keys: t kind, - + size, u d s a characters.
+  function keys(event) {
+    if (sheet.kind !== "generate" || event.metaKey || event.ctrlKey || event.altKey || !chosen.kind) return;
+    const at = KINDS.findIndex(([k]) => k === chosen.kind);
+    const run = { t: () => another(KINDS[(at + 1) % KINDS.length][0]), "-": () => resize(-1), "+": () => resize(1), "=": () => resize(1), ...Object.fromEntries(STYLES.map(([style, key]) => [key, () => restyle(style)])) }[event.key];
+    if (!run) return;
+    event.preventDefault();
+    run();
+  }
+
   onMount(load);
 </script>
 
 <Modal label={titles[sheet.kind]} onclose={close}>
-  <section>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <section onkeydown={keys}>
     <header>
       <h2>{titles[sheet.kind]}</h2>
       <button onclick={close}>Close</button>
     </header>
 
     {#if sheet.kind === "generate"}
-      <div class="secret" use:fb.spot={"generated"}><Cells {value} /></div>
-      <div class="row">
-        <button onclick={async () => (value = await call("generate"))}>Another</button>
-        <button class="primary" onclick={() => copyOut("generated", "copy_text", { label: "the generated password", text: value })}>
-          {fb.copied === "generated" ? "Copied" : "Copy"}
-        </button>
+      <div class="generate">
+        <div class="kinds" role="radiogroup" aria-label="Kind">
+          {#each KINDS as [kind, label]}
+            <button role="radio" aria-checked={made?.kind === kind} class:on={made?.kind === kind} onclick={() => another(kind)}>{label}</button>
+          {/each}
+        </div>
+        {#if made}
+          <div class="secret" use:fb.spot={"generated"}><Cells value={made.value} words={made.kind === "passphrase"} /></div>
+          <div class="size">
+            <button aria-label="Shorter" disabled={made.size <= made.min} onclick={() => resize(-1)}>−</button>
+            <span>{made.amount}</span>
+            <button aria-label="Longer" disabled={made.size >= made.max} onclick={() => resize(1)}>+</button>
+            <span class="dim">~{Math.round(made.bits)} bits</span>
+          </div>
+          {#if made.kind === "complex"}
+            <div class="styles" role="group" aria-label="Characters">
+              {#each STYLES as [style, key, label, what]}
+                <button aria-pressed={made.style[style]} class:on={made.style[style]} title={`${what}  ${key}`} onclick={() => restyle(style)}>{label}</button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+        <div class="row">
+          <button onclick={() => another()}>Another</button>
+          <button class="primary" disabled={!made} onclick={() => copyOut("generated", "copy_text", { label: "the generated password", text: made.value })}>
+            {fb.copied === "generated" ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <p class="dim">[generator] in the config file sets where each kind starts. A kind, size or character set picked here, or with <kbd>t</kbd>, <kbd>-</kbd> <kbd>+</kbd> and <kbd>u</kbd> <kbd>d</kbd> <kbd>s</kbd> <kbd>a</kbd>, lasts until Sennel quits and is what Generate in the entry form makes.</p>
       </div>
-      <p class="dim">Length and style come from [generator] in the config file. Generate in the entry form puts one straight into the password box.</p>
     {:else if rows === null}
       <p class="dim">…</p>
     {:else if sheet.kind === "audit"}
@@ -188,6 +245,64 @@
   .actions button {
     padding: 3px 8px;
     font-size: 12px;
+  }
+
+  .generate {
+    display: grid;
+    gap: 8px;
+  }
+
+  .kinds {
+    display: flex;
+    gap: 4px;
+  }
+
+  .styles {
+    display: flex;
+    gap: 4px;
+  }
+
+  .styles button {
+    padding: 2px 9px;
+    font: 400 12px var(--mono);
+    color: var(--dim);
+  }
+
+  .styles button.on {
+    color: var(--text);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .kinds button {
+    padding: 3px 10px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+
+  .kinds button.on {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .size {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+
+  .size button {
+    width: 26px;
+    padding: 2px 0;
+  }
+
+  .size span:first-of-type {
+    min-width: 76px;
+    text-align: center;
+  }
+
+  .size .dim {
+    margin-left: 4px;
   }
 
   .row {

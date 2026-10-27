@@ -8,6 +8,7 @@ use std::time::Instant;
 use keepass::db::{EntryId, GroupId};
 use sennel_core::clipboard::Board;
 use sennel_core::config;
+use sennel_core::generator::Kind;
 use sennel_core::qr;
 use sennel_core::search::Searcher;
 use sennel_core::session::{
@@ -56,6 +57,39 @@ fn error(text: impl Into<String>) -> Note {
         level: Level::Error,
         text: text.into(),
     }
+}
+
+/// A generated password and its shape, so the window can name what it made.
+#[derive(Serialize, Debug)]
+pub struct Generated {
+    pub value: Zeroizing<String>,
+    pub kind: &'static str,
+    pub amount: String,
+    pub bits: f64,
+    /// Characters, words or digits, whichever the kind counts in, and the bounds the config is held to.
+    pub size: usize,
+    pub min: usize,
+    pub max: usize,
+    /// The character classes, which only shape the complex kind.
+    pub style: Style,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Style {
+    pub upper: bool,
+    pub digits: bool,
+    pub symbols: bool,
+    pub no_lookalikes: bool,
+}
+
+/// What the window asks of the generator; anything left out comes from the config.
+#[derive(Deserialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Pick {
+    pub kind: Option<String>,
+    pub size: Option<usize>,
+    pub style: Option<Style>,
 }
 
 #[derive(Serialize, Debug)]
@@ -745,8 +779,46 @@ impl Desk {
         }
     }
 
-    pub fn generate(&self) -> Result<Zeroizing<String>, String> {
-        self.settings.generator.make().map(Zeroizing::new)
+    // The config's kind and sizes are only the defaults; the window may ask for others per password.
+    pub fn generate(&self, pick: &Pick) -> Result<Generated, String> {
+        let mut generator = self.settings.generator;
+        if let Some(style) = pick.style {
+            generator.classes.upper = style.upper;
+            generator.classes.digits = style.digits;
+            generator.classes.symbols = style.symbols;
+            generator.exclude_ambiguous = style.no_lookalikes;
+        }
+        if let Some(name) = &pick.kind {
+            generator.kind = Kind::parse(name)
+                .ok_or_else(|| format!("unknown kind {name:?} · complex, passphrase or pin"))?;
+        }
+        let ((min, max), slot, unit) = match generator.kind {
+            Kind::Complex => (config::LENGTH_RANGE, &mut generator.length, "characters"),
+            Kind::Passphrase => (config::WORDS_RANGE, &mut generator.words, "words"),
+            Kind::Pin => (config::PIN_RANGE, &mut generator.pin_length, "digits"),
+        };
+        if let Some(size) = pick.size {
+            if !(min..=max).contains(&size) {
+                return Err(format!("between {min} and {max} {unit}"));
+            }
+            *slot = size;
+        }
+        let size = *slot;
+        Ok(Generated {
+            value: Zeroizing::new(generator.make()?),
+            kind: generator.kind.name(),
+            amount: generator.amount(),
+            bits: generator.bits(),
+            size,
+            min,
+            max,
+            style: Style {
+                upper: generator.classes.upper,
+                digits: generator.classes.digits,
+                symbols: generator.classes.symbols,
+                no_lookalikes: generator.exclude_ambiguous,
+            },
+        })
     }
 
     // Every change lands on disk before the reply, the autosave the terminal app makes.

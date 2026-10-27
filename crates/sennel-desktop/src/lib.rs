@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use desk::{
-    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Scanned,
-    Status, VersionRow,
+    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, Generated, GroupRow, Note, Pick,
+    Reply, Scanned, Status, VersionRow,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -146,8 +146,8 @@ async fn clear_clipboard(desk: Shared<'_>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn generate(desk: Shared<'_>) -> Result<Zeroizing<String>, String> {
-    off_main(&desk, Desk::generate).await?
+async fn generate(desk: Shared<'_>, pick: Pick) -> Result<Generated, String> {
+    off_main(&desk, move |d| d.generate(&pick)).await?
 }
 
 #[tauri::command]

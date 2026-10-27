@@ -73,7 +73,7 @@ them all, and `single_keys = false` in the config file turns the one-letter keys
 | a e D     | add, edit, delete an entry (D on a group deletes the group)    |
 | A E       | add, rename a group                                            |
 | X V       | cut an entry, paste it into the current group                  |
-| P         | generate a password                                            |
+| P         | generate a password; in it, t kind, - + size, u d s a characters |
 | / ⌘F      | search; in the box, ↑ ↓ pick, ⏎ copies the password, esc clears |
 | u         | undo the last change to the vault                              |
 | o         | order the entries: file order, name, newest, recently changed  |

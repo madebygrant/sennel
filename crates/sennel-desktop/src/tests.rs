@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use sennel_core::vault::Vault;
 
-use crate::desk::{Desk, EntryForm, Level, OtpShape, open_with};
+use crate::desk::{Desk, EntryForm, Level, OtpShape, Pick, Style, open_with};
 use crate::settings::Settings;
 
 fn vault() -> Vault {
@@ -398,4 +398,91 @@ fn a_yubikey_unlock_says_to_touch_it_first() {
         "{:?}",
         said.lock().unwrap()
     );
+}
+
+#[test]
+fn the_config_kind_is_only_the_default() {
+    let desk = Desk::new(Settings::default(), None);
+    let made = desk.generate(&pick(None, None)).unwrap();
+    assert_eq!((made.kind, made.value.len()), ("complex", 20));
+
+    let pin = desk.generate(&pick(Some("pin"), None)).unwrap();
+    assert_eq!(pin.kind, "pin");
+    assert!(pin.value.chars().all(|c| c.is_ascii_digit()));
+
+    let words = desk.generate(&pick(Some("passphrase"), None)).unwrap();
+    assert_eq!(words.value.split('-').count(), 6);
+    assert_eq!(
+        desk.generate(&pick(None, None)).unwrap().kind,
+        "complex",
+        "a pick for one password stuck"
+    );
+
+    assert!(desk.generate(&pick(Some("words"), None)).is_err());
+}
+
+#[test]
+fn a_size_counts_in_the_kind_and_keeps_to_the_config_bounds() {
+    let desk = Desk::new(Settings::default(), None);
+    assert_eq!(
+        desk.generate(&pick(None, Some(32))).unwrap().value.len(),
+        32
+    );
+    let words = desk.generate(&pick(Some("passphrase"), Some(3))).unwrap();
+    assert_eq!((words.value.split('-').count(), words.size), (3, 3));
+    assert_eq!(
+        desk.generate(&pick(Some("pin"), Some(8)))
+            .unwrap()
+            .value
+            .len(),
+        8
+    );
+
+    assert!(
+        desk.generate(&pick(None, Some(3))).is_err(),
+        "shorter than the config allows"
+    );
+    assert!(desk.generate(&pick(Some("pin"), Some(13))).is_err());
+    assert_eq!(
+        desk.generate(&pick(None, None)).unwrap().size,
+        20,
+        "a size for one password stuck"
+    );
+}
+
+fn pick(kind: Option<&str>, size: Option<usize>) -> Pick {
+    Pick {
+        kind: kind.map(str::to_string),
+        size,
+        style: None,
+    }
+}
+
+#[test]
+fn a_style_shapes_the_password_for_that_password_only() {
+    let desk = Desk::new(Settings::default(), None);
+    let style = Style {
+        upper: false,
+        digits: false,
+        symbols: true,
+        no_lookalikes: true,
+    };
+    let made = desk
+        .generate(&Pick {
+            size: Some(64),
+            style: Some(style),
+            ..Pick::default()
+        })
+        .unwrap();
+    assert_eq!(made.style, style);
+    assert!(
+        !made
+            .value
+            .chars()
+            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    );
+    assert!(made.value.chars().any(|c| !c.is_ascii_alphanumeric()));
+
+    let plain = desk.generate(&Pick::default()).unwrap();
+    assert!(plain.style.upper && plain.style.digits && !plain.style.symbols);
 }

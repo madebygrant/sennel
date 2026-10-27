@@ -6,8 +6,12 @@
 </script>
 
 <script>
+  import { groupCells } from "./cells.js";
+
   // `value` is null while hidden, and `length` dots stand in, so revealing swaps each in place.
-  let { value, length = 12, textId } = $props();
+  // `words` reads the value as a passphrase: a group per word, with the dashes drawn between them. It
+  // applies once revealed, so the hidden row doesn't give the passphrase away, and the row reflows then.
+  let { value, length = 12, textId, words = false } = $props();
 
   // Each cell rolls through its own kind of character, so the row's makeup shows before it settles.
   const POOLS = { "": "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ", digit: "0123456789", symbol: "!#$%&*+-=?@^_~" };
@@ -15,6 +19,9 @@
   const FLASH = 140;
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const chars = $derived(value === null ? null : [...value]);
+  const shown = $derived(chars ?? Array(length).fill("•"));
+  // Indexes into `shown`, so settling still runs left to right across the groups.
+  const groups = $derived(groupCells(shown, words && chars !== null));
 
   // While settling, each cell shows a passing glyph until its turn, then flashes once as it lands.
   let glyphs = $state(null);
@@ -23,9 +30,8 @@
 
   // Cells narrow so most passwords keep to one line; CSSOM, since the CSP refuses style attributes.
   $effect(() => {
-    const n = chars?.length ?? length;
-    row.style.setProperty("--n", n);
-    row.style.setProperty("--splits", Math.floor((n - 1) / 5));
+    row.style.setProperty("--n", groups.reduce((n, g) => n + g.length, 0));
+    row.style.setProperty("--splits", groups.length - 1);
   });
 
   $effect(() => {
@@ -55,11 +61,16 @@
 
 <!-- Not selectable: a native copy would skip the clipboard clear, so Copy is the way out. -->
 <div class="cells" bind:this={row} class:open={chars !== null} aria-hidden="true">
-  {#each chars ?? Array(length).fill("•") as c, i}
-    {#if i && i % 5 === 0}<span class="split"></span>{/if}
-    <span class="cell">
-      <b class={chars ? kind(c) : ""} class:scrambled={glyphs?.[i]} class:landing={landing?.[i]}>{glyphs?.[i] ?? c}</b>
-      <small>{chars ? i + 1 : ""}</small>
+  {#each groups as group, g}
+    <span class="group">
+      {#each group as i}
+        <span class="cell">
+          <b class={chars ? kind(shown[i]) : ""} class:scrambled={glyphs?.[i]} class:landing={landing?.[i]}>{glyphs?.[i] ?? shown[i]}</b>
+          {#if !(words && chars)}<small>{chars ? i + 1 : ""}</small>{/if}
+        </span>
+      {/each}
+      <!-- Only passphrases have more than one group. The dash rides at the end of its word, so a wrapped line never starts with one. -->
+      {#if g < groups.length - 1}<span class="split">-</span>{/if}
     </span>
   {/each}
 </div>
@@ -68,7 +79,7 @@
 <style>
   .cells {
     container-type: inline-size;
-    --cell: clamp(14px, (100cqw - var(--splits) * 10px + 2px) / var(--n) - 2px, 23px);
+    --cell: clamp(14px, (100cqw - var(--splits) * 18px + 2px) / var(--n) - 2px, 23px);
     display: flex;
     flex-wrap: wrap;
     gap: 6px 2px;
@@ -76,8 +87,20 @@
     user-select: none;
   }
 
+  .group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 2px;
+  }
+
+  /* A passphrase is typed as words, so the dash sits between them as a plain mark, not a cell. */
   .split {
-    width: 8px;
+    width: 16px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    font: 500 16px var(--mono);
+    color: var(--dim);
   }
 
   .cell {

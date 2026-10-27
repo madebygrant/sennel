@@ -7,7 +7,9 @@ could not honour. Three shapes: `complex` (characters from classes, the default)
 (words off an embedded list) and `pin` (digits, for the screens that take nothing else).
 
 - `P` in the browser opens the generator on its own, with no entry to store the result in.
-  `t` walks the three kinds.
+  `t` walks the three kinds. `kind` in the config is only where it starts. The desktop app's
+  generator has the same `t`, `-` `+` and `u` `d` `s` `a`, plus buttons for each, and its
+  Generate button in the entry form makes whatever you last picked there.
 
 - `^s` inside the add or edit form writes one straight into the password box.
   `^y` copies the password box, on the same wipe timer as every other copy, so it can go into

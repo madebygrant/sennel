@@ -37,6 +37,7 @@
   import { copyFeedback } from "./copied.svelte.js";
   import { combo, dispatch, shown } from "./keys.js";
   import Cells, { kind } from "./Cells.svelte";
+  import { looksLikePassphrase } from "./cells.js";
   import EntryForm from "./EntryForm.svelte";
   import HexField from "./HexField.svelte";
   import Modal from "./Modal.svelte";
@@ -313,7 +314,7 @@
         else confirmDelete("entry");
       },
     },
-    { name: "make", keys: "P", what: "generate a password, no entry needed", on: ["P"], run: async () => (sheet = { kind: "generate", value: await call("generate") }) },
+    { name: "make", keys: "P", what: "generate a password, no entry needed", on: ["P"], run: () => (sheet = { kind: "generate" }) },
     {
       name: "groups",
       keys: "A E D",
@@ -430,7 +431,7 @@
     <span class="sr" role="status">{cleared ? "Clipboard cleared" : ""}</span>
     <button class="tool" onclick={() => (form = { group })} title="New entry  a" aria-label="New entry"><Plus /></button>
     <button class="tool" onclick={() => askGroup("add")} title="New group  A" aria-label="New group"><FolderPlus /></button>
-    <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
+    <button class="tool" onclick={() => (sheet = { kind: "generate" })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
     <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
     <button class="tool" onclick={() => act("save")} title="Save  ⌘S" aria-label="Save"><Save /></button>
     <button class="tool" onclick={() => (rekeying = true)} title="Change master password  ⌘P" aria-label="Change master password"><KeyRound /></button>
@@ -546,7 +547,7 @@
         <div class="password" class:held={holding("password")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"password"}>
           <!-- Out of the tab order: the Copy button and p already cover the keyboard. -->
           <button class="grab" tabindex="-1" onclick={() => copy("password")} title="Click to copy" aria-label="Copy the password" aria-describedby="password-text">
-            <Cells value={revealed} length={detail.passwordLength} textId="password-text" />
+            <Cells value={revealed} length={detail.passwordLength} words={looksLikePassphrase(revealed)} textId="password-text" />
           </button>
           <div class="bar">
             <span class="meta">
