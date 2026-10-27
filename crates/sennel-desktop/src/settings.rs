@@ -20,6 +20,7 @@ pub struct Settings {
     pub ssh_agent: bool,
     pub ssh_lifetime: u32,
     pub touch_id: bool,
+    pub single_keys: bool,
     pub generator: Generator,
 }
 
@@ -37,6 +38,7 @@ impl Default for Settings {
             ssh_agent: false,
             ssh_lifetime: 3600,
             touch_id: false,
+            single_keys: true,
             generator: Generator::default(),
         }
     }
@@ -71,6 +73,7 @@ impl Settings {
             ssh_agent: file.ssh_agent.unwrap_or(false),
             ssh_lifetime: config::lifetime(file.ssh_agent_lifetime).map_err(fail)?,
             touch_id: file.touch_id.unwrap_or(false) && cfg!(target_os = "macos"),
+            single_keys: file.single_keys.unwrap_or(true),
             generator: config::generator(file.generator.as_ref()).map_err(fail)?,
         })
     }

@@ -27,6 +27,8 @@ mouse = true                   # wheel scrolls, click selects, menus in the head
 touch_id = false               # macOS: after a lock, enter on an empty password box
                                # takes a fingerprint · lasts until you quit
                                # · see docs/security.md
+single_keys = true             # desktop app: one-letter keys such as p to copy ·
+                               # false leaves ⌘F, ⌘S and ⌘L · the terminal ignores it
 
 [generator]                    # the default for ^s in a form, P on its own,
                                # and sennel gen

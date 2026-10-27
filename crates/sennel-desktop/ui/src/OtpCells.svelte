@@ -66,7 +66,7 @@
     place-items: center;
     overflow: hidden;
     border-radius: 3px;
-    background: var(--bg);
+    background: var(--panel);
     color: var(--faint);
     font: 400 13px var(--mono);
   }

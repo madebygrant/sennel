@@ -58,20 +58,31 @@ The main window has groups on the left, entries in the middle and the selected e
 Typing in the search box at the top searches the whole vault. `#wo` instead lists the entries with a tag
 starting `wo`, so `#work` finds what is tagged work and not "homework". Drag an entry onto a group to move it.
 
-| Key | Does                                  |
-| --- | ------------------------------------- |
-| ⌘F  | search; in the box, ↑ ↓ pick, ⏎ copies the password, esc clears |
-| ⌘C  | copy the selected entry's password    |
-| ⌘B  | copy its username                     |
-| ⌘O  | copy its one-time code                |
-| ⌘N  | new entry                             |
-| ⌘Z  | undo the last change to the vault     |
-| ⌘L  | lock                                  |
-| ↑ ↓ | move through the entries              |
+The keys are the terminal app's: a single key for each action, working whenever the cursor is not in
+a text box, and ⌘ where the terminal uses Ctrl. ⌘F also searches, as in most Mac apps. `h` lists
+them all, and `single_keys = false` in the config file turns the one-letter keys off.
 
-In a text box ⌘C, ⌘Z and the rest keep their usual meaning, and with text selected anywhere ⌘C
-copies that text. Double-clicking an entry copies its password, and clicking the username, website
-or one-time code row copies that field. The clipboard's countdown sits at the top right.
+| Key       | Does                                                           |
+| --------- | -------------------------------------------------------------- |
+| j k ↑ ↓   | move through the focused pane; g G jump to the top, bottom     |
+| ← → tab   | switch between the groups and the entries                      |
+| y p U t   | copy the username, password, website, one-time code           |
+| ⏎         | on a group, go to its entries; on an entry, copy the password  |
+| \*        | show the password                                              |
+| a e D     | add, edit, delete an entry (D on a group deletes the group)    |
+| A E       | add, rename a group                                            |
+| X V       | cut an entry, paste it into the current group                  |
+| P         | generate a password                                            |
+| / ⌘F      | search; in the box, ↑ ↓ pick, ⏎ copies the password, esc clears |
+| u         | undo the last change to the vault                              |
+| ! F H     | needs attention, fields and attachments, history               |
+| esc       | drop a cut entry, then clear the search                        |
+| ⌘S ⌘L     | save, lock                                                     |
+| h ?       | list the keys                                                  |
+
+In a text box ⌘C, ⌘Z and the rest keep their usual meaning. Double-clicking an entry copies its
+password, and clicking the username, website or one-time code row copies that field. The clipboard's
+countdown sits at the top right.
 
 Show lays the password out one character per numbered cell, with digits and symbols in their own
 colours, so it can be read out or typed elsewhere without counting. Entries that the audit flags

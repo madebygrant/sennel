@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     CalendarClock,
     Check,
@@ -32,6 +32,7 @@
   } from "@lucide/svelte";
   import { call } from "./api.js";
   import { copyFeedback } from "./copied.svelte.js";
+  import { combo, dispatch, shown } from "./keys.js";
   import Cells, { kind } from "./Cells.svelte";
   import EntryForm from "./EntryForm.svelte";
   import HexField from "./HexField.svelte";
@@ -39,7 +40,7 @@
   import OtpCells from "./OtpCells.svelte";
   import Sheet from "./Sheet.svelte";
 
-  let { status, say, refresh, clears } = $props();
+  let { status, say, refresh, clears, hints = $bindable() } = $props();
 
   let groups = $state([]);
   let group = $state(null);
@@ -54,6 +55,13 @@
   let sheet = $state(null);
   let prompt = $state(null);
   let searchBox;
+  let navBox;
+  let listBox;
+  // Which list j, k and D act on. The selection in the other pane dims.
+  let pane = $state("entries");
+  // An entry picked up with X, waiting for V in another group.
+  let cut = $state(null);
+  let help = $state(false);
 
   const fb = copyFeedback();
 
@@ -187,17 +195,148 @@
     if (id) act("move_entry", { id, group: target });
   }
 
+  function selectGroup(id) {
+    group = id;
+    needle = "";
+    loadRows();
+  }
+
+  function step(by) {
+    const list = pane === "groups" ? groups : rows;
+    if (!list.length) return;
+    const at = list.findIndex((r) => r.id === (pane === "groups" ? group : selected));
+    const to = list[Math.min(list.length - 1, Math.max(0, at + by))].id;
+    if (pane === "groups") selectGroup(to);
+    else pick(to);
+  }
+
+  $effect(() => {
+    [group, selected];
+    tick().then(() => {
+      navBox?.querySelector(".group.active")?.scrollIntoView({ block: "nearest" });
+      listBox?.querySelector(".entry.active")?.scrollIntoView({ block: "nearest" });
+    });
+  });
+
+  const COPIES = { y: "username", p: "password", U: "url", t: "otp" };
+  // A clicked row keeps focus on Linux, yet the keys act on the selection, not on that row.
+  const isRow = (el) => el?.matches?.(".group:not(.smart), .entry");
+
+  // The terminal app's keys, from its BROWSER_KEYS table, in its order. The handler, the keys
+  // overlay and the footer hints all read this list.
+  const actions = [
+    { name: "move", keys: "j k  ↑ ↓", what: "through the focused pane", on: ["j", "k", "ArrowDown", "ArrowUp"], repeats: true, run: (k) => step(k === "j" || k === "ArrowDown" ? 1 : -1) },
+    { name: "ends", keys: "g G", what: "top, bottom of the pane", on: ["g", "G"], run: (k) => step(k === "g" ? -Infinity : Infinity) },
+    {
+      name: "panes",
+      keys: "← →  tab",
+      what: "groups, entries",
+      on: ["ArrowLeft", "ArrowRight", "Tab"],
+      run: (k) => {
+        // Tab only while nothing but a row has focus, so it still walks the buttons for keyboard users.
+        if (k === "Tab" && document.activeElement !== document.body && !isRow(document.activeElement)) return false;
+        pane = k === "ArrowLeft" ? "groups" : k === "ArrowRight" ? "entries" : pane === "groups" ? "entries" : "groups";
+      },
+    },
+    { name: "open", keys: "enter", what: "group: its entries · entry: copy the password", on: ["Enter"], run: () => (pane === "groups" ? (pane = "entries") : selected ? copy("password") : false) },
+    {
+      name: "copy",
+      keys: "y p U t",
+      what: "username, password, website, one-time code",
+      on: Object.keys(COPIES),
+      when: () => selected,
+      run: (k) => {
+        const field = COPIES[k];
+        if ((field === "otp" && !detail?.hasOtp) || (field === "url" && !detail?.url)) return false;
+        copy(field);
+      },
+    },
+    { name: "reveal", keys: "*", what: "show the password", on: ["*"], when: () => detail?.hasPassword, run: toggleReveal },
+    {
+      name: "edit",
+      keys: "a e D",
+      what: "add, edit, delete entry",
+      on: ["a", "e", "D"],
+      run: (k) => {
+        if (k === "a") form = { group };
+        else if (pane !== "entries" || !detail) return false;
+        else if (k === "e") form = { id: detail.id, detail };
+        else confirmDelete("entry");
+      },
+    },
+    { name: "make", keys: "P", what: "generate a password, no entry needed", on: ["P"], run: async () => (sheet = { kind: "generate", value: await call("generate") }) },
+    {
+      name: "groups",
+      keys: "A E D",
+      what: "add, rename, delete group",
+      on: ["A", "E", "D"],
+      when: () => pane === "groups",
+      run: (k) => {
+        if (k === "A") askGroup("add");
+        else if (!current?.depth) return false;
+        else if (k === "E") askGroup("rename");
+        else confirmDelete("group");
+      },
+    },
+    {
+      name: "cut",
+      keys: "X V",
+      what: "cut an entry, paste it into the current group",
+      on: ["X", "V"],
+      run: (k) => {
+        if (k === "X" && detail) cut = { id: detail.id, title: detail.title || "(untitled)" };
+        else if (k === "V" && cut) {
+          act("move_entry", { id: cut.id, group });
+          cut = null;
+        } else return false;
+      },
+    },
+    { name: "find", keys: "/  ^f", what: "search the vault", on: ["/", "^f"], run: () => searchBox?.focus() },
+    { name: "undo", keys: "u", what: "one level", on: ["u"], run: () => act("undo") },
+    { name: "save", keys: "^s", what: "save now", on: ["^s"], run: () => act("save") },
+    { name: "lock", keys: "^l", what: "lock now", on: ["^l"], run: () => act("lock") },
+    { name: "audit", keys: "!", what: "reused, weak, expired and empty passwords", on: ["!"], run: () => (sheet = { kind: "audit" }) },
+    { name: "fields", keys: "F", what: "custom fields and attachments", on: ["F"], when: () => detail, run: () => (sheet = { kind: "fields", id: detail.id }) },
+    { name: "history", keys: "H", what: "old versions", on: ["H"], when: () => detail, run: () => (sheet = { kind: "history", id: detail.id }) },
+    {
+      name: "back",
+      keys: "esc",
+      what: "drop the cut entry, then clear the search",
+      on: ["Escape"],
+      run: () => {
+        if (cut) cut = null;
+        else if (needle) {
+          needle = "";
+          loadRows();
+        } else return false;
+      },
+    },
+    { name: "keys", keys: "h ?", what: "this table", on: ["h", "?"], run: () => (help = true) },
+  ];
+
+  $effect(() => {
+    const bar = cut
+      ? [["V", `paste ${cut.title} here`], ["esc", "keep it where it is"]]
+      : pane === "groups"
+        ? [["j k", "move"], ["→", "entries"], ["A", "add group"], ...(current?.depth ? [["E", "rename"]] : [])]
+        : selected
+          ? [["p", "password"], ["y", "user"], ...(detail?.hasOtp ? [["t", "code"]] : []), ["e", "edit"], ["/", "find"]]
+          : [["a", "add"], ["/", "find"]];
+    hints = status.singleKeys ? [...bar, ["h", "keys"]].map(([k, label]) => [shown(k), label]) : [];
+  });
+
   function keys(event) {
-    if (form || sheet || prompt) return;
-    const mod = event.metaKey || event.ctrlKey;
-    // The search box hands arrows, Enter and an unselected ⌘C to the list, so ⌘F, type, Enter copies.
-    // Other text boxes keep their usual keys; only search and lock stay global there.
-    const inSearch = event.target === searchBox;
-    const typing = !inSearch && event.target.closest?.("input, textarea");
-    if (typing && !(mod && (event.key === "f" || event.key === "l"))) return;
-    if (inSearch) {
-      const marked = searchBox.selectionStart !== searchBox.selectionEnd;
-      if (event.key === "Escape") {
+    if (form || sheet || prompt || event.altKey || event.defaultPrevented) return;
+    if (help) {
+      if (event.key === "h" || event.key === "?") help = false;
+      return;
+    }
+    const key = combo(event);
+    const target = event.target;
+    // The search box hands arrows and Enter to the list, so /, type, Enter copies.
+    // Text boxes keep their usual keys, ⌘C and ⌘Z included; only find, save and lock stay global there.
+    if (target === searchBox) {
+      if (key === "Escape") {
         event.preventDefault();
         if (needle) {
           needle = "";
@@ -205,40 +344,14 @@
         } else searchBox.blur();
         return;
       }
-      if (event.key === "Enter") {
-        event.preventDefault();
-        if (selected) copy("password");
-        return;
-      }
-      if (mod && (event.key === "z" || event.key === "a" || (event.key === "c" && marked))) return;
+      if (!["^f", "^s", "^l", "ArrowUp", "ArrowDown", "Enter"].includes(key)) return;
+      if (key === "Enter" || key.startsWith("Arrow")) pane = "entries";
+    } else if (target.closest?.("input, textarea")) {
+      if (!["^f", "^s", "^l"].includes(key)) return;
+    } else if (!isRow(target) && target.closest?.("button, a") && (key === "Enter" || key === " ")) {
+      return;
     }
-    if (mod && event.key === "f") {
-      event.preventDefault();
-      searchBox?.focus();
-    } else if (mod && event.key === "l") {
-      event.preventDefault();
-      act("lock");
-    } else if (mod && event.key === "z") {
-      event.preventDefault();
-      act("undo");
-    } else if (mod && event.key === "n") {
-      event.preventDefault();
-      form = { group };
-    } else if (mod && event.key === "c" && selected && !window.getSelection()?.toString()) {
-      event.preventDefault();
-      copy("password");
-    } else if (mod && event.key === "b" && selected) {
-      event.preventDefault();
-      copy("username");
-    } else if (mod && event.key === "o" && detail?.hasOtp) {
-      event.preventDefault();
-      copy("otp");
-    } else if (!mod && (event.key === "ArrowDown" || event.key === "ArrowUp") && rows.length) {
-      event.preventDefault();
-      const at = rows.findIndex((r) => r.id === selected);
-      const to = event.key === "ArrowDown" ? Math.min(at + 1, rows.length - 1) : Math.max(at - 1, 0);
-      pick(rows[to].id);
-    }
+    if (dispatch(actions, event, { single: status.singleKeys })) event.preventDefault();
   }
 
   onMount(reload);
@@ -251,7 +364,7 @@
     <label class="search">
       <Search />
       <input bind:this={searchBox} bind:value={needle} oninput={loadRows} placeholder="Search the vault, #tag" spellcheck="false" aria-label="Search the vault" />
-      <kbd>⌘F</kbd>
+      <kbd>/</kbd>
     </label>
     <span class="gap"></span>
     {#if clears.left}
@@ -264,11 +377,11 @@
       <span class="clip cleared"><Check />Clipboard cleared</span>
     {/if}
     <span class="sr" role="status">{cleared ? "Clipboard cleared" : ""}</span>
-    <button class="tool" onclick={() => (form = { group })} title="New entry  ⌘N" aria-label="New entry"><Plus /></button>
-    <button class="tool" onclick={() => askGroup("add")} title="New group" aria-label="New group"><FolderPlus /></button>
-    <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password" aria-label="Generate a password"><WandSparkles /></button>
-    <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  ⌘Z` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
-    <button class="tool" onclick={() => act("save")} title="Save" aria-label="Save"><Save /></button>
+    <button class="tool" onclick={() => (form = { group })} title="New entry  a" aria-label="New entry"><Plus /></button>
+    <button class="tool" onclick={() => askGroup("add")} title="New group  A" aria-label="New group"><FolderPlus /></button>
+    <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
+    <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
+    <button class="tool" onclick={() => act("save")} title="Save  ⌘S" aria-label="Save"><Save /></button>
     <button class="tool" onclick={() => act("lock")} title="Lock  ⌘L" aria-label="Lock"><Lock /></button>
   </header>
 
@@ -281,7 +394,7 @@
     </div>
   {/if}
 
-  <nav aria-label="Groups">
+  <nav aria-label="Groups" class:focused={pane === "groups"} bind:this={navBox}>
     <HexField />
     <button class="group smart" class:alert={attention} onclick={() => (sheet = { kind: "audit" })}>
       <ShieldAlert /><span>Needs attention</span>
@@ -296,9 +409,8 @@
             class:bin={g.bin}
             aria-current={g.id === group ? "true" : undefined}
             onclick={() => {
-              group = g.id;
-              needle = "";
-              loadRows();
+              pane = "groups";
+              selectGroup(g.id);
             }}
             ondragover={(e) => e.preventDefault()}
             ondrop={(e) => dropOn(g.id, e)}
@@ -320,7 +432,7 @@
     {/if}
   </nav>
 
-  <section class="list" aria-label="Entries">
+  <section class="list" aria-label="Entries" class:focused={pane === "entries"} bind:this={listBox}>
     <ul>
       {#each rows as r (r.id)}
         <li>
@@ -328,7 +440,10 @@
             class="entry"
             class:active={r.id === selected}
             aria-current={r.id === selected ? "true" : undefined}
-            onclick={() => pick(r.id)}
+            onclick={() => {
+              pane = "entries";
+              pick(r.id);
+            }}
             ondblclick={() => copy("password")}
             draggable="true"
             ondragstart={(e) => e.dataTransfer.setData("text/sennel-entry", r.id)}
@@ -339,10 +454,11 @@
               <span>{r.username}</span>
             </span>
             {#if issues[r.id]}<span class="flag" title={issues[r.id]}></span>{/if}
+            {#if cut?.id === r.id}<span class="cutmark">cut</span>{/if}
           </button>
         </li>
       {:else}
-        <li class="empty dim">{needle ? "Nothing matches. Try fewer letters, or #tag." : "No entries here. ⌘N adds one."}</li>
+        <li class="empty dim">{needle ? "Nothing matches. Try fewer letters, or #tag." : "No entries here. a adds one."}</li>
       {/each}
     </ul>
   </section>
@@ -367,7 +483,7 @@
 
       {#if detail.hasPassword}
         <div class="password" class:held={holding("password")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"password"}>
-          <!-- Out of the tab order: the Copy button and ⌘C already cover the keyboard. -->
+          <!-- Out of the tab order: the Copy button and p already cover the keyboard. -->
           <button class="grab" tabindex="-1" onclick={() => copy("password")} title="Click to copy" aria-label="Copy the password" aria-describedby="password-text">
             <Cells value={revealed} length={detail.passwordLength} textId="password-text" />
           </button>
@@ -382,8 +498,8 @@
             <button class="icon" onclick={toggleReveal} title={revealed === null ? "Show" : "Hide"} aria-label={revealed === null ? "Show the password" : "Hide the password"}>
               {#if revealed === null}<Eye />{:else}<EyeOff />{/if}
             </button>
-            <button class="primary icon" onclick={() => copy("password")} title="Copy the password  ⌘C" aria-label={fb.copied === "password" ? "Copied" : "Copy the password"}>
-              {#if fb.copied === "password"}<Check />{:else}<Copy />{/if}<kbd>⌘C</kbd>
+            <button class="primary icon" onclick={() => copy("password")} title="Copy the password  p" aria-label={fb.copied === "password" ? "Copied" : "Copy the password"}>
+              {#if fb.copied === "password"}<Check />{:else}<Copy />{/if}<kbd>p</kbd>
             </button>
           </div>
         </div>
@@ -393,19 +509,19 @@
         {#if detail.username}
           <button class="field" class:done={fb.copied === "username"} class:held={holding("username")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"username"} onclick={() => copy("username")}>
             <span class="label"><User />Username</span><span class="value lit">{detail.username}</span>
-            <span class="hint">{#if fb.copied === "username"}<Check />Copied{:else}<Copy />⌘B{/if}</span>
+            <span class="hint">{#if fb.copied === "username"}<Check />Copied{:else}<Copy />y{/if}</span>
           </button>
         {/if}
         {#if detail.url}
           <button class="field" class:done={fb.copied === "url"} class:held={holding("url")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"url"} onclick={() => copy("url")}>
             <span class="label"><Globe />Website</span><span class="value lit">{detail.url}</span>
-            <span class="hint">{#if fb.copied === "url"}<Check />Copied{:else}<Copy />{/if}</span>
+            <span class="hint">{#if fb.copied === "url"}<Check />Copied{:else}<Copy />U{/if}</span>
           </button>
         {/if}
         {#if detail.hasOtp}
           <button class="field" class:done={fb.copied === "otp"} class:held={holding("otp")} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={"otp"} onclick={() => copy("otp")} title="Copied, never shown">
             <span class="label"><Timer />One-time code</span>{#if detail.otp}<span class="value"><OtpCells period={detail.otp.period} digits={detail.otp.digits} /></span>{:else}<span class="value quiet">Can't read this code</span>{/if}
-            <span class="hint">{#if fb.copied === "otp"}<Check />Copied{:else}<Copy />⌘O{/if}</span>
+            <span class="hint">{#if fb.copied === "otp"}<Check />Copied{:else}<Copy />t{/if}</span>
           </button>
         {/if}
         {#if detail.tags}
@@ -444,6 +560,25 @@
 
 {#if sheet}
   <Sheet {sheet} {say} {reload} {refresh} close={() => (sheet = null)} open={(id) => { sheet = null; group = null; needle = ""; pick(id); }} />
+{/if}
+
+{#if help}
+  <Modal label="Keys" onclose={() => (help = false)}>
+    <section class="keys">
+      <header>
+        <h2>Keys</h2>
+        <button onclick={() => (help = false)}>Close</button>
+      </header>
+      <dl>
+        {#each actions as a}
+          <dt>{a.name}</dt>
+          <dd><kbd>{shown(a.keys)}</kbd></dd>
+          <dd>{shown(a.what)}</dd>
+        {/each}
+      </dl>
+      <p class="dim">Single keys work when the cursor is not in a text box. The same keys as the terminal app.</p>
+    </section>
+  </Modal>
 {/if}
 
 {#if prompt}
@@ -673,6 +808,14 @@
     background: var(--raised);
   }
 
+  nav:not(.focused) .group.active {
+    background: color-mix(in oklab, var(--raised) 50%, transparent);
+  }
+
+  nav:not(.focused) .group.active > :global(svg) {
+    color: var(--dim);
+  }
+
   .group.active > :global(svg) {
     color: var(--accent-text);
   }
@@ -800,6 +943,27 @@
   .entry.active .initial {
     background: var(--accent);
     color: var(--accent-ink);
+  }
+
+  .list:not(.focused) .entry.active {
+    background: color-mix(in oklab, var(--raised) 50%, transparent);
+  }
+
+  .list:not(.focused) .entry.active .initial {
+    background: var(--raised);
+    color: var(--accent-text);
+  }
+
+  .cutmark {
+    font: 11px var(--mono);
+    color: var(--accent-text);
+    border: 1px dashed var(--accent-text);
+    border-radius: 3px;
+    padding: 0 5px;
+  }
+
+  .entry:has(.cutmark) {
+    opacity: 0.7;
   }
 
   .initial.big {
@@ -1014,6 +1178,58 @@
   .entry-actions {
     display: flex;
     gap: 8px;
+  }
+
+  .keys {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 24px 60px -24px rgb(0 0 0 / 0.6);
+    padding: 16px 18px;
+    width: min(760px, calc(100vw - 40px));
+    max-height: calc(100vh - 40px);
+    overflow: auto;
+    display: grid;
+    gap: 12px;
+  }
+
+  .keys header {
+    grid-area: auto;
+    padding: 0;
+    border: 0;
+    justify-content: space-between;
+  }
+
+  .keys h2 {
+    font-size: 18px;
+  }
+
+  .keys dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 6px 18px;
+    font-size: 13px;
+  }
+
+  .keys dt {
+    color: var(--dim);
+  }
+
+  .keys dd {
+    margin: 0;
+  }
+
+  .keys kbd {
+    font: 12.5px var(--mono);
+    color: var(--accent-text);
+    opacity: 1;
+    white-space: pre;
+  }
+
+  .keys p {
+    margin: 0;
+    font-size: 12.5px;
   }
 
   .prompt {

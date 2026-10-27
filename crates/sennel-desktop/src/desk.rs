@@ -74,6 +74,7 @@ pub struct Status {
     pub clipboard: Option<String>,
     pub locks_in: Option<u64>,
     pub lock_after: Option<u64>,
+    pub single_keys: bool,
     pub undo: Option<String>,
 }
 
@@ -334,6 +335,7 @@ impl Desk {
                 .locks_in(Instant::now())
                 .map(|left| left.as_secs() + u64::from(left.subsec_millis() > 0)),
             lock_after: (self.settings.lock_timeout > 0).then_some(self.settings.lock_timeout),
+            single_keys: self.settings.single_keys,
             undo,
         }
     }

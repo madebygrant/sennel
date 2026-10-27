@@ -38,6 +38,8 @@ pub struct FileConfig {
     pub mouse: Option<bool>,
     /// Enter on an empty password box unlocks with a fingerprint after a lock.
     pub touch_id: Option<bool>,
+    /// The desktop window's one-letter keys, such as `p` to copy. Off leaves the ⌘ keys only.
+    pub single_keys: Option<bool>,
 }
 
 /// What `^s` produces. Hard-coded before this — 20 characters, no symbols —

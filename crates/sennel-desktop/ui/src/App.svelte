@@ -16,6 +16,7 @@
   let copies = $state(0);
   let now = $state(Date.now());
   const clearsIn = $derived(Math.max(0, Math.ceil((clearsAt - now) / 1000)));
+  let hints = $state([]);
   let lockAt = $state(0);
   const lockAfter = $derived(status?.lockAfter ?? 0);
   const locksIn = $derived(Math.max(0, Math.ceil((lockAt - now) / 1000)));
@@ -77,7 +78,7 @@
 {#if status === null}
   <main class="loading dim">…</main>
 {:else if status.open}
-  <Browser {status} {say} {refresh} clears={{ left: clearsIn, total: clearsFrom, copies }} />
+  <Browser {status} {say} {refresh} bind:hints clears={{ left: clearsIn, total: clearsFrom, copies }} />
   {#if lockAt && lockAfter}<LockVeil left={locksIn} total={lockAfter} />{/if}
 {:else}
   <Unlock {status} {say} {refresh} />
@@ -87,6 +88,11 @@
   <span class="note" role="status">{note?.text ?? ""}</span>
   {#if clearsIn && !status?.open}
     <span class="dim">clipboard clears in {clearsIn}s</span>
+  {/if}
+  {#if status?.open}
+    <span class="hints">
+      {#each hints as [k, label]}<span><kbd>{k}</kbd>{label}</span>{/each}
+    </span>
   {/if}
   {#if status?.open && lockAt && locksIn <= Math.min(30, lockAfter * 0.4)}
     <span class="level-warn">locks in {locksIn}s</span>
@@ -146,6 +152,24 @@
     border-top: 1px solid var(--line);
     background: var(--panel);
     font-size: 12.5px;
+  }
+
+  .hints {
+    display: flex;
+    gap: 14px;
+    color: var(--faint);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .hints span {
+    display: flex;
+    gap: 5px;
+  }
+
+  .hints kbd {
+    font: 12px var(--mono);
+    color: var(--accent-text);
   }
 
   .note {
