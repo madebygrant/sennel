@@ -18,6 +18,7 @@
   --action: "Chakra Petch", var(--font);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   color-scheme: dark;
+  scrollbar-color: var(--line) transparent;
 }
 
 @media (prefers-color-scheme: light) {
@@ -76,6 +77,15 @@ textarea {
   width: 100%;
 }
 
+::placeholder {
+  color: var(--dim);
+  opacity: 1;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
 input:focus,
 textarea:focus {
   outline: 1px solid var(--accent);
@@ -88,6 +98,10 @@ button {
   border: 0;
   border-radius: var(--radius);
   padding: 6px 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   font-family: var(--action);
   font-weight: 500;
   cursor: pointer;
@@ -140,4 +154,51 @@ button:disabled {
 
 .dim {
   color: var(--dim);
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.glitch {
+  animation: glitch 300ms steps(2) both;
+}
+
+@keyframes glitch {
+  0% {
+    clip-path: inset(10% 0 60% 0);
+    transform: translateX(-6px);
+  }
+  33% {
+    clip-path: inset(55% 0 10% 0);
+    transform: translateX(5px);
+  }
+  66% {
+    clip-path: inset(30% 0 35% 0);
+    transform: translateX(-2px);
+  }
+  100% {
+    clip-path: none;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glitch {
+    animation: none;
+  }
+}
+
+.lucide-icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.5;
+  flex: none;
 }

@@ -3,6 +3,7 @@
   import { call, on } from "./api.js";
   import Unlock from "./Unlock.svelte";
   import Browser from "./Browser.svelte";
+  import Modal from "./Modal.svelte";
 
   let status = $state(null);
   let note = $state(null);
@@ -21,8 +22,13 @@
     clearsAt = at;
   }
 
+  // Notes clear themselves so an old one never reads as news; problems stay up longer.
+  let noteTimer;
   function say(notes) {
-    if (notes?.length) note = notes[notes.length - 1];
+    if (!notes?.length) return;
+    note = notes[notes.length - 1];
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => (note = null), note.level === "info" ? 4000 : 10000);
   }
 
   // Keys and clicks restart the idle clock, at most every two seconds. Focus does not.
@@ -64,7 +70,7 @@
 {/if}
 
 <footer class:level-warn={note?.level === "warn"} class:level-error={note?.level === "error"}>
-  <span class="note">{note?.text ?? ""}</span>
+  <span class="note" role="status">{note?.text ?? ""}</span>
   {#if clearsIn && !status?.open}
     <span class="dim">clipboard clears in {clearsIn}s</span>
   {/if}
@@ -74,29 +80,23 @@
 </footer>
 
 {#if asking}
-  <div class="scrim">
+  <Modal label="Quit" onclose={() => (asking = false)}>
     <div class="ask">
       <p>Some changes could not be saved. Quit and lose them?</p>
       <div class="row">
-        <button onclick={() => (asking = false)}>Stay</button>
+        <!-- svelte-ignore a11y_autofocus -->
+        <button onclick={() => (asking = false)} autofocus>Stay</button>
         <button class="danger" onclick={() => call("quit")}>Quit</button>
       </div>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    background: rgb(0 0 0 / 0.45);
-    display: grid;
-    place-items: center;
-  }
-
   .ask {
     background: var(--panel);
-    border-left: 3px solid var(--accent);
+    border: 1px solid var(--line);
+    box-shadow: 0 24px 60px -24px rgb(0 0 0 / 0.6);
     border-radius: var(--radius);
     padding: 18px;
     width: min(380px, 92vw);

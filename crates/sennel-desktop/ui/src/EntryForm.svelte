@@ -1,6 +1,8 @@
 <script>
   import { onMount, untrack } from "svelte";
   import { call, secretCopy } from "./api.js";
+  import { copyFeedback } from "./copied.svelte.js";
+  import Modal from "./Modal.svelte";
 
   // `form.id` edits that entry; otherwise a new one goes in `form.group`.
   let { form, say, close } = $props();
@@ -65,16 +67,40 @@
     }
   }
 
+  const fb = copyFeedback();
+  const dirty = $derived(
+    title !== (d.title ?? "") ||
+      username !== (d.username ?? "") ||
+      url !== (d.url ?? "") ||
+      notes !== (d.notes ?? "") ||
+      tags !== (d.tags ?? "") ||
+      expires !== (d.expires ?? "") ||
+      password !== "" ||
+      otpTouched,
+  );
+  // Set while asking whether to throw away what was typed.
+  let confirming = $state(false);
+  let keepButton = $state();
+  $effect(() => keepButton?.focus());
+
+  async function copyPassword() {
+    const note = await call("copy_text", { label: "password", text: password });
+    say([note]);
+    if (note.level !== "error") fb.mark("password");
+  }
+
   function cancel() {
+    if (dirty && !confirming) {
+      confirming = true;
+      return;
+    }
     password = "";
     otp = "";
     close(null);
   }
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && cancel()} />
-
-<div class="scrim">
+<Modal label={form.id ? "Edit entry" : "New entry"} onclose={() => (confirming ? (confirming = false) : cancel())}>
   <form onsubmit={submit}>
     <h2>{form.id ? "Edit entry" : "New entry"}</h2>
     <label>Title <input bind:this={titleBox} bind:value={title} /></label>
@@ -83,13 +109,14 @@
       <span class="split">
         Password
         <span>
-          <button type="button" class="link" onclick={() => (reveal = !reveal)}>{reveal ? "hide" : "show"}</button>
-          <button type="button" class="link" onclick={generate}>generate</button>
-          <button type="button" class="link" onclick={async () => say([await call("copy_text", { label: "password", text: password })])}>copy</button>
+          <button type="button" class="small" onclick={() => (reveal = !reveal)}>{reveal ? "Hide" : "Show"}</button>
+          <button type="button" class="small" onclick={generate}>Generate</button>
+          <button type="button" class="small" onclick={copyPassword}>{fb.copied === "password" ? "Copied" : "Copy"}</button>
         </span>
       </span>
       <input
         class="mono"
+        class:glitch={fb.glitch === "password"}
         type={reveal ? "text" : "password"}
         bind:value={password}
         oninput={() => (passwordTouched = true)}
@@ -118,34 +145,35 @@
       />
     </label>
     <label>Notes <textarea rows="4" bind:value={notes}></textarea></label>
-    <div class="row">
-      {#if form.detail?.hasOtp && !otpTouched}
-        <button type="button" class="danger" onclick={() => { otp = ""; otpTouched = true; }}>Remove code</button>
-      {/if}
-      <span class="gap"></span>
-      <button type="button" onclick={cancel}>Cancel</button>
-      <button class="primary" type="submit" disabled={busy}>{form.id ? "Save" : "Add"}</button>
-    </div>
+    {#if confirming}
+      <div class="row confirm" role="alert">
+        <span>Discard your changes?</span>
+        <span class="gap"></span>
+        <button type="button" bind:this={keepButton} onclick={() => (confirming = false)}>Keep editing</button>
+        <button type="button" class="danger" onclick={cancel}>Discard</button>
+      </div>
+    {:else}
+      <div class="row">
+        {#if form.detail?.hasOtp && !otpTouched}
+          <button type="button" class="danger" onclick={() => { otp = ""; otpTouched = true; }}>Remove code</button>
+        {/if}
+        <span class="gap"></span>
+        <button type="button" onclick={cancel}>Cancel</button>
+        <button class="primary" type="submit" disabled={busy}>{form.id ? "Save" : "Add"}</button>
+      </div>
+    {/if}
   </form>
-</div>
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    background: rgb(0 0 0 / 0.45);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-  }
-
   form {
     background: var(--panel);
-    border-left: 3px solid var(--accent);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
+    box-shadow: 0 24px 60px -24px rgb(0 0 0 / 0.6);
     padding: 18px 20px;
-    width: min(520px, 100%);
-    max-height: 100%;
+    width: min(520px, calc(100vw - 40px));
+    max-height: calc(100vh - 40px);
     overflow: auto;
     display: grid;
     gap: 11px;
@@ -153,7 +181,9 @@
 
   h2 {
     margin: 0 0 4px;
-    font-size: 17px;
+    font-family: var(--action);
+    font-size: 18px;
+    font-weight: 600;
   }
 
   label {
@@ -174,12 +204,16 @@
     justify-content: space-between;
   }
 
-  .link {
-    background: none;
-    border: none;
-    padding: 0 0 0 10px;
-    color: var(--accent);
-    font-size: 12.5px;
+  .small {
+    margin-left: 6px;
+    padding: 1px 8px;
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .confirm {
+    align-items: center;
+    color: var(--warn);
   }
 
   .pair {

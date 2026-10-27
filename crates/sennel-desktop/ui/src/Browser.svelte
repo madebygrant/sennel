@@ -1,8 +1,41 @@
 <script>
   import { onMount } from "svelte";
+  import {
+    CalendarClock,
+    Check,
+    Copy,
+    CornerDownRight,
+    CornerLeftUp,
+    Eye,
+    EyeOff,
+    Folder,
+    FolderOpen,
+    FolderPlus,
+    Globe,
+    Lock,
+    Paperclip,
+    Pencil,
+    Plus,
+    RefreshCw,
+    RotateCcwClock,
+    Save,
+    Search,
+    ShieldAlert,
+    Tag,
+    Timer,
+    Trash2,
+    TriangleAlert,
+    Undo2,
+    User,
+    Vault,
+    WandSparkles,
+  } from "@lucide/svelte";
   import { call } from "./api.js";
+  import { copyFeedback } from "./copied.svelte.js";
+  import Cells, { kind } from "./Cells.svelte";
   import EntryForm from "./EntryForm.svelte";
   import HexField from "./HexField.svelte";
+  import Modal from "./Modal.svelte";
   import Sheet from "./Sheet.svelte";
 
   let { status, say, refresh, clears } = $props();
@@ -21,24 +54,28 @@
   let prompt = $state(null);
   let searchBox;
 
-  let copied = $state(null);
-  let glitch = $state(null);
-  let copiedTimer;
+  const fb = copyFeedback();
 
-  // While decoding, each cell shows a passing glyph until its turn comes.
-  let glyphs = $state(null);
-  const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ0123456789ABCDEF<>*=+";
-  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // A brief closing beat once the countdown runs out and the clipboard is wiped.
+  let cleared = $state(false);
+  let lastLeft = 0;
+  let clearedTimer;
+  $effect(() => {
+    const left = clears.left;
+    if (lastLeft > 0 && left === 0) {
+      cleared = true;
+      clearTimeout(clearedTimer);
+      clearedTimer = setTimeout(() => (cleared = false), 2500);
+    }
+    if (left > 0) cleared = false;
+    lastLeft = left;
+  });
+
 
   const current = $derived(groups.find((g) => g.id === group));
   const chars = $derived(revealed === null ? null : [...revealed]);
   const attention = $derived(Object.keys(issues).length);
   const segments = $derived(clears.total ? Math.ceil((clears.left / clears.total) * 10) : 0);
-
-  function kind(c) {
-    if (/\d/.test(c)) return "digit";
-    return /[\p{L}]/u.test(c) ? "" : "symbol";
-  }
 
   async function loadTree() {
     groups = await call("tree");
@@ -59,7 +96,6 @@
   async function pick(id) {
     selected = id;
     revealed = null;
-    glyphs = null;
     detail = id ? await call("entry", { id }).catch(() => null) : null;
   }
 
@@ -87,35 +123,11 @@
     const note = await call("copy", { id: selected, field });
     say([note]);
     await refresh();
-    if (note.level === "error") return;
-    clearTimeout(copiedTimer);
-    copied = field;
-    copiedTimer = setTimeout(() => (copied = null), 1400);
-    if (still) return;
-    glitch = null;
-    requestAnimationFrame(() => (glitch = field));
-  }
-
-  function decode() {
-    if (still) return;
-    const start = performance.now();
-    const step = (now) => {
-      if (chars === null) return;
-      const next = chars.map((_, i) => (now - start < 180 + i * 45 ? GLYPHS[(Math.random() * GLYPHS.length) | 0] : null));
-      glyphs = next.some(Boolean) ? next : null;
-      if (glyphs) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
+    if (note.level !== "error") fb.mark(field);
   }
 
   async function toggleReveal() {
-    if (revealed !== null) {
-      revealed = null;
-      glyphs = null;
-      return;
-    }
-    revealed = await call("reveal", { id: selected });
-    decode();
+    revealed = revealed === null ? await call("reveal", { id: selected }) : null;
   }
 
   async function saved(reply) {
@@ -161,9 +173,28 @@
   function keys(event) {
     if (form || sheet || prompt) return;
     const mod = event.metaKey || event.ctrlKey;
-    // In a text box the usual editing keys keep their meaning; only search and lock stay global.
-    const typing = event.target.closest?.("input, textarea");
+    // The search box hands arrows, Enter and an unselected ⌘C to the list, so ⌘F, type, Enter copies.
+    // Other text boxes keep their usual keys; only search and lock stay global there.
+    const inSearch = event.target === searchBox;
+    const typing = !inSearch && event.target.closest?.("input, textarea");
     if (typing && !(mod && (event.key === "f" || event.key === "l"))) return;
+    if (inSearch) {
+      const marked = searchBox.selectionStart !== searchBox.selectionEnd;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (needle) {
+          needle = "";
+          loadRows();
+        } else searchBox.blur();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (selected) copy("password");
+        return;
+      }
+      if (mod && (event.key === "z" || event.key === "a" || (event.key === "c" && marked))) return;
+    }
     if (mod && event.key === "f") {
       event.preventDefault();
       searchBox?.focus();
@@ -182,6 +213,9 @@
     } else if (mod && event.key === "b" && selected) {
       event.preventDefault();
       copy("username");
+    } else if (mod && event.key === "o" && detail?.hasOtp) {
+      event.preventDefault();
+      copy("otp");
     } else if (!mod && (event.key === "ArrowDown" || event.key === "ArrowUp") && rows.length) {
       event.preventDefault();
       const at = rows.findIndex((r) => r.id === selected);
@@ -195,14 +229,10 @@
 
 <svelte:window onkeydown={keys} />
 
-{#snippet icon(path)}
-  <svg viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>
-{/snippet}
-
 <div class="shell">
   <header>
     <label class="search">
-      {@render icon("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4")}
+      <Search />
       <input bind:this={searchBox} bind:value={needle} oninput={loadRows} placeholder="Search the vault, #tag" spellcheck="false" aria-label="Search the vault" />
       <kbd>⌘F</kbd>
     </label>
@@ -212,13 +242,16 @@
         <span class="segs">{#each { length: 10 } as _, i}<i class:off={i >= segments}></i>{/each}</span>
         Clears in {clears.left}s
       </span>
+    {:else if cleared}
+      <span class="clip cleared"><Check />Clipboard cleared</span>
     {/if}
-    <button class="tool" onclick={() => (form = { group })} title="New entry  ⌘N" aria-label="New entry">{@render icon("M12 5v14M5 12h14")}</button>
-    <button class="tool" onclick={() => askGroup("add")} title="New group" aria-label="New group">{@render icon("M3 6h7l2 2h9v11H3zM12 11v6M9 14h6")}</button>
-    <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password" aria-label="Generate a password">{@render icon("M4 20l9-9M14 4l1 3 3 1-3 1-1 3-1-3-3-1 3-1z")}</button>
-    <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  ⌘Z` : "Nothing to undo"} aria-label="Undo">{@render icon("M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3")}</button>
-    <button class="tool" onclick={() => act("save")} title="Save" aria-label="Save">{@render icon("M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6")}</button>
-    <button class="tool" onclick={() => act("lock")} title="Lock  ⌘L" aria-label="Lock">{@render icon("M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3")}</button>
+    <span class="sr" role="status">{cleared ? "Clipboard cleared" : ""}</span>
+    <button class="tool" onclick={() => (form = { group })} title="New entry  ⌘N" aria-label="New entry"><Plus /></button>
+    <button class="tool" onclick={() => askGroup("add")} title="New group" aria-label="New group"><FolderPlus /></button>
+    <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password" aria-label="Generate a password"><WandSparkles /></button>
+    <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  ⌘Z` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
+    <button class="tool" onclick={() => act("save")} title="Save" aria-label="Save"><Save /></button>
+    <button class="tool" onclick={() => act("lock")} title="Lock  ⌘L" aria-label="Lock"><Lock /></button>
   </header>
 
   {#if status.conflict}
@@ -232,8 +265,8 @@
 
   <nav aria-label="Groups">
     <HexField />
-    <button class="group smart" onclick={() => (sheet = { kind: "audit" })}>
-      <span class:flag={attention}></span><span>Needs attention</span>
+    <button class="group smart" class:alert={attention} onclick={() => (sheet = { kind: "audit" })}>
+      <ShieldAlert /><span>Needs attention</span>
       <span class="count">{attention || ""}</span>
     </button>
     <ul>
@@ -243,6 +276,7 @@
             class="group depth-{Math.min(g.depth, 8)}"
             class:active={g.id === group}
             class:bin={g.bin}
+            aria-current={g.id === group ? "true" : undefined}
             onclick={() => {
               group = g.id;
               needle = "";
@@ -251,7 +285,8 @@
             ondragover={(e) => e.preventDefault()}
             ondrop={(e) => dropOn(g.id, e)}
           >
-            <span>{g.name}</span>
+            {#if g.bin}<Trash2 />{:else if g.depth === 0}<Vault />{:else if g.id === group}<FolderOpen />{:else}<Folder />{/if}
+            <span class="name">{g.name}</span>
             <span class="count">{g.entries || ""}</span>
           </button>
         </li>
@@ -259,10 +294,10 @@
     </ul>
     {#if current}
       <div class="group-actions">
-        <button onclick={() => askGroup("rename")} disabled={current.depth === 0}>Rename</button>
-        <button onclick={() => act("reparent", { id: group, deeper: true })} disabled={current.depth === 0} title="Into the group above" aria-label="Into the group above">→</button>
-        <button onclick={() => act("reparent", { id: group, deeper: false })} disabled={current.depth < 2} title="Out one level" aria-label="Out one level">←</button>
-        <button class="danger" onclick={() => confirmDelete("group")} disabled={current.depth === 0}>Delete</button>
+        <button onclick={() => askGroup("rename")} disabled={current.depth === 0}><Pencil />Rename</button>
+        <button onclick={() => act("reparent", { id: group, deeper: true })} disabled={current.depth === 0} title="Into the group above" aria-label="Into the group above"><CornerDownRight /></button>
+        <button onclick={() => act("reparent", { id: group, deeper: false })} disabled={current.depth < 2} title="Out one level" aria-label="Out one level"><CornerLeftUp /></button>
+        <button class="danger" onclick={() => confirmDelete("group")} disabled={current.depth === 0} title="Delete group" aria-label="Delete group"><Trash2 /></button>
       </div>
     {/if}
   </nav>
@@ -274,6 +309,7 @@
           <button
             class="entry"
             class:active={r.id === selected}
+            aria-current={r.id === selected ? "true" : undefined}
             onclick={() => pick(r.id)}
             ondblclick={() => copy("password")}
             draggable="true"
@@ -299,30 +335,21 @@
         <span class="initial big">{(detail.title || "?").slice(0, 1).toUpperCase()}</span>
         <div>
           <h2>{detail.title || "(untitled)"}</h2>
-          <p>{detail.group || "Root"}{detail.recycled ? ", in the recycle bin" : ""}</p>
+          <p><Folder />{detail.group || "Root"}{detail.recycled ? ", in the recycle bin" : ""}</p>
         </div>
       </div>
 
       {#if issues[detail.id]}
         <div class="issue">
-          <span class="flag"></span>
+          <TriangleAlert />
           <span>{issues[detail.id]}</span>
-          <button onclick={() => (form = { id: detail.id, detail })}>Change it</button>
+          <button onclick={() => (form = { id: detail.id, detail })}><RefreshCw />Change it</button>
         </div>
       {/if}
 
       {#if detail.hasPassword}
-        <div class="password" class:glitch={glitch === "password"}>
-          <!-- Not selectable: a native copy would skip the clipboard clear, so Copy is the way out. -->
-          <div class="cells" class:open={chars !== null}>
-            {#each chars ?? Array(12).fill("•") as c, i}
-              {#if i && i % 5 === 0}<span class="split"></span>{/if}
-              <span class="cell">
-                <b class={chars ? kind(c) : ""} class:scrambled={glyphs?.[i]}>{glyphs?.[i] ?? c}</b>
-                <small>{chars ? i + 1 : ""}</small>
-              </span>
-            {/each}
-          </div>
+        <div class="password" class:glitch={fb.glitch === "password"}>
+          <Cells value={revealed} />
           <div class="bar">
             <span class="meta">
               {#if chars}
@@ -331,39 +358,43 @@
                 Hidden
               {/if}
             </span>
-            <button onclick={toggleReveal}>{revealed === null ? "Show" : "Hide"}</button>
-            <button class="primary" onclick={() => copy("password")}>{copied === "password" ? "Copied" : "Copy"} <kbd>⌘C</kbd></button>
+            <button class="icon" onclick={toggleReveal} title={revealed === null ? "Show" : "Hide"} aria-label={revealed === null ? "Show the password" : "Hide the password"}>
+              {#if revealed === null}<Eye />{:else}<EyeOff />{/if}
+            </button>
+            <button class="primary icon" onclick={() => copy("password")} title="Copy the password  ⌘C" aria-label={fb.copied === "password" ? "Copied" : "Copy the password"}>
+              {#if fb.copied === "password"}<Check />{:else}<Copy />{/if}<kbd>⌘C</kbd>
+            </button>
           </div>
         </div>
       {/if}
 
       <div class="fields">
         {#if detail.username}
-          <button class="field" class:done={copied === "username"} class:glitch={glitch === "username"} onclick={() => copy("username")}>
-            <span class="label">Username</span><span class="value">{detail.username}</span>
-            <span class="hint">{copied === "username" ? "Copied" : "Copy ⌘B"}</span>
+          <button class="field" class:done={fb.copied === "username"} class:glitch={fb.glitch === "username"} onclick={() => copy("username")}>
+            <span class="label"><User />Username</span><span class="value">{detail.username}</span>
+            <span class="hint">{#if fb.copied === "username"}<Check />Copied{:else}<Copy />⌘B{/if}</span>
           </button>
         {/if}
         {#if detail.url}
-          <button class="field" class:done={copied === "url"} class:glitch={glitch === "url"} onclick={() => copy("url")}>
-            <span class="label">Website</span><span class="value">{detail.url}</span>
-            <span class="hint">{copied === "url" ? "Copied" : "Copy"}</span>
+          <button class="field" class:done={fb.copied === "url"} class:glitch={fb.glitch === "url"} onclick={() => copy("url")}>
+            <span class="label"><Globe />Website</span><span class="value">{detail.url}</span>
+            <span class="hint">{#if fb.copied === "url"}<Check />Copied{:else}<Copy />{/if}</span>
           </button>
         {/if}
         {#if detail.hasOtp}
-          <button class="field" class:done={copied === "otp"} class:glitch={glitch === "otp"} onclick={() => copy("otp")}>
-            <span class="label">One-time code</span><span class="value quiet">Copied, never shown</span>
-            <span class="hint">{copied === "otp" ? "Copied" : "Copy"}</span>
+          <button class="field" class:done={fb.copied === "otp"} class:glitch={fb.glitch === "otp"} onclick={() => copy("otp")}>
+            <span class="label"><Timer />One-time code</span><span class="value quiet">Copied, never shown</span>
+            <span class="hint">{#if fb.copied === "otp"}<Check />Copied{:else}<Copy />⌘O{/if}</span>
           </button>
         {/if}
         {#if detail.tags}
           <div class="field still">
-            <span class="label">Tags</span>
+            <span class="label"><Tag />Tags</span>
             <span class="tags">{#each detail.tags.split(",").map((t) => t.trim()).filter(Boolean) as t}<span>{t}</span>{/each}</span>
           </div>
         {/if}
         {#if detail.expires}
-          <div class="field still"><span class="label">Expires</span><span class="value">{detail.expires}</span></div>
+          <div class="field still"><span class="label"><CalendarClock />Expires</span><span class="value">{detail.expires}</span></div>
         {/if}
       </div>
 
@@ -372,11 +403,13 @@
       {/if}
 
       <div class="entry-actions">
-        <button onclick={() => (form = { id: detail.id, detail })}>Edit</button>
-        <button onclick={() => (sheet = { kind: "fields", id: detail.id })}>Fields{detail.extras ? ` (${detail.extras})` : ""}</button>
-        <button onclick={() => (sheet = { kind: "history", id: detail.id })}>History</button>
+        <button class="icon" onclick={() => (form = { id: detail.id, detail })} title="Edit" aria-label="Edit"><Pencil /></button>
+        <button class="icon" onclick={() => (sheet = { kind: "fields", id: detail.id })} title="Fields and attachments" aria-label={`Fields and attachments${detail.extras ? `, ${detail.extras}` : ""}`}>
+          <Paperclip />{#if detail.extras}<span class="badge">{detail.extras}</span>{/if}
+        </button>
+        <button class="icon" onclick={() => (sheet = { kind: "history", id: detail.id })} title="History" aria-label="History"><RotateCcwClock /></button>
         <span class="gap"></span>
-        <button class="danger" onclick={() => confirmDelete("entry")}>{detail.recycled ? "Delete for good" : "Delete"}</button>
+        <button class="danger icon" onclick={() => confirmDelete("entry")} title={detail.recycled ? "Delete for good" : "Move to the recycle bin"} aria-label={detail.recycled ? "Delete for good" : "Move to the recycle bin"}><Trash2 /></button>
       </div>
     {:else}
       <p class="dim empty">Select an entry</p>
@@ -393,7 +426,7 @@
 {/if}
 
 {#if prompt}
-  <div class="scrim">
+  <Modal label={prompt.kind === "delete" ? "Delete" : "Group name"} onclose={() => (prompt = null)}>
     <form class="prompt" onsubmit={submitPrompt}>
       {#if prompt.kind === "delete"}
         <p>
@@ -408,11 +441,14 @@
         </label>
       {/if}
       <div class="row">
-        <button type="button" onclick={() => (prompt = null)}>Cancel</button>
-        <button class={prompt.kind === "delete" ? "danger" : "primary"} type="submit">{prompt.kind === "delete" ? "Delete" : "Save"}</button>
+        <!-- svelte-ignore a11y_autofocus -->
+        <button type="button" onclick={() => (prompt = null)} autofocus={prompt.kind === "delete"}>Cancel</button>
+        <button class={prompt.kind === "delete" ? "danger" : "primary"} type="submit">
+          {prompt.kind !== "delete" ? "Save" : prompt.forever ? "Delete for good" : "Move to bin"}
+        </button>
       </div>
     </form>
-  </div>
+  </Modal>
 {/if}
 
 <style>
@@ -430,17 +466,6 @@
     gap: 6px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--line);
-  }
-
-  svg {
-    width: 16px;
-    height: 16px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.8;
-    stroke-linejoin: round;
-    stroke-linecap: round;
-    flex: none;
   }
 
   .search {
@@ -500,6 +525,11 @@
     border-radius: var(--radius);
     font-size: 12.5px;
     font-variant-numeric: tabular-nums;
+  }
+
+  .clip.cleared {
+    color: var(--ok);
+    background: color-mix(in oklab, var(--ok) 12%, var(--bg));
   }
 
   .segs {
@@ -580,24 +610,20 @@
     background: color-mix(in oklab, var(--raised) 60%, transparent);
   }
 
-  .group > span:first-child {
+  .group .name,
+  .group.smart > span:not(.count) {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .group.smart > span:nth-child(2) {
-    flex: 1;
-  }
-
-  .group.smart > span:first-child {
-    flex: none;
+  .group.smart.alert > :global(svg) {
+    color: var(--error);
   }
 
   .group.active {
     color: var(--accent);
-    box-shadow: inset 3px 0 var(--accent);
-    background: color-mix(in oklab, var(--accent) 10%, transparent);
+    background: color-mix(in oklab, var(--accent) 14%, transparent);
   }
 
   .group.bin {
@@ -625,6 +651,10 @@
     flex: none;
     background: var(--error);
     transform: rotate(45deg);
+  }
+
+  .entry.active .flag {
+    background: var(--accent-ink);
   }
 
   .group-actions {
@@ -748,8 +778,16 @@
 
   .head p {
     margin: 4px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     color: var(--data);
     font-size: 13px;
+  }
+
+  .head p > :global(svg) {
+    width: 14px;
+    height: 14px;
   }
 
   .issue {
@@ -765,6 +803,10 @@
     flex: 1;
   }
 
+  .issue > :global(svg) {
+    color: var(--error);
+  }
+
   .issue button {
     padding: 4px 10px;
   }
@@ -774,61 +816,8 @@
     gap: 12px;
     padding: 16px 18px;
     background: var(--panel);
-    box-shadow: inset 3px 0 var(--accent);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
-  }
-
-  .cells {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 2px;
-    -webkit-user-select: none;
-    user-select: none;
-  }
-
-  .split {
-    width: 8px;
-  }
-
-  .cell {
-    display: grid;
-    gap: 4px;
-    justify-items: center;
-  }
-
-  .cell b {
-    width: 23px;
-    height: 34px;
-    display: grid;
-    place-items: center;
-    font-family: var(--mono);
-    font-weight: 400;
-    font-size: 17px;
-    background: var(--bg);
-    color: var(--faint);
-  }
-
-  .cell small {
-    font-family: var(--mono);
-    height: 12px;
-    font-size: 10px;
-    color: var(--faint);
-  }
-
-  .open .cell b {
-    color: var(--text);
-  }
-
-  .open .cell b.digit {
-    color: var(--accent);
-  }
-
-  .open .cell b.symbol {
-    color: var(--data);
-  }
-
-  .open .cell b.scrambled {
-    color: var(--dim);
   }
 
   .bar {
@@ -868,8 +857,16 @@
   }
 
   .label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     color: var(--data);
     font-size: 13px;
+  }
+
+  .label > :global(svg) {
+    width: 15px;
+    height: 15px;
   }
 
   .value {
@@ -885,6 +882,9 @@
   }
 
   .hint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     font-size: 12px;
     color: var(--faint);
     opacity: 0;
@@ -901,6 +901,19 @@
     color: var(--ok);
   }
 
+  .hint > :global(svg) {
+    width: 13px;
+    height: 13px;
+  }
+
+  button.icon {
+    padding: 6px 9px;
+  }
+
+  .badge {
+    font: 11px var(--mono);
+  }
+
   .tags {
     display: flex;
     flex-wrap: wrap;
@@ -912,17 +925,6 @@
     border: 1px solid color-mix(in oklab, var(--data) 45%, transparent);
     color: var(--data);
     font-size: 12.5px;
-  }
-
-  .glitch {
-    animation: glitch 300ms steps(2) both;
-  }
-
-  @keyframes glitch {
-    0% { clip-path: inset(10% 0 60% 0); transform: translateX(-6px); }
-    33% { clip-path: inset(55% 0 10% 0); transform: translateX(5px); }
-    66% { clip-path: inset(30% 0 35% 0); transform: translateX(-2px); }
-    100% { border-radius: var(--radius); transform: none; }
   }
 
   .notes {
@@ -941,18 +943,11 @@
     gap: 8px;
   }
 
-  .scrim {
-    position: fixed;
-    inset: 0;
-    background: rgb(0 0 0 / 0.5);
-    display: grid;
-    place-items: center;
-  }
-
   .prompt {
     background: var(--panel);
-    border-left: 3px solid var(--accent);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
+    box-shadow: 0 24px 60px -24px rgb(0 0 0 / 0.6);
     padding: 18px;
     width: min(380px, 92vw);
     display: grid;

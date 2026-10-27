@@ -32,6 +32,10 @@ the repository root, since the desktop app shares the workspace's `target`:
 
 `ui/node_modules/.bin/tauri dev` runs it with the page live-reloaded from Vite instead.
 
+`scripts/install-desktop.sh` does the build and installs the result. On macOS it puts `Sennel.app` in
+`/Applications`, or `~/Applications` if that is not writable. On Linux it installs the AppImage as
+`~/.local/bin/sennel-desktop` with a menu entry.
+
 The builds are signed ad hoc, not with a developer certificate. One you built yourself runs on the
 Mac that built it. A copy downloaded or AirDropped to another Mac is quarantined: open it once, then
 allow it under System Settings › Privacy & Security › Open Anyway. If macOS says the app is damaged
@@ -56,9 +60,10 @@ starting `wo`, so `#work` finds what is tagged work and not "homework". Drag an 
 
 | Key | Does                                  |
 | --- | ------------------------------------- |
-| ⌘F  | search                                |
+| ⌘F  | search; in the box, ↑ ↓ pick, ⏎ copies the password, esc clears |
 | ⌘C  | copy the selected entry's password    |
 | ⌘B  | copy its username                     |
+| ⌘O  | copy its one-time code                |
 | ⌘N  | new entry                             |
 | ⌘Z  | undo the last change to the vault     |
 | ⌘L  | lock                                  |

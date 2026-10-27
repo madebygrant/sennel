@@ -1,6 +1,9 @@
 <script>
   import { onMount, untrack } from "svelte";
   import { call, secretCopy } from "./api.js";
+  import Cells from "./Cells.svelte";
+  import { copyFeedback } from "./copied.svelte.js";
+  import Modal from "./Modal.svelte";
 
   let { sheet, say, reload, close, open } = $props();
 
@@ -8,7 +11,7 @@
   let adding = $state(null);
   let value = $state(untrack(() => sheet.value ?? ""));
 
-  const titles = { audit: "Audit", history: "History", fields: "Fields and attachments", generate: "Generated password" };
+  const titles = { audit: "Needs attention", history: "History", fields: "Fields and attachments", generate: "Generated password" };
 
   async function load() {
     try {
@@ -39,12 +42,22 @@
     else await act("add_field", { id: sheet.id, name, value: from });
   }
 
+  const fb = copyFeedback();
+
+  async function copyOut(key, cmd, args) {
+    try {
+      const note = await call(cmd, args);
+      say([note]);
+      if (note.level !== "error") fb.mark(key);
+    } catch (why) {
+      say([{ level: "error", text: String(why) }]);
+    }
+  }
+
   onMount(load);
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && close()} />
-
-<div class="scrim">
+<Modal label={titles[sheet.kind]} onclose={close}>
   <section>
     <header>
       <h2>{titles[sheet.kind]}</h2>
@@ -52,12 +65,14 @@
     </header>
 
     {#if sheet.kind === "generate"}
-      <p class="mono secret">{value}</p>
+      <div class="secret" class:glitch={fb.glitch === "generated"}><Cells {value} /></div>
       <div class="row">
         <button onclick={async () => (value = await call("generate"))}>Another</button>
-        <button class="primary" onclick={async () => say([await call("copy_text", { label: "the generated password", text: value })])}>Copy</button>
+        <button class="primary" onclick={() => copyOut("generated", "copy_text", { label: "the generated password", text: value })}>
+          {fb.copied === "generated" ? "Copied" : "Copy"}
+        </button>
       </div>
-      <p class="dim">Settings come from [generator] in the config file. New entry › generate puts one straight into the form.</p>
+      <p class="dim">Length and style come from [generator] in the config file. Generate in the entry form puts one straight into the password box.</p>
     {:else if rows === null}
       <p class="dim">…</p>
     {:else if sheet.kind === "audit"}
@@ -81,7 +96,7 @@
       {/if}
     {:else if sheet.kind === "fields"}
       {#each rows as r}
-        <div class="line">
+        <div class="line" class:glitch={fb.glitch === r.name}>
           <span>
             <strong>{r.name}</strong>
             {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono">{r.secret ? "••••••" : r.value}</span>{/if}
@@ -91,7 +106,7 @@
               <button onclick={() => act("extract", { id: sheet.id, name: r.name })}>Save beside vault</button>
               <button onclick={() => act("agent_give", { id: sheet.id, name: r.name })}>To ssh-agent</button>
             {:else}
-              <button onclick={async () => say([await call("copy_field", { id: sheet.id, name: r.name })])}>Copy</button>
+              <button onclick={() => copyOut(r.name, "copy_field", { id: sheet.id, name: r.name })}>{fb.copied === r.name ? "Copied" : "Copy"}</button>
             {/if}
             <button class="danger" onclick={() => act("remove_field", { id: sheet.id, name: r.name, file: r.file })}>Remove</button>
           </span>
@@ -120,25 +135,17 @@
       {/if}
     {/if}
   </section>
-</div>
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    background: rgb(0 0 0 / 0.45);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-  }
-
   section {
     background: var(--panel);
-    border-left: 3px solid var(--accent);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
+    box-shadow: 0 24px 60px -24px rgb(0 0 0 / 0.6);
     padding: 16px 18px;
-    width: min(620px, 100%);
-    max-height: 100%;
+    width: min(620px, calc(100vw - 40px));
+    max-height: calc(100vh - 40px);
     overflow: auto;
     display: grid;
     gap: 8px;
@@ -152,7 +159,9 @@
 
   h2 {
     margin: 0;
-    font-size: 17px;
+    font-family: var(--action);
+    font-size: 18px;
+    font-weight: 600;
   }
 
   .line {
@@ -193,13 +202,7 @@
   }
 
   .secret {
-    font-size: 18px;
-    padding: 12px;
-    background: var(--bg);
-    border-radius: var(--radius);
-    word-break: break-all;
-    -webkit-user-select: none;
-    user-select: none;
+    padding: 6px 0;
   }
 
   p {

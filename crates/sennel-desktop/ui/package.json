@@ -12,6 +12,7 @@
     "@fontsource/chakra-petch": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@lucide/svelte": "^1.61.0",
     "@tauri-apps/api": "^2.12.4"
   },
   "devDependencies": {
