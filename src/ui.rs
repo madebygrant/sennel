@@ -1,34 +1,37 @@
+use chrono::TimeZone;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState,
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
 };
-use chrono::TimeZone;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, MENUS, Pane, View, char_index_to_byte};
-use crate::vault::EntryExt;
+use crate::app::{
+    self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, MENUS, Pane, View,
+    char_index_to_byte,
+};
 use crate::theme::{self, Palette};
+use crate::vault::EntryExt;
 
 /* Columns, not characters. A CJK glyph takes two cells and a combining mark
-   takes none, so a column padded to a character count steps out of line by
-   the width of whatever is in it. */
+takes none, so a column padded to a character count steps out of line by
+the width of whatever is in it. */
 fn cols(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
 /* A rook, because a sennel is a watchtower and the piece is the one chess
-   glyph that reads as one at this size. Filled rather than outlined: an
-   outline at 12px is a smudge, and the filled form keeps its silhouette in
-   the terminal fonts that have it at all.
+glyph that reads as one at this size. Filled rather than outlined: an
+outline at 12px is a smudge, and the filled form keeps its silhouette in
+the terminal fonts that have it at all.
 
-   One cell wide, which is not obvious and is checked by
-   `every_glyph_the_ui_draws_is_one_cell_wide`. Half the pictographic
-   candidates here — 🏰, 🔒, ⌛ — are two, and a two-cell glyph in a
-   one-cell budget is a row that wraps on somebody else's terminal. */
+One cell wide, which is not obvious and is checked by
+`every_glyph_the_ui_draws_is_one_cell_wide`. Half the pictographic
+candidates here — 🏰, 🔒, ⌛ — are two, and a two-cell glyph in a
+one-cell budget is a row that wraps on somebody else's terminal. */
 const MARK: &str = "♜";
 
 impl Palette {
@@ -43,8 +46,8 @@ impl Palette {
     }
 
     /* The row under the cursor is what the next key acts on, so its name is
-       bold as well as marked. Bold is safe here because every colour is RGB:
-       a terminal cannot swap it for a bright ANSI variant. */
+    bold as well as marked. Bold is safe here because every colour is RGB:
+    a terminal cannot swap it for a bright ANSI variant. */
     fn row(&self, selected: bool) -> Style {
         let style = Style::new().fg(self.text);
         if selected {
@@ -55,8 +58,8 @@ impl Palette {
     }
 
     /* Which row, and which pane owns the keys. Two glyphs, not two colours:
-       with NO_COLOR every colour collapses to the terminal's own, and focus
-       was then invisible — both panes drew the same bar. */
+    with NO_COLOR every colour collapses to the terminal's own, and focus
+    was then invisible — both panes drew the same bar. */
     fn mark(&self, selected: bool, live: bool) -> Span<'static> {
         match (selected, live) {
             (true, true) => self.lit("▌"),
@@ -69,9 +72,9 @@ impl Palette {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
     /* Cleared here rather than by each detail view: on a narrow terminal
-       neither of them draws at all, and last frame's targets would be left
-       sitting over the entries pane, where a click would copy instead of
-       selecting a row. */
+    neither of them draws at all, and last frame's targets would be left
+    sitting over the entries pane, where a click would copy instead of
+    selecting a row. */
     app.copy_rows.clear();
     app.menu_bar.clear();
     app.menu_area = Rect::ZERO;
@@ -79,12 +82,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Before the header lights the label of a menu that a popup has just covered.
     app.drop_blocked_menu();
     /* The band squeezes the body from below only while it is open: a fixed
-       row the rest of the time would leave a hole where search should be. */
-    let band = if app.search.is_some() {
-        1
-    } else {
-        0
-    };
+    row the rest of the time would leave a hole where search should be. */
+    let band = if app.search.is_some() { 1 } else { 0 };
     let [header, rule, body, band_area, footrule, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -149,8 +148,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 /* One pass over the finished buffer rather than three palettes: every colour
-   in `theme` stays one set of numbers, and a terminal that cannot render them
-   gets the nearest thing it has. Costs a walk of the cells already drawn. */
+in `theme` stays one set of numbers, and a terminal that cannot render them
+gets the nearest thing it has. Costs a walk of the cells already drawn. */
 fn recolour(frame: &mut Frame) {
     if theme::depth() == theme::Depth::Full {
         return;
@@ -168,7 +167,7 @@ fn recolour(frame: &mut Frame) {
 }
 
 /* Painted before anything else: every other widget styles only its
-   foreground, so the gradient survives underneath them. */
+foreground, so the gradient survives underneath them. */
 fn draw_background(frame: &mut Frame, p: &Palette) {
     if theme::plain() {
         return;
@@ -194,8 +193,8 @@ fn draw_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 }
 
 /* The flash carries its own colour: a failure that renders the same cream as
-   "unlocked 42 entries" is a failure nobody sees. Truncated to the row, since
-   an error message is the longest thing the header ever holds. */
+"unlocked 42 entries" is a failure nobody sees. Truncated to the row, since
+an error message is the longest thing the header ever holds. */
 fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let ink = match app.level {
@@ -204,14 +203,14 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
         Level::Error => p.error,
     };
     /* Colour is not the only channel: under NO_COLOR every shade collapses to
-       the terminal's own, and a failure then read exactly like a success. */
+    the terminal's own, and a failure then read exactly like a success. */
     let badge = match app.level {
         Level::Info => "",
         Level::Warn => "! ",
         Level::Error => "× ",
     };
     /* The vault keeps the right-hand end, so a flash no longer costs the one
-       line that says which vault is open. */
+    line that says which vault is open. */
     let name = app.vault_name();
     let width = area.width as usize;
     let lead = cols(&format!(" {MARK} Sennel  ·  "));
@@ -240,7 +239,11 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     if show_labels && gap > labels {
         gap -= labels;
         for (id, label, _) in MENUS {
-            let ink = if app.menu == Some(*id) { p.accent } else { p.muted };
+            let ink = if app.menu == Some(*id) {
+                p.accent
+            } else {
+                p.muted
+            };
             spans.push(Span::raw("  "));
             spans.push(Span::styled(*label, Style::new().fg(ink)));
             let w = cols(label) as u16;
@@ -261,8 +264,8 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /* The lock is a popup over the frame, not a line in the body: it is the only
-   thing on screen and should read as one question. The body behind it stays
-   empty — nothing is open yet. */
+thing on screen and should read as one question. The body behind it stays
+empty — nothing is open yet. */
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.view {
         View::Unlock => draw_unlock(frame, app),
@@ -271,8 +274,8 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /* Groups left, entries middle, detail right past PREVIEW_FROM: the row keeps
-   its title and user, so the pane only appears where all three fit without
-   squeezing names down to nothing. Below that it is simply absent. */
+its title and user, so the pane only appears where all three fit without
+squeezing names down to nothing. Below that it is simply absent. */
 const PREVIEW_FROM: u16 = 100;
 
 fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -282,9 +285,9 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     /* Headers cost a row and answer the question three unlabelled columns
-       could not: which pane is this, which folder am I in, and how the
-       entries are ordered. Skipped on a short window, where a row of chrome
-       is a row of list. */
+    could not: which pane is this, which folder am I in, and how the
+    entries are ordered. Skipped on a short window, where a row of chrome
+    is a row of list. */
     let heads = area.height > 6;
     app.heads = heads;
     if area.width >= PREVIEW_FROM {
@@ -314,7 +317,7 @@ fn draw_browser(frame: &mut Frame, app: &mut App, area: Rect) {
         let groups = head(frame, app, groups, Head::Groups, heads);
         let entries = head(frame, app, entries, Head::Entries, heads);
         /* What a page key moves by, which only the layout knows. The lower
-           of the two, so a page never overshoots whichever pane is live. */
+        of the two, so a page never overshoots whichever pane is live. */
         app.viewport = (groups.height as usize).min(entries.height as usize).max(1);
         app.wide = false;
         app.group_area = groups;
@@ -355,8 +358,8 @@ enum Head {
 }
 
 /* Draws the pane's header row and hands back what is left for the list. The
-   live pane's header is `text`, the others `muted`: focus then has a word as
-   well as a marker, which is the only channel left when colour is off. */
+live pane's header is `text`, the others `muted`: focus then has a word as
+well as a marker, which is the only channel left when colour is off. */
 fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> Rect {
     let p = app.theme;
     if !on || area.height < 2 {
@@ -372,8 +375,8 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
         Head::Groups => " groups".to_string(),
         Head::Detail => " detail".to_string(),
         /* The breadcrumb the panes could not answer: a tree that truncates
-           names to `Clients and contrac…` cannot say where you are, and the
-           order is invisible the moment `o`'s flash expires. */
+        names to `Clients and contrac…` cannot say where you are, and the
+        order is invisible the moment `o`'s flash expires. */
         Head::Entries => {
             let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
             if searching {
@@ -388,8 +391,8 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
                 let n = app.entry_rows().len();
                 let plural = if n == 1 { "entry" } else { "entries" };
                 /* Most to least useful, and the narrow pane keeps the front
-                   of the list: a header truncated to "…stored…" has told
-                   nobody anything. */
+                of the list: a header truncated to "…stored…" has told
+                nobody anything. */
                 segments(
                     area.width as usize,
                     &[
@@ -412,10 +415,10 @@ fn head(frame: &mut Frame, app: &mut App, area: Rect, which: Head, on: bool) -> 
 }
 
 /* Columns, not characters, and never straddling the edge: a width of one
-   against a two-column glyph would otherwise take nothing and spill into the
-   next field. Callers pad to the column count, which absorbs coming back
-   short. A cut ends in `…` — without it `Root/Bankin` reads as a group
-   somebody named Bankin. */
+against a two-column glyph would otherwise take nothing and spill into the
+next field. Callers pad to the column count, which absorbs coming back
+short. A cut ends in `…` — without it `Root/Bankin` reads as a group
+somebody named Bankin. */
 // `truncate` from the other end, for a box being typed into: the end is where the typing is.
 fn truncate_start(text: &str, width: usize) -> String {
     if cols(text) <= width {
@@ -433,7 +436,11 @@ fn truncate_start(text: &str, width: usize) -> String {
         kept.push(c);
     }
     let tail: String = kept.into_iter().rev().collect();
-    if width > 0 { format!("…{tail}") } else { tail }
+    if width > 0 {
+        format!("…{tail}")
+    } else {
+        tail
+    }
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -464,8 +471,8 @@ fn truncate(text: &str, width: usize) -> String {
 const LABEL: usize = 10;
 
 /* Only worth the column when the list actually runs off the pane. Drawn into
-   the pane's own last column, so the lists hand that column back (see
-   `list_width`) rather than letting the thumb land on a name. */
+the pane's own last column, so the lists hand that column back (see
+`list_width`) rather than letting the thumb land on a name. */
 fn draw_scrollbar(frame: &mut Frame, area: Rect, len: usize, at: usize, p: &Palette) {
     if !overflows(area, len) {
         return;
@@ -489,15 +496,14 @@ fn overflows(area: Rect, len: usize) -> bool {
 /// Columns a row may use: the pane, less the marker and its space, less the
 /// scrollbar's column when one is going to be drawn.
 fn list_width(area: Rect, len: usize) -> usize {
-    (area.width as usize)
-        .saturating_sub(2 + usize::from(overflows(area, len)))
+    (area.width as usize).saturating_sub(2 + usize::from(overflows(area, len)))
 }
 
 /* What fits on one entry row. The title used to be truncated to the pane and
-   the username appended after it, so the line ran past the edge and ratatui
-   clipped it — a username cut with no marker, the very thing `truncate`
-   exists to prevent. Everything is measured against one budget now, and the
-   least important column is the first to go. */
+the username appended after it, so the line ran past the edge and ratatui
+clipped it — a username cut with no marker, the very thing `truncate`
+exists to prevent. Everything is measured against one budget now, and the
+least important column is the first to go. */
 fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, String, String) {
     const GAP: usize = 2;
     const MIN_TITLE: usize = 8;
@@ -513,7 +519,7 @@ fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, Strin
         let want = cols(text) + prefix;
         let spare = left.saturating_sub(*title_room);
         /* Borrow from the title only down to a readable stub: a row whose
-           name is three characters has stopped being a list. */
+        name is three characters has stopped being a list. */
         let room = if spare >= want {
             want
         } else {
@@ -531,16 +537,16 @@ fn fit_row(avail: usize, title: &str, user: &str, group: &str) -> (String, Strin
     };
 
     /* Group first, because it is the one the search band adds and the one the
-       tree already answers. */
+    tree already answers. */
     let group = fitted(group, 4, &mut left, &mut title_room);
     let user = fitted(user, GAP, &mut left, &mut title_room);
     (truncate(title, title_room), user, group)
 }
 
 /* Pre-order with two cells of indent per depth: a flat list of names hides
-   which folder an entry row belongs to, and the tree is the only place depth
-   is visible. The marker is `cursor` in the live pane and `muted` in the
-   other, so each pane still says where its own cursor is. */
+which folder an entry row belongs to, and the tree is the only place depth
+is visible. The marker is `cursor` in the live pane and `muted` in the
+other, so each pane still says where its own cursor is. */
 fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let tree = app.group_tree();
@@ -568,7 +574,7 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|g| (g.name.clone(), g.is_expanded))
                 .unwrap_or_default();
             /* ▸/▾ only where folding means something: a leaf gets blanks so
-               names still line up down the pane. */
+            names still line up down the pane. */
             let has_children = app
                 .session
                 .vault()
@@ -580,21 +586,18 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "▸ "
             };
-            let binned = app
-                .session
-                .vault()
-                .is_some_and(|v| v.in_recycle_bin(id));
+            let binned = app.session.vault().is_some_and(|v| v.in_recycle_bin(id));
             /* A glyph as well as the dimming, for the same reason the pane
-               marker is a glyph: under NO_COLOR every shade collapses to the
-               terminal's own, and the bin then looked exactly like a live
-               folder — which is how somebody copies a password they threw
-               away last week. U+2326, one cell. */
+            marker is a glyph: under NO_COLOR every shade collapses to the
+            terminal's own, and the bin then looked exactly like a live
+            folder — which is how somebody copies a password they threw
+            away last week. U+2326, one cell. */
             let name = match binned {
                 true => format!("⌦ {name}"),
                 false => name.to_string(),
             };
             /* A count turns the tree into a map: every folder otherwise looks
-               equally full, and the status bar only counts the whole vault. */
+            equally full, and the status bar only counts the whole vault. */
             let held = app.entries_in(id);
             let count = if held == 0 {
                 String::new()
@@ -607,8 +610,8 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
             );
             let mark = p.mark(selected, live);
             /* The bin and everything in it draw back: a deleted row that
-               looks exactly like a live one is how somebody copies a password
-               they threw away last week. */
+            looks exactly like a live one is how somebody copies a password
+            they threw away last week. */
             let style = if binned {
                 Style::new().fg(p.muted)
             } else {
@@ -622,7 +625,7 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     /* Carried across frames, or ratatui recomputes the least scroll that makes
-       the selection visible and pins the cursor to the last row. */
+    the selection visible and pins the cursor to the last row. */
     app.group_scroll = app::scroll_to(app.group_scroll, at, tree.len(), area.height as usize);
     let mut state = ListState::default().with_offset(app.group_scroll);
     state.select(Some(at));
@@ -634,7 +637,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let rows = app.entry_rows();
     /* A live needle owns the empty state: "no entries here" would be a lie
-       when the pane is global, and the way out (Esc) is part of the message. */
+    when the pane is global, and the way out (Esc) is part of the message. */
     let searching = app.search.as_deref().is_some_and(|n| !n.is_empty());
     if rows.is_empty() {
         let text = if searching {
@@ -655,8 +658,8 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
     let live = app.active_pane == Pane::Entries;
     let width = list_width(area, rows.len());
     /* The scroll before the rows, not after: only the window is built, so the
-       pane has to know which window it is. Five thousand ListItems a frame
-       cost twenty milliseconds to allocate and forty rows to show. */
+    pane has to know which window it is. Five thousand ListItems a frame
+    cost twenty milliseconds to allocate and forty rows to show. */
     app.entry_scroll = app::scroll_to(app.entry_scroll, at, rows.len(), area.height as usize);
     let first = app.entry_scroll;
     let window: Vec<keepass::db::EntryId> = rows
@@ -701,12 +704,12 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 &title,
                 &user,
                 /* Global search pulls rows out of their folder, so the pane
-                   says where each one lives — the same dim-suffix rule as the
-                   user, and the first column dropped when space runs out. */
+                says where each one lives — the same dim-suffix rule as the
+                user, and the first column dropped when space runs out. */
                 if searching { &group } else { "" },
             );
             /* Which characters the needle matched, for this row only: the
-               ones scrolled off the pane light nothing. */
+            ones scrolled off the pane light nothing. */
             let hits = match &needle {
                 Some(needle) => app.searcher.indices(needle, &title),
                 None => Vec::new(),
@@ -721,19 +724,19 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(p.faint(format!("  · {group}")));
             }
             /* A field lookup, not a parse: the marker says a row has a code
-               without pricing every row on every frame. */
+            without pricing every row on every frame. */
             if has_code {
                 spans.push(p.faint(" ⊙"));
             }
             /* Expired rows say so in the list, not only in the pane: the
-               whole point is spotting one you were about to reach for. In
-               `warn`, and with a glyph of its own, so NO_COLOR still shows
-               it. `!` is taken by the flash line and `×` by its errors.
+            whole point is spotting one you were about to reach for. In
+            `warn`, and with a glyph of its own, so NO_COLOR still shows
+            it. `!` is taken by the flash line and `×` by its errors.
 
-               U+29D6, not the U+231B hourglass this first shipped with:
-               that one is East Asian Wide, so it took two cells out of a row
-               budgeted for one and pushed the tail of long rows off the
-               pane. This is the same picture at one cell. */
+            U+29D6, not the U+231B hourglass this first shipped with:
+            that one is East Asian Wide, so it took two cells out of a row
+            budgeted for one and pushed the tail of long rows off the
+            pane. This is the same picture at one cell. */
             if expired {
                 spans.push(Span::styled(" ⧖", Style::new().fg(p.warn)));
             }
@@ -741,7 +744,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     /* The widget is handed the window, so its own indices are window-local;
-       the scrollbar still speaks in whole-list terms. */
+    the scrollbar still speaks in whole-list terms. */
     let mut state = ListState::default();
     state.select(Some(at.saturating_sub(first)));
     frame.render_stateful_widget(List::new(items), area, &mut state);
@@ -749,12 +752,12 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /* The row keeps only title and user, so the pane says the rest: url, notes,
-   and the password masked to a fixed run of bullets. Fixed length because
-   even the length is something the screen may not reveal. */
+and the password masked to a fixed run of bullets. Fixed length because
+even the length is something the screen may not reveal. */
 /* Fills `app.copy_rows` as it goes: which screen row copies what. The rows
-   move — url, notes, the code and the expiry are each optional — so the
-   layout is the only thing that can know, and a click recomputing it would be
-   a second copy of this function's decisions. */
+move — url, notes, the code and the expiry are each optional — so the
+layout is the only thing that can know, and a click recomputing it would be
+a second copy of this function's decisions. */
 fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let block = Block::new()
@@ -780,16 +783,23 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         ])
     };
     /* A row a click copies. Lit for a moment afterwards, because a copy is
-       otherwise invisible: the clipboard is somewhere else, and the status
-       flash is at the other end of the screen from the hand that just moved. */
+    otherwise invisible: the clipboard is somewhere else, and the status
+    flash is at the other end of the screen from the hand that just moved. */
     let copyable = |label: &str, value: String, style: Style, what: app::CopyRow| {
         let lit = app.glowing(what);
-        let ink = if lit { Style::new().fg(p.cursor) } else { style };
+        let ink = if lit {
+            Style::new().fg(p.cursor)
+        } else {
+            style
+        };
         Line::from(vec![
             match lit {
                 // The tick replaces the label rather than pushing the row
                 // along, so nothing moves under the pointer that just clicked.
-                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                true => Span::styled(
+                    format!(" {:<LABEL$}", "✓ copied"),
+                    Style::new().fg(p.cursor),
+                ),
                 false => p.faint(format!(" {label:<LABEL$}")),
             },
             Span::styled(value, ink),
@@ -799,10 +809,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let faint = Style::new().fg(p.muted);
     let mut copy_rows: Vec<(usize, app::CopyRow)> = Vec::new();
     let mut lines = vec![
-        Line::from(Span::styled(
-            truncate(entry.title(), width),
-            p.row(true),
-        )),
+        Line::from(Span::styled(truncate(entry.title(), width), p.row(true))),
         Line::default(),
     ];
     copy_rows.push((lines.len(), app::CopyRow::Username));
@@ -833,7 +840,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     /* First line only: the row is one row, and a note that wraps the pane is
-       what Enter's popup is for. */
+    what Enter's popup is for. */
     let notes = entry.notes().lines().next().unwrap_or("");
     if !notes.is_empty() {
         lines.push(row(
@@ -843,14 +850,17 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     /* A one-time code is the field people reach for most and the one Sennel
-       could not show at all: an entry with `otp` looked exactly like an entry
-       without one, and the answer was to pick up a phone. */
+    could not show at all: an entry with `otp` looked exactly like an entry
+    without one, and the answer was to pick up a phone. */
     if let Some((code, left)) = crate::vault::totp_now(&entry) {
         let lit = app.glowing(app::CopyRow::Totp);
         copy_rows.push((lines.len(), app::CopyRow::Totp));
         lines.push(Line::from(vec![
             match lit {
-                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                true => Span::styled(
+                    format!(" {:<LABEL$}", "✓ copied"),
+                    Style::new().fg(p.cursor),
+                ),
                 false => p.faint(format!(" {:<LABEL$}", "totp")),
             },
             Span::styled(code, Style::new().fg(p.cursor)),
@@ -860,9 +870,13 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     for extra in crate::vault::extras(&entry) {
         lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
     }
-    lines.push(row("group", truncate(&app.here(), width.saturating_sub(LABEL + 1)), faint));
+    lines.push(row(
+        "group",
+        truncate(&app.here(), width.saturating_sub(LABEL + 1)),
+        faint,
+    ));
     /* Above the other stamps, and in `warn` once it has passed: `updated` and
-       `created` are history, this one is a thing to do. */
+    `created` are history, this one is a thing to do. */
     if let Some((said, gone)) = expiry_row(&entry) {
         let ink = if gone { Style::new().fg(p.warn) } else { faint };
         lines.push(row("expires", said, ink));
@@ -871,22 +885,22 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(row(label, value, faint));
     }
     /* Under the fields, not at the foot of twenty blank rows: a hint the eye
-       never travels to is a hint nobody reads. */
+    never travels to is a hint nobody reads. */
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         format!(" {}", "─".repeat(width.saturating_sub(2))),
         Style::new().fg(p.rule),
     )));
     /* Says the rows are clickable, because nothing else on a terminal screen
-       does: there is no cursor change and no underline to give it away. */
+    does: there is no cursor change and no underline to give it away. */
     lines.push(Line::from(p.faint(truncate(
         " click a row to copy · y p U t · * reveal · e edit",
         width,
     ))));
     lines.truncate(inner.height as usize);
     /* Screen coordinates, and only the rows that actually rendered: a pane
-       too short to reach the password row must not have a click target
-       sitting where the row would have been. */
+    too short to reach the password row must not have a click target
+    sitting where the row would have been. */
     app.copy_rows = copy_rows
         .into_iter()
         .filter(|(at, _)| *at < lines.len())
@@ -896,8 +910,8 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /* KDBX stores stamps in UTC and may store none at all. Shown in local time:
-   "this afternoon" is what a timestamp is read for, and a clock the reader
-   has to shift in their head is a clock they have to check. */
+"this afternoon" is what a timestamp is read for, and a clock the reader
+has to shift in their head is a clock they have to check. */
 fn stamps(entry: &keepass::db::EntryRef<'_>) -> Vec<(&'static str, String)> {
     [
         ("updated", entry.times.last_modification),
@@ -909,9 +923,9 @@ fn stamps(entry: &keepass::db::EntryRef<'_>) -> Vec<(&'static str, String)> {
 }
 
 /* The expiry row, which is a stamp with an opinion: past dates say so in
-   words as well as colour, because the date alone makes the reader do the
-   arithmetic. Absent when nothing expires, rather than "expires never" — a
-   row that says nothing happens is a row that costs a line for nothing. */
+words as well as colour, because the date alone makes the reader do the
+arithmetic. Absent when nothing expires, rather than "expires never" — a
+row that says nothing happens is a row that costs a line for nothing. */
 fn expiry_row(entry: &keepass::db::EntryRef<'_>) -> Option<(String, bool)> {
     let at = crate::vault::expires_at(entry)?;
     let gone = crate::vault::expired(entry);
@@ -930,8 +944,8 @@ fn local(utc: chrono::NaiveDateTime) -> String {
 }
 
 /* Enter's detail popup: the whole entry, wide enough for a url and tall
-   enough for the notes, on the 80-column terminal where no side pane fits.
-   Same masking rule as the pane — `*` is the only way to a plain password. */
+enough for the notes, on the 80-column terminal where no side pane fits.
+Same masking rule as the pane — `*` is the only way to a plain password. */
 fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     let p = app.theme;
     let Some(entry) = app.selected_entry() else {
@@ -939,7 +953,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     };
     let area = frame.area();
     /* Room for the frame and a margin either side; the popup never grows past
-       what the notes actually need. */
+    what the notes actually need. */
     let width = area.width.saturating_sub(8).clamp(20, 76);
     let inner = width.saturating_sub(4) as usize;
     let cream = Style::new().fg(p.text);
@@ -952,14 +966,21 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     };
     let value = inner.saturating_sub(LABEL + 1);
     /* Same rule as the pane: clickable, and lit for a moment after. This is
-       the only detail view on a narrow terminal, so leaving it out would mean
-       click-to-copy existed only on wide screens. */
+    the only detail view on a narrow terminal, so leaving it out would mean
+    click-to-copy existed only on wide screens. */
     let copyable = |label: &str, text: String, style: Style, what: app::CopyRow| {
         let lit = app.glowing(what);
-        let ink = if lit { Style::new().fg(p.cursor) } else { style };
+        let ink = if lit {
+            Style::new().fg(p.cursor)
+        } else {
+            style
+        };
         Line::from(vec![
             match lit {
-                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                true => Span::styled(
+                    format!(" {:<LABEL$}", "✓ copied"),
+                    Style::new().fg(p.cursor),
+                ),
                 false => p.faint(format!(" {label:<LABEL$}")),
             },
             Span::styled(text, ink),
@@ -995,7 +1016,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         ));
     }
     /* Notes get a block of their own: the pane's one-line form is most of
-       why this popup exists. */
+    why this popup exists. */
     let notes: Vec<&str> = entry.notes().lines().take(NOTE_LINES).collect();
     if !notes.is_empty() {
         lines.push(Line::default());
@@ -1009,7 +1030,10 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         copy_rows.push((lines.len(), app::CopyRow::Totp));
         lines.push(Line::from(vec![
             match lit {
-                true => Span::styled(format!(" {:<LABEL$}", "✓ copied"), Style::new().fg(p.cursor)),
+                true => Span::styled(
+                    format!(" {:<LABEL$}", "✓ copied"),
+                    Style::new().fg(p.cursor),
+                ),
                 false => p.faint(format!(" {:<LABEL$}", "totp")),
             },
             Span::styled(code, Style::new().fg(p.cursor)),
@@ -1053,17 +1077,17 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
 const NOTE_LINES: usize = 8;
 
 /* One question with two or three boxes: the password always, the key file
-   beside it (empty means none), the confirm joining only when creating. Only
-   the focused box draws the block, or the popup shows two cursors and neither
-   is where typing lands. The password is bullets end to end unless `^r`
-   revealed it — length is otherwise the only thing about it the screen may
-   show. */
+beside it (empty means none), the confirm joining only when creating. Only
+the focused box draws the block, or the popup shows two cursors and neither
+is where typing lands. The password is bullets end to end unless `^r`
+revealed it — length is otherwise the only thing about it the screen may
+show. */
 fn draw_unlock(frame: &mut Frame, app: &App) {
     let p = app.theme;
     use crate::app::UnlockField;
     /* The picker stands in for this box while it is open: two popups over
-       each other read as one broken one, and the boxes behind are not
-       answering anything until a file is chosen. */
+    each other read as one broken one, and the boxes behind are not
+    answering anything until a file is chosen. */
     if app.browse.is_some() || app.library.is_some() {
         return;
     }
@@ -1079,15 +1103,15 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
 
     let mut rows: Vec<Line> = Vec::new();
     if app.db_path.is_none() && !app.unlock_new {
-        rows.push(Line::from(p.faint(
-            " no vault yet  ·  set one in the file box below",
-        )));
+        rows.push(Line::from(
+            p.faint(" no vault yet  ·  set one in the file box below"),
+        ));
         rows.push(Line::default());
     }
 
     /* Byte offset of a char-index caret, shared with the editor: a byte index
-       lands inside a multi-byte character the moment a path has an accent in
-       it, and slicing panics. */
+    lands inside a multi-byte character the moment a path has an accent in
+    it, and slicing panics. */
     let split_at_char = |text: &str, caret: usize| {
         text.char_indices()
             .nth(caret)
@@ -1096,15 +1120,15 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     let field = |label: &str, value: &str, at: UnlockField, secret: bool| {
         let focused = app.unlock_field == at;
         /* `^r` reveals: the caret is a char index over the raw value, and the
-           masked form has the same char count, so the block lands in the
-           same place either way. */
+        masked form has the same char count, so the block lands in the
+        same place either way. */
         let shown = if secret && !app.unlock_reveal {
             "•".repeat(value.chars().count())
         } else {
             value.to_string()
         };
         /* Drawn between the halves, so the block is where the next character
-           lands rather than always at the end of the line. */
+        lands rather than always at the end of the line. */
         let text = if focused {
             let (before, after) = shown.split_at(split_at_char(&shown, app.caret));
             format!("{before}█{after}")
@@ -1122,14 +1146,9 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         ])
     };
     /* The file box lives on the popup itself: editing it and pressing Enter
-       re-points the session at another vault, which is how one screen serves
-       many vaults. It is display text, never a secret, so it draws plainly. */
-    rows.push(field(
-        "file",
-        &app.unlock_file,
-        UnlockField::File,
-        false,
-    ));
+    re-points the session at another vault, which is how one screen serves
+    many vaults. It is display text, never a secret, so it draws plainly. */
+    rows.push(field("file", &app.unlock_file, UnlockField::File, false));
     rows.push(field(
         "password",
         &app.unlock_password,
@@ -1152,7 +1171,7 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
     }
     rows.push(Line::default());
     /* Enter does three different things on this screen, so the hint names the
-       one the focused box will do. */
+    one the focused box will do. */
     let go = if app.unlock_field == UnlockField::File {
         "enter apply path"
     } else if app.unlock_new {
@@ -1166,13 +1185,13 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         " tab field   {go}   ^o browse   esc clear   ^r reveal"
     ))));
     /* Only when there is something behind it: a key naming an empty list is
-       a key that does nothing the first time anybody presses it. */
+    a key that does nothing the first time anybody presses it. */
     if !app.recent.is_empty() {
         let n = app.recent.len();
         let plural = if n == 1 { "vault" } else { "vaults" };
-        rows.push(Line::from(p.faint(format!(
-            " ^v  {n} {plural} opened before"
-        ))));
+        rows.push(Line::from(
+            p.faint(format!(" ^v  {n} {plural} opened before")),
+        ));
     }
     if let Some(label) = app.yubikey_label() {
         rows.push(Line::from(p.faint(format!(" ^y  yubikey {label}"))));
@@ -1182,18 +1201,22 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
 }
 
 /* Left to right in priority order, with `h keys` right-aligned in whatever
-   is left: the bar used to append until the line clipped, and the first thing
-   off the end was the one hint that always matters. What does not fit is
-   dropped whole — half a count is worse than no count. */
+is left: the bar used to append until the line clipped, and the first thing
+off the end was the one hint that always matters. What does not fit is
+dropped whole — half a count is worse than no count. */
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     const KEYS: &str = "h keys";
     let width = area.width as usize;
     /* Narrower than this and the copy keys are what has to go: `h keys` is
-       the row's reason to exist, and at 24 columns it was the thing falling
-       off the end. */
+    the row's reason to exist, and at 24 columns it was the thing falling
+    off the end. */
     if width < 40 {
-        let keys = if app.view == View::Browser { KEYS } else { "F1 keys" };
+        let keys = if app.view == View::Browser {
+            KEYS
+        } else {
+            "F1 keys"
+        };
         let spans = vec![
             Span::raw(" ".repeat(pad(width, 0, cols(keys)))),
             p.faint(keys),
@@ -1202,8 +1225,8 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     /* The lock screen takes every printable key as text, so its bar names
-       only chords: `h` there types an h, and a bar promising "h keys" on the
-       first screen anybody sees was promising a key that does not exist. */
+    only chords: `h` there types an h, and a bar promising "h keys" on the
+    first screen anybody sees was promising a key that does not exist. */
     if app.view != View::Browser {
         const LOCK_KEYS: &str = "F1 keys";
         let left = "  enter unlock   ^r reveal   ^c quit";
@@ -1217,10 +1240,10 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     /* The copy keys are the bar: they name what the whole app is for, so they
-       are what everything else has to fit around. */
+    are what everything else has to fit around. */
     /* Dim when there is nothing under the cursor to copy: three keys offered
-       in gold that all answer "no entry here" is a bar making promises the
-       selection cannot keep. */
+    in gold that all answer "no entry here" is a bar making promises the
+    selection cannot keep. */
     let armed = app.selected_entry().is_some();
     let mut spans = vec![
         Span::raw(" "),
@@ -1232,13 +1255,13 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
     let mut used = cols(" y user   p pass   U url");
     /* In the order they may be dropped, last first: unsaved work outranks a
-       count, and a count outranks the notes about keys the bar also names. */
+    count, and a count outranks the notes about keys the bar also names. */
     let mut optional: Vec<Span> = Vec::new();
     if app.working() {
         optional.push(Span::styled("  unsaved", Style::new().fg(p.warn)));
     }
     /* A secret is on the clipboard until this reaches zero. The flash says so
-       once; the chip says so for as long as it is true. */
+    once; the chip says so for as long as it is true. */
     if let Some(left) = app.clipboard_left() {
         optional.push(Span::styled(
             format!("  clipboard {left}s"),
@@ -1246,7 +1269,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     /* The entries header counts the matches where it is drawn; on a window
-       too short for headers the bar is the only place left to say it. */
+    too short for headers the bar is the only place left to say it. */
     if app.search.is_some() && !app.heads {
         let (shown, total) = (app.entry_matches(), app.entry_total());
         optional.push(Span::styled(
@@ -1262,9 +1285,12 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
         optional.push(p.faint(format!("  {groups} {g} · {entries} {e}")));
     }
     /* An armed cut and a live undo slot are one keypress from mattering, so
-       they are named — but they are also the first things the bar can lose. */
+    they are named — but they are also the first things the bar can lose. */
     if let Some(note) = app.cut_note() {
-        optional.push(Span::styled(format!("  {note} · V pastes"), Style::new().fg(p.warn)));
+        optional.push(Span::styled(
+            format!("  {note} · V pastes"),
+            Style::new().fg(p.warn),
+        ));
     }
     if let Some(note) = app.undo_note() {
         optional.push(Span::styled(format!("  {note}"), Style::new().fg(p.warn)));
@@ -1289,13 +1315,13 @@ fn pad(width: usize, used: usize, tail: usize) -> usize {
 }
 
 /* The filter band, one row between body and status: `/needle█` like earworm.
-   The caret is a block between the split halves of the needle, the same
-   char-index rule as every other box in the app. */
+The caret is a block between the split halves of the needle, the same
+char-index rule as every other box in the app. */
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.theme;
     let needle = app.search.as_deref().unwrap_or_default();
     /* A kept filter gave the keys back: a caret on a box that no longer takes
-       typing reads as one that does. */
+    typing reads as one that does. */
     if !app.band {
         let line = Line::from(vec![
             Span::styled(format!("/{needle}"), Style::new().fg(p.accent)),
@@ -1312,7 +1338,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("█", Style::new().fg(p.accent)),
         Span::styled(tail.to_string(), Style::new().fg(p.text)),
         /* A `#` needle is a tag filter, so the hint becomes the tags there
-           are: nobody can filter by a label they cannot remember. */
+        are: nobody can filter by a label they cannot remember. */
         p.faint(match crate::vault::tag_needle(needle) {
             Some(prefix) => {
                 let known: Vec<String> = app
@@ -1350,7 +1376,10 @@ fn draw_commands(frame: &mut Frame, app: &mut App) {
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
             p.lit(" : "),
-            Span::styled(truncate_start(&commands.query, inner.saturating_sub(4)), Style::new().fg(p.text)),
+            Span::styled(
+                truncate_start(&commands.query, inner.saturating_sub(4)),
+                Style::new().fg(p.text),
+            ),
             p.lit("█"),
         ]),
         Line::from(""),
@@ -1361,7 +1390,10 @@ fn draw_commands(frame: &mut Frame, app: &mut App) {
     let first = commands.cursor.saturating_sub(room.saturating_sub(1));
     for (n, (menu, item)) in rows.iter().enumerate().skip(first).take(room) {
         let live = n == commands.cursor;
-        let name = truncate(&format!("{menu} › {}", item.label), inner.saturating_sub(cols(item.shortcut) + 4));
+        let name = truncate(
+            &format!("{menu} › {}", item.label),
+            inner.saturating_sub(cols(item.shortcut) + 4),
+        );
         let pad = inner.saturating_sub(cols(&name) + cols(item.shortcut) + 3);
         lines.push(Line::from(vec![
             if live { p.lit("▌") } else { Span::raw(" ") },
@@ -1382,7 +1414,12 @@ fn draw_menu(frame: &mut Frame, app: &mut App) {
     let tall = items.len() as u16 + 2;
     let (left, top) = match app.menu_at {
         // Below the pointer, lifted only as far as the bottom edge needs and never over the header's labels.
-        Some((x, y)) => (x, (y + 1).min(screen.bottom().saturating_sub(tall)).max(screen.top() + 1)),
+        Some((x, y)) => (
+            x,
+            (y + 1)
+                .min(screen.bottom().saturating_sub(tall))
+                .max(screen.top() + 1),
+        ),
         None => match app.menu_bar.iter().find(|(_, id)| Some(*id) == app.menu) {
             Some((label, _)) => (label.x.saturating_sub(2), label.y + 1),
             None => return,
@@ -1442,7 +1479,10 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &P
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(p.accent))
-        .title(Span::styled(format!(" {title} "), Style::new().fg(p.accent)))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(p.accent),
+        ))
         .style(Style::new().bg(p.surface));
     let inner = block.inner(at);
     frame.render_widget(block, at);
@@ -1451,8 +1491,8 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16, p: &P
 }
 
 /* The file picker: directories and vaults only, the current directory in the
-   title, and a typed filter that narrows rather than ranks. Nobody knows the
-   path to a vault they have not opened yet. */
+title, and a typed filter that narrows rather than ranks. Nobody knows the
+path to a vault they have not opened yet. */
 fn draw_browse(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(browse) = &app.browse else {
@@ -1462,7 +1502,7 @@ fn draw_browse(frame: &mut Frame, app: &App) {
     let width = area.width.saturating_sub(8).clamp(24, 72);
     let inner = width.saturating_sub(4) as usize;
     /* Room for the frame, the title, the hint and a blank: the list takes
-       whatever is left rather than growing the popup off the screen. */
+    whatever is left rather than growing the popup off the screen. */
     let room = (area.height as usize).saturating_sub(7).clamp(1, 18);
     let shown = browse.shown();
     let mut lines: Vec<Line> = Vec::new();
@@ -1479,7 +1519,7 @@ fn draw_browse(frame: &mut Frame, app: &App) {
         })));
     }
     /* The window follows the cursor: a list that always starts at the top
-       hides everything past the fold once the cursor is past it. */
+    hides everything past the fold once the cursor is past it. */
     let first = browse.cursor.saturating_sub(room.saturating_sub(1));
     for (n, row) in shown.iter().enumerate().skip(first).take(room) {
         let live = n == browse.cursor;
@@ -1496,15 +1536,21 @@ fn draw_browse(frame: &mut Frame, app: &App) {
         };
         lines.push(Line::from(vec![
             mark,
-            Span::styled(format!(" {}", truncate(&name, inner.saturating_sub(2))), style),
+            Span::styled(
+                format!(" {}", truncate(&name, inner.saturating_sub(2))),
+                style,
+            ),
         ]));
     }
     if shown.len() > room {
-        lines.push(p.faint(format!(
-            " {} of {} shown",
-            room.min(shown.len()),
-            shown.len()
-        )).into());
+        lines.push(
+            p.faint(format!(
+                " {} of {} shown",
+                room.min(shown.len()),
+                shown.len()
+            ))
+            .into(),
+        );
     }
     lines.push(Line::default());
     if !browse.filter.is_empty() {
@@ -1518,7 +1564,7 @@ fn draw_browse(frame: &mut Frame, app: &App) {
         inner,
     ))));
     /* The directory, tail first: the end of a long path is the part that says
-       where you are. */
+    where you are. */
     let title = browse.dir.display().to_string();
     let title = if cols(&title) > inner.saturating_sub(2) {
         let keep: String = title
@@ -1537,8 +1583,8 @@ fn draw_browse(frame: &mut Frame, app: &App) {
 }
 
 /* The vaults this machine has opened, newest first. Paths, not contents:
-   nothing here is unlocked, so the list gives away where a vault lives and
-   nothing else — which is why it lives in a 0600 config file. */
+nothing here is unlocked, so the list gives away where a vault lives and
+nothing else — which is why it lives in a 0600 config file. */
 fn draw_library(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(library) = &app.library else {
@@ -1561,14 +1607,10 @@ fn draw_library(frame: &mut Frame, app: &App) {
         let live = n == library.cursor;
         let mark = if live { p.lit("▌") } else { Span::raw(" ") };
         /* The name is what you pick by; the folder is what tells two vaults
-           called `vault.kdbx` apart, so both are on the row and the folder
-           is the half that gives way when the popup is narrow. */
+        called `vault.kdbx` apart, so both are on the row and the folder
+        is the half that gives way when the popup is narrow. */
         let name = crate::app::vault_name(&row.path);
-        let folder = row
-            .path
-            .parent()
-            .map(home_relative)
-            .unwrap_or_default();
+        let folder = row.path.parent().map(home_relative).unwrap_or_default();
         let open = app.db_path.as_deref() == Some(row.path.as_path());
         let tail = if row.missing {
             "  missing".to_string()
@@ -1578,9 +1620,9 @@ fn draw_library(frame: &mut Frame, app: &App) {
             String::new()
         };
         /* The marker gets its columns first and the name gives way to it: it
-           is the half that changes what `enter` does, and a row that has lost
-           its `missing` reads as a healthy vault right up until the unlock
-           screen offers to create a new empty one. */
+        is the half that changes what `enter` does, and a row that has lost
+        its `missing` reads as a healthy vault right up until the unlock
+        screen offers to create a new empty one. */
         let name = truncate(&name, inner.saturating_sub(cols(&tail) + 2));
         let room_for_folder = inner.saturating_sub(cols(&name) + cols(&tail) + 4);
         let style = if row.missing {
@@ -1602,8 +1644,12 @@ fn draw_library(frame: &mut Frame, app: &App) {
     }
     if shown.len() > room {
         lines.push(
-            p.faint(format!(" {} of {} shown", room.min(shown.len()), shown.len()))
-                .into(),
+            p.faint(format!(
+                " {} of {} shown",
+                room.min(shown.len()),
+                shown.len()
+            ))
+            .into(),
         );
     }
     lines.push(Line::default());
@@ -1621,8 +1667,8 @@ fn draw_library(frame: &mut Frame, app: &App) {
 }
 
 /* The standalone generator. The password is shown plainly and never masked:
-   a secret you cannot read is one you cannot check, and it is not going into
-   the vault where `*` could reveal it later. */
+a secret you cannot read is one you cannot check, and it is not going into
+the vault where `*` could reveal it later. */
 fn draw_mint(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(mint) = &app.mint else {
@@ -1635,13 +1681,13 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     let bits = mint.bits();
 
     /* Built first, because how many rows they take is part of the budget the
-       password is measured against. The first row names the kind — `t` walks
-       complex, passphrase, pin — and the class knobs join only for complex:
-       a passphrase is words off a list and a PIN is digits, so toggles there
-       would lie about what is on screen. Each knob is coloured by its own
-       state, so the line doubles as the answer to "what is in this password",
-       and it wraps rather than clipping: a knob cut off by the border is a
-       setting whose state cannot be read. */
+    password is measured against. The first row names the kind — `t` walks
+    complex, passphrase, pin — and the class knobs join only for complex:
+    a passphrase is words off a list and a PIN is digits, so toggles there
+    would lie about what is on screen. Each knob is coloured by its own
+    state, so the line doubles as the answer to "what is in this password",
+    and it wraps rather than clipping: a knob cut off by the border is a
+    setting whose state cannot be read. */
     let mut knob_rows: Vec<Line> = Vec::new();
     let mut row: Vec<Span> = vec![Span::raw(" ")];
     let mut used = 1;
@@ -1667,7 +1713,10 @@ fn draw_mint(frame: &mut Frame, app: &App) {
         ] {
             let cost = cols(key) + cols(name) + 3;
             if used + cost > inner && row.len() > 1 {
-                knob_rows.push(Line::from(std::mem::replace(&mut row, vec![Span::raw(" ")])));
+                knob_rows.push(Line::from(std::mem::replace(
+                    &mut row,
+                    vec![Span::raw(" ")],
+                )));
                 used = 1;
             }
             push_knob(&mut row, &mut used, on, key, name);
@@ -1676,21 +1725,25 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     knob_rows.push(Line::from(row));
 
     /* Everything that is not the password, plus the border. The rows the
-       password gets are what is left: at 256 characters on a short terminal
-       the key hints used to be pushed off the bottom, and they are the only
-       place on screen that says `y` copies. */
+    password gets are what is left: at 256 characters on a short terminal
+    the key hints used to be pushed off the bottom, and they are the only
+    place on screen that says `y` copies. */
     let fixed = 7 + knob_rows.len() + 2;
     let room = (area.height as usize).saturating_sub(fixed).max(1);
     let per_row = inner.saturating_sub(2);
 
     let mut lines: Vec<Line> = vec![Line::default()];
     /* Wrapped, not truncated: at 128 characters an ellipsis would hide most
-       of what the popup exists to show. */
+    of what the popup exists to show. */
     if mint.password.is_empty() {
         lines.push(Line::from(p.faint("  nothing to show  ·  r rolls one")));
     } else {
         let chunks = wrap(&mint.password, per_row);
-        let shown = if chunks.len() > room { room - 1 } else { chunks.len() };
+        let shown = if chunks.len() > room {
+            room - 1
+        } else {
+            chunks.len()
+        };
         for chunk in chunks.iter().take(shown) {
             lines.push(Line::from(Span::styled(
                 format!("  {chunk}"),
@@ -1699,7 +1752,7 @@ fn draw_mint(frame: &mut Frame, app: &App) {
         }
         if shown < chunks.len() {
             /* Named rather than silently clipped: what `y` copies is the
-               whole password, not the part that fit on the screen. */
+            whole password, not the part that fit on the screen. */
             let left = mint.password.chars().count() - shown * per_row;
             lines.push(Line::from(p.faint(truncate(
                 &format!("  … {left} more  ·  y copies all of it"),
@@ -1719,17 +1772,16 @@ fn draw_mint(frame: &mut Frame, app: &App) {
     lines.push(Line::default());
     lines.extend(knob_rows);
     /* A passphrase grows by words, the other kinds by characters — the hint
-       names the unit `-` and `+` actually move. */
+    names the unit `-` and `+` actually move. */
     let resize = match settings.kind {
         crate::generator::Kind::Passphrase => "  - +  fewer, more words",
         _ => "  - +  shorter, longer",
     };
     lines.push(Line::from(p.faint(truncate(resize, inner))));
     lines.push(Line::default());
-    lines.push(Line::from(p.faint(truncate(
-        "  y copy · r again · t kind · esc close",
-        inner,
-    ))));
+    lines.push(Line::from(
+        p.faint(truncate("  y copy · r again · t kind · esc close", inner)),
+    ));
     popup(frame, &format!("{MARK} generate"), lines, width, &p);
 }
 
@@ -1754,7 +1806,7 @@ fn wrap(text: &str, room: usize) -> Vec<String> {
 }
 
 /* `~/vaults` rather than `/Users/someone/vaults`: the home prefix is the same
-   on every row, so it is the part worth spending no columns on. */
+on every row, so it is the part worth spending no columns on. */
 fn home_relative(dir: &std::path::Path) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let text = dir.display().to_string();
@@ -1769,14 +1821,14 @@ fn home_relative(dir: &std::path::Path) -> String {
 }
 
 /* Its own question rather than a prompt: no vault is blocked on the answer,
-   so it carries no reply channel. Only a named key confirms, so an
-   unrecognised key must not be an accidental yes. */
+so it carries no reply channel. Only a named key confirms, so an
+unrecognised key must not be an accidental yes. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
     let p = app.theme;
     let _ = app;
     /* The title is the part that truncates, never the sentence: a question
-       that renders as "…this cannot be" has lost the only word doing any
-       work. Sized against the terminal first, then the title fills the rest. */
+    that renders as "…this cannot be" has lost the only word doing any
+    work. Sized against the terminal first, then the title fills the rest. */
     let room = (frame.area().width as usize).saturating_sub(4);
     let (title, question, yes, after) = match what {
         Confirm::Quit => (
@@ -1786,24 +1838,36 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
             "",
         ),
         /* The title travels in the confirm so the answer is about a row the
-           user can see. A name is user-chosen text, never a secret.
+        user can see. A name is user-chosen text, never a secret.
 
-           Two questions, not one with a hedge. Outside the bin the row is
-           moved and `u` brings it back, so the box says so: a warning that
-           overstates the risk is a warning people learn to click through.
-           Inside the bin nothing brings it back, and that box says that. */
+        Two questions, not one with a hedge. Outside the bin the row is
+        moved and `u` brings it back, so the box says so: a warning that
+        overstates the risk is a warning people learn to click through.
+        Inside the bin nothing brings it back, and that box says that. */
         Confirm::DeleteEntry { title, forever, .. } => (
-            if *forever { "delete for good?" } else { "delete?" },
+            if *forever {
+                "delete for good?"
+            } else {
+                "delete?"
+            },
             delete_question("entry", title, room, *forever),
             Span::styled(" y  delete", Style::new().fg(p.error)),
-            if *forever { "this cannot be undone" } else { "u restores it" },
+            if *forever {
+                "this cannot be undone"
+            } else {
+                "u restores it"
+            },
         ),
         Confirm::DeleteGroup { title, forever, .. } => (
-            if *forever { "delete for good?" } else { "delete?" },
+            if *forever {
+                "delete for good?"
+            } else {
+                "delete?"
+            },
             delete_question("group", title, room, *forever),
             Span::styled(" y  delete", Style::new().fg(p.error)),
             /* A group takes its whole subtree either way. `u` puts the
-               subtree back; the permanent one has nothing to put back. */
+            subtree back; the permanent one has nothing to put back. */
             if *forever {
                 "this cannot be undone"
             } else {
@@ -1840,9 +1904,9 @@ fn delete_question(kind: &str, title: &str, room: usize, forever: bool) -> Strin
 }
 
 /* The modal entry editor: five labelled boxes, the caret block only in the
-   focused one. Shape mirrors the unlock screen so muscle memory carries over.
-   The password box masks as bullets and, on edit, advertises that empty
-   keeps — the one box where emptiness has a meaning. */
+focused one. Shape mirrors the unlock screen so muscle memory carries over.
+The password box masks as bullets and, on edit, advertises that empty
+keeps — the one box where emptiness has a meaning. */
 fn split_at_char(text: &str, caret: usize) -> (String, String) {
     let mut first = text.chars();
     let head: String = first.by_ref().take(caret).collect();
@@ -1859,15 +1923,15 @@ fn draw_form(frame: &mut Frame, app: &App) {
         let focused = form.field == field;
         let shown = match field {
             /* The edit password box starts empty on purpose; typed content
-               masks. The hint only shows while the box holds nothing. */
+            masks. The hint only shows while the box holds nothing. */
             FormField::Password if value.is_empty() && !form.password_touched => {
                 "(leave empty to keep)".to_string()
             }
             FormField::Password if form.reveal => value.to_string(),
             FormField::Password => "•".repeat(value.chars().count()),
             /* The seed box says which of the two empties it is in: an entry
-               that already has a code keeps it, and one that does not says
-               what it will take. */
+            that already has a code keeps it, and one that does not says
+            what it will take. */
             FormField::Otp if value.is_empty() && !form.otp_touched => {
                 if form.had_otp {
                     "(leave empty to keep)".to_string()
@@ -1889,17 +1953,17 @@ fn draw_form(frame: &mut Frame, app: &App) {
             Span::styled(format!(" {label:<LABEL$}"), style),
             Span::styled(head, style),
             /* The block caret sits between the split halves; an unfocused
-               box draws none, so the eye finds the live box first. */
+            box draws none, so the eye finds the live box first. */
             Span::styled(if focused { "█" } else { "" }, style),
             Span::styled(tail, style),
         ])
     };
 
     /* Notes are the one field that holds newlines, and rendering them as one
-       Line welded them together — "card ending 4417second line" — while Enter
-       submitted the form, so a break could be destroyed but never typed. One
-       row per line, `⏎` where a break is, and the caret lands on the row it
-       is actually in. */
+    Line welded them together — "card ending 4417second line" — while Enter
+    submitted the form, so a break could be destroyed but never typed. One
+    row per line, `⏎` where a break is, and the caret lands on the row it
+    is actually in. */
     let notes_rows = |value: &str, focused: bool, caret: usize| -> Vec<Line<'_>> {
         let style = if focused {
             Style::new().fg(p.text)
@@ -1915,7 +1979,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
             let label = if n == 0 { "notes" } else { "" };
             let mut spans = vec![Span::styled(format!(" {label:<LABEL$}"), style)];
             /* The caret belongs to exactly one row: the one whose span of the
-               string contains it, and the break itself counts as a column. */
+            string contains it, and the break itself counts as a column. */
             if focused && caret >= seen && caret <= seen + len {
                 let (head, tail) = split_at_char(part, caret - seen);
                 spans.push(Span::styled(head, style));
@@ -1939,8 +2003,8 @@ fn draw_form(frame: &mut Frame, app: &App) {
         row("password", FormField::Password, &form.password),
     ];
     /* What the box is worth, in the only terms the app can honestly give:
-       the classes actually present times the length. Shown while the box
-       holds something, so `^s` and a typed password answer the same way. */
+    the classes actually present times the length. Shown while the box
+    holds something, so `^s` and a typed password answer the same way. */
     if !form.password.is_empty() {
         let bits = crate::generator::typed_bits(&form.password);
         let word = crate::generator::strength(bits);
@@ -1955,11 +2019,15 @@ fn draw_form(frame: &mut Frame, app: &App) {
     lines.push(row("tags", FormField::Tags, &form.tags));
     lines.push(row("expires", FormField::Expires, &form.expires));
     /* The code the typed seed produces, right now. A seed is a run of
-       characters nobody can check by eye, and the site asks for a code to
-       confirm the setup — so the box answers with one before it is saved. */
+    characters nobody can check by eye, and the site asks for a code to
+    confirm the setup — so the box answers with one before it is saved. */
     if form.otp_touched && !form.otp.trim().is_empty() {
         let note = match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
-            Ok(url) => match url.parse::<keepass::db::TOTP>().ok().and_then(|t| t.value_now().ok()) {
+            Ok(url) => match url
+                .parse::<keepass::db::TOTP>()
+                .ok()
+                .and_then(|t| t.value_now().ok())
+            {
                 Some(code) => (
                     format!("{} · {}s", code.code, code.valid_for.as_secs()),
                     p.cursor,
@@ -1998,12 +2066,18 @@ fn draw_form(frame: &mut Frame, app: &App) {
     }
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
     /* Entries land in the cursor group, which may be scrolled out of sight;
-       the title is the only place that can say so before Enter. */
+    the title is the only place that can say so before Enter. */
     let title = match form.kind {
         FormKind::Add => format!("new entry in {}", app.here()),
         FormKind::Edit(_) => format!("edit entry · {}", app.here()),
     };
-    popup(frame, &truncate(&title, width.saturating_sub(4) as usize), lines, width, &p);
+    popup(
+        frame,
+        &truncate(&title, width.saturating_sub(4) as usize),
+        lines,
+        width,
+        &p,
+    );
 }
 
 // Shared with the test that holds the menus to the keys listed here.
@@ -2025,7 +2099,11 @@ pub const BROWSER_KEYS: &[(&str, &str, &str)] = &[
     ("commands", ":", "every action by name"),
     ("match", "n N", "next, previous match"),
     ("undo", "u", "one level"),
-    ("save", "^s  ^r  ^f", "save now · reload the file on disk · merge it in"),
+    (
+        "save",
+        "^s  ^r  ^f",
+        "save now · reload the file on disk · merge it in",
+    ),
     ("lock", "^l", "lock now"),
     ("master", "^p", "change the master password"),
     ("audit", "!", "reused, weak and empty passwords"),
@@ -2037,12 +2115,12 @@ pub const BROWSER_KEYS: &[(&str, &str, &str)] = &[
 ];
 
 /* One entry per line in three aligned columns. Only live keys: a row naming
-   a key that does nothing on this screen is documentation for a bug. */
+a key that does nothing on this screen is documentation for a bug. */
 fn draw_help(frame: &mut Frame, app: &App) {
     let p = app.theme;
     /* Only live keys: a row naming a key that does nothing on this screen is
-       documentation for a bug. The lock owns every printable key, so its
-       table names the boxes rather than the browser's list. */
+    documentation for a bug. The lock owns every printable key, so its
+    table names the boxes rather than the browser's list. */
     let rows: &[(&str, &str, &str)] = if app.view == View::Unlock {
         &[
             ("type", "a–z  0–9", "the boxes take every key"),
@@ -2073,9 +2151,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
     let mut lines: Vec<Line> = rows.iter().map(|r| Line::from(render(r))).collect();
 
     /* A help table that silently loses its last five rows is worse than a
-       short one: on an 80×14 window this used to draw twelve of seventeen
-       keys, with the border sitting on the status bar. Two columns first,
-       since the window is usually wider than it is short. */
+    short one: on an 80×14 window this used to draw twelve of seventeen
+    keys, with the border sitting on the status bar. Two columns first,
+    since the window is usually wider than it is short. */
     let area = frame.area();
     let fits = |lines: &[Line]| lines.len() as u16 + 2 <= area.height;
     if !fits(&lines) {
@@ -2096,12 +2174,15 @@ fn draw_help(frame: &mut Frame, app: &App) {
         }
     }
     /* Still too tall: say how many rows are missing rather than dropping them
-       behind the border, and name the one thing that brings them back. */
+    behind the border, and name the one thing that brings them back. */
     if !fits(&lines) {
         let room = (area.height as usize).saturating_sub(3).max(1);
         let hidden = lines.len() - room;
         lines.truncate(room);
-        lines.push(p.faint(format!(" +{hidden} more · a taller window shows them")).into());
+        lines.push(
+            p.faint(format!(" +{hidden} more · a taller window shows them"))
+                .into(),
+        );
     }
 
     let content = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
@@ -2109,7 +2190,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
 }
 
 /* The `H` screen: old versions of an entry, newest first. Every row is a
-   password somebody used to have, so they mask like any other. */
+password somebody used to have, so they mask like any other. */
 fn draw_history(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(history) = &app.history else {
@@ -2151,7 +2232,10 @@ fn draw_history(frame: &mut Frame, app: &App) {
         ]));
     }
     if history.rows.len() > room {
-        lines.push(p.faint(format!(" {room} of {} shown", history.rows.len())).into());
+        lines.push(
+            p.faint(format!(" {room} of {} shown", history.rows.len()))
+                .into(),
+        );
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![
@@ -2167,8 +2251,8 @@ fn draw_history(frame: &mut Frame, app: &App) {
 }
 
 /* The `F` screen: custom fields and attachments, with their values. These
-   used to show as a count and nothing else ("2 more fields"), which told the
-   user something was there and gave them no way to reach it. */
+used to show as a count and nothing else ("2 more fields"), which told the
+user something was there and gave them no way to reach it. */
 fn draw_fields(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(fields) = &app.fields else {
@@ -2192,10 +2276,14 @@ fn draw_fields(frame: &mut Frame, app: &App) {
     for (n, row) in fields.rows.iter().enumerate().skip(first).take(room) {
         let live = n == fields.cursor;
         let (name, said, ink) = match row {
-            crate::vault::Extra::Field { name, value, secret } => {
+            crate::vault::Extra::Field {
+                name,
+                value,
+                secret,
+            } => {
                 /* Masked to its own length, and only while it is a secret:
-                   the same rule the password row follows, so `*` means one
-                   thing everywhere. */
+                the same rule the password row follows, so `*` means one
+                thing everywhere. */
                 let shown = if *secret && !fields.reveal {
                     "•".repeat(value.chars().count().min(24))
                 } else {
@@ -2216,11 +2304,14 @@ fn draw_fields(frame: &mut Frame, app: &App) {
         ]));
     }
     if fields.rows.len() > room {
-        lines.push(p.faint(format!(" {room} of {} shown", fields.rows.len())).into());
+        lines.push(
+            p.faint(format!(" {room} of {} shown", fields.rows.len()))
+                .into(),
+        );
     }
 
     /* The add prompt replaces the key line while it is up: two popups over
-       each other read as one broken one. */
+    each other read as one broken one. */
     if let Some(add) = &fields.adding {
         let value_label = if add.from_file { "file" } else { "value" };
         let box_ = |label: &str, text: &str, focused: bool, mask: bool| {
@@ -2249,7 +2340,11 @@ fn draw_fields(frame: &mut Frame, app: &App) {
         lines.push(Line::default());
         lines.push(Line::from(vec![
             Span::styled(" enter", Style::new().fg(p.accent)),
-            p.faint(if add.from_file { " attach   " } else { " add   " }),
+            p.faint(if add.from_file {
+                " attach   "
+            } else {
+                " add   "
+            }),
             Span::styled("tab", Style::new().fg(p.accent)),
             p.faint(" field   "),
             Span::styled("esc", Style::new().fg(p.accent)),
@@ -2277,9 +2372,9 @@ fn draw_fields(frame: &mut Frame, app: &App) {
 }
 
 /* What `!` found: one line per entry, worst first, with the reason beside
-   the name. A list rather than a score, because a number out of ten tells
-   nobody which entry to open next — and `enter` puts the cursor on the row,
-   so the fix is two keys away from the finding. */
+the name. A list rather than a score, because a number out of ten tells
+nobody which entry to open next — and `enter` puts the cursor on the row,
+so the fix is two keys away from the finding. */
 fn draw_audit(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(audit) = &app.audit else {
@@ -2289,7 +2384,7 @@ fn draw_audit(frame: &mut Frame, app: &App) {
     let width = area.width.saturating_sub(8).clamp(30, 76);
     let inner = width.saturating_sub(4) as usize;
     /* Leave room for the header, the hint line and the popup's own border,
-       and scroll the rest: a vault with forty findings must still fit. */
+    and scroll the rest: a vault with forty findings must still fit. */
     let room = (area.height as usize).saturating_sub(6).max(1);
     let first = audit.cursor.saturating_sub(room.saturating_sub(1));
 
@@ -2301,7 +2396,10 @@ fn draw_audit(frame: &mut Frame, app: &App) {
     let mut lines = vec![
         Line::from(vec![
             p.faint(" "),
-            Span::styled(format!("{} to look at", audit.rows.len()), Style::new().fg(p.text)),
+            Span::styled(
+                format!("{} to look at", audit.rows.len()),
+                Style::new().fg(p.text),
+            ),
             p.faint(if reused > 0 {
                 format!("  ·  {reused} share a password with something else")
             } else {
@@ -2319,20 +2417,18 @@ fn draw_audit(frame: &mut Frame, app: &App) {
             .unwrap_or_default();
         let say = issue.say();
         /* Reuse is the finding a person cannot spot themselves and the one
-           that costs more than one account, so it is the one in `warn`. */
+        that costs more than one account, so it is the one in `warn`. */
         let ink = match issue {
             /* The three that are decisions rather than estimates: no
-               password, a shared one, and one whose owner already said it
-               should have stopped working. */
+            password, a shared one, and one whose owner already said it
+            should have stopped working. */
             crate::vault::Issue::Reused(_)
             | crate::vault::Issue::Empty
             | crate::vault::Issue::Expired => p.warn,
             crate::vault::Issue::Weak(_) | crate::vault::Issue::Old(_) => p.muted,
         };
         let name = truncate(&title, inner.saturating_sub(cols(&say) + 4));
-        let pad = inner
-            .saturating_sub(cols(&name) + cols(&say) + 2)
-            .max(1);
+        let pad = inner.saturating_sub(cols(&name) + cols(&say) + 2).max(1);
         lines.push(Line::from(vec![
             if live { p.lit("▌") } else { Span::raw(" ") },
             Span::styled(format!(" {name}"), p.row(live)),
@@ -2341,11 +2437,14 @@ fn draw_audit(frame: &mut Frame, app: &App) {
         ]));
     }
     if audit.rows.len() > room {
-        lines.push(p.faint(format!(
-            " {} of {} shown",
-            room.min(audit.rows.len()),
-            audit.rows.len()
-        )).into());
+        lines.push(
+            p.faint(format!(
+                " {} of {} shown",
+                room.min(audit.rows.len()),
+                audit.rows.len()
+            ))
+            .into(),
+        );
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![
@@ -2360,9 +2459,9 @@ fn draw_audit(frame: &mut Frame, app: &App) {
 }
 
 /* The change-password prompt: two masked boxes, and a line saying what is
-   about to happen. Worth more words than the other popups, because this is
-   the one action in Sennel nobody can take back and nothing can remind them
-   of — a forgotten master password is a lost vault. */
+about to happen. Worth more words than the other popups, because this is
+the one action in Sennel nobody can take back and nothing can remind them
+of — a forgotten master password is a lost vault. */
 fn draw_rekey(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(rekey) = &app.rekey else {
@@ -2376,8 +2475,8 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
         .unwrap_or_default();
     let row = |label: &str, value: &str, focused: bool| {
         /* Masked to its own length, not a fixed run: on the box you are
-           typing into, the count is the only feedback there is, and it is
-           already on your screen and nowhere else. */
+        typing into, the count is the only feedback there is, and it is
+        already on your screen and nowhere else. */
         let shown = if rekey.reveal {
             value.to_string()
         } else {
@@ -2399,11 +2498,19 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
     let mut lines = vec![
         Line::from(p.faint(truncate(&format!(" {file}"), 60))),
         Line::default(),
-        row("new", &rekey.password, rekey.field == crate::app::RekeyField::New),
-        row("again", &rekey.confirm, rekey.field == crate::app::RekeyField::Again),
+        row(
+            "new",
+            &rekey.password,
+            rekey.field == crate::app::RekeyField::New,
+        ),
+        row(
+            "again",
+            &rekey.confirm,
+            rekey.field == crate::app::RekeyField::Again,
+        ),
     ];
     /* Strength on the way in, the same estimate the entry form gives: a
-       master password is the one worth measuring before it is committed. */
+    master password is the one worth measuring before it is committed. */
     if !rekey.password.is_empty() {
         let bits = crate::generator::typed_bits(&rekey.password);
         let word = crate::generator::strength(bits);
@@ -2433,8 +2540,8 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
 }
 
 /* The one-box group prompt behind A and E. Same field shape as the entry
-   form's rows so the caret and styling read identically, minus the cycling:
-   there is only the name. */
+form's rows so the caret and styling read identically, minus the cycling:
+there is only the name. */
 fn draw_group_prompt(frame: &mut Frame, app: &App) {
     let p = app.theme;
     let Some(prompt) = &app.group_prompt else {
@@ -2469,9 +2576,9 @@ fn draw_group_prompt(frame: &mut Frame, app: &App) {
 }
 
 /* The matched characters of a row, in `cursor` and bold against the rest: a list
-   sorted by relevance still leaves the reader working out why each row is
-   there. Indices are char positions into the untruncated title, so anything
-   past the cut simply does not match a span. */
+sorted by relevance still leaves the reader working out why each row is
+there. Indices are char positions into the untruncated title, so anything
+past the cut simply does not match a span. */
 fn highlight(text: &str, hits: &[u32], base: Style, p: &Palette) -> Vec<Span<'static>> {
     if hits.is_empty() {
         return vec![Span::styled(text.to_string(), base)];
@@ -2483,7 +2590,10 @@ fn highlight(text: &str, hits: &[u32], base: Style, p: &Palette) -> Vec<Span<'st
     for (at, c) in text.chars().enumerate() {
         let on = hits.contains(&(at as u32));
         if on != run_lit && !run.is_empty() {
-            out.push(Span::styled(std::mem::take(&mut run), if run_lit { lit } else { base }));
+            out.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_lit { lit } else { base },
+            ));
         }
         run_lit = on;
         run.push(c);
@@ -2494,7 +2604,6 @@ fn highlight(text: &str, hits: &[u32], base: Style, p: &Palette) -> Vec<Span<'st
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2502,8 +2611,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     /* A `TestBackend` row is cells, not a string: a double-width glyph fills
-       one cell and leaves the next blank. Collect per row and trim the end,
-       never join the whole buffer and substring it. */
+    one cell and leaves the next blank. Collect per row and trim the end,
+    never join the whole buffer and substring it. */
     fn screen(t: &Terminal<TestBackend>) -> Vec<String> {
         let buf = t.backend().buffer();
         let area = buf.area;
@@ -2519,7 +2628,7 @@ mod tests {
     }
 
     /* The frame's contract in one test: the wordmark, the lock question, and
-       the one key that is always live. */
+    the one key that is always live. */
     #[test]
     fn the_frame_names_sennel_and_offers_keys() {
         let backend = TestBackend::new(80, 24);
@@ -2533,8 +2642,8 @@ mod tests {
     }
 
     /* The password box shows bullets end to end: length is the only thing
-       about it the screen may reveal, and the plaintext never reaches a
-       cell. */
+    about it the screen may reveal, and the plaintext never reaches a
+    cell. */
     #[test]
     fn the_lock_screen_never_shows_the_password() {
         let backend = TestBackend::new(80, 24);
@@ -2549,8 +2658,8 @@ mod tests {
     }
 
     /* `^r` turns the bullets into the typed password — the lock's sibling of
-       the browser detail pane's `*`, moved to a control key so a star in the
-       password itself stays a password character. Toggling off hides again. */
+    the browser detail pane's `*`, moved to a control key so a star in the
+    password itself stays a password character. Toggling off hides again. */
     #[test]
     fn ctrl_r_reveals_the_lock_screen_password_and_hides_it_again() {
         let backend = TestBackend::new(80, 24);
@@ -2574,8 +2683,8 @@ mod tests {
     }
 
     /* The browser's contract: both panes list what the vault holds, the
-       detail names the entry's user, and the password never reaches a cell —
-       the detail carries a fixed run of bullets instead. */
+    detail names the entry's user, and the password never reaches a cell —
+    the detail carries a fixed run of bullets instead. */
     #[test]
     fn the_browser_shows_groups_entries_and_a_masked_detail() {
         use crate::vault::Vault;
@@ -2597,7 +2706,7 @@ mod tests {
             .unwrap();
         app.open_vault(vault);
         /* Pre-order is root then Banks, so one step down lands on it, and
-           stepping groups re-points the entry cursor at its first entry. */
+        stepping groups re-points the entry cursor at its first entry. */
         app.step_group(true);
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
@@ -2609,7 +2718,7 @@ mod tests {
     }
 
     /* The tree says which groups fold: ▾ on an open parent, ▸ once folded,
-       and nothing on a leaf. A folded subtree must not appear at all. */
+    and nothing on a leaf. A folded subtree must not appear at all. */
     #[test]
     fn the_tree_marks_folds_and_hides_folded_children() {
         use crate::vault::Vault;
@@ -2620,7 +2729,9 @@ mod tests {
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
         vault.create_group(&banks, "Work").unwrap();
-        vault.create_entry(&root, "loose", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "loose", "u", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
@@ -2636,7 +2747,7 @@ mod tests {
     }
 
     /* `*` reveals the real password in the detail, and the bar counts the
-       whole vault: root plus Banks is two groups, one entry. */
+    whole vault: root plus Banks is two groups, one entry. */
     #[test]
     fn star_reveals_the_password_and_the_bar_counts_the_vault() {
         use crate::vault::Vault;
@@ -2659,7 +2770,7 @@ mod tests {
         app.open_vault(vault);
         app.step_group(true);
         /* One frame first: `*` refuses until a draw has said whether the
-           detail pane fits, which is the only place that width is known. */
+        detail pane fits, which is the only place that width is known. */
         t.draw(|f| draw(f, &mut app)).unwrap();
         app.toggle_password();
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -2670,7 +2781,7 @@ mod tests {
     }
 
     /* The overlay is a popup, not a screen: the frame behind it is still
-       drawn, and dismissing it changes nothing else. */
+    drawn, and dismissing it changes nothing else. */
     #[test]
     fn h_opens_a_keys_popup_over_the_frame() {
         let backend = TestBackend::new(80, 24);
@@ -2684,7 +2795,7 @@ mod tests {
     }
 
     /* The overlay only names live keys, and it names all of them: the keys
-       that were missing from it were keys nobody could find. */
+    that were missing from it were keys nobody could find. */
     #[test]
     fn the_overlay_names_the_browsers_live_keys() {
         use crate::vault::Vault;
@@ -2695,11 +2806,13 @@ mod tests {
         app.show_help = true;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        for key in ["enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/", "^s", "esc"] {
+        for key in [
+            "enter", "*", "n N", "g G", "PgUp", "^d", "X V", "/", "^s", "esc",
+        ] {
             assert!(joined.contains(key), "the overlay forgot {key}: {joined}");
         }
         /* ^s here is save-now. `P` generates, and the row has to say so
-           without reading as the form's ^s. */
+        without reading as the form's ^s. */
         assert!(joined.contains("save now"), "{joined}");
         assert!(joined.contains("generate a password"), "{joined}");
     }
@@ -2715,11 +2828,14 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("^s  ^r  ^f"), "{joined}");
-        assert!(joined.contains("merge it in"), "the save row is clipped: {joined}");
+        assert!(
+            joined.contains("merge it in"),
+            "the save row is clipped: {joined}"
+        );
     }
 
     /* Enter means three things on the lock screen, and the hint names the one
-       the focused box will do. */
+    the focused box will do. */
     #[test]
     fn the_unlock_hint_follows_the_focused_box() {
         use crate::app::UnlockField;
@@ -2739,7 +2855,7 @@ mod tests {
     }
 
     /* The edit form masks the password box and advertises that empty keeps;
-       the stored secret never reaches the popup buffer. */
+    the stored secret never reaches the popup buffer. */
     #[test]
     fn the_form_masks_the_password_and_names_the_keep_rule() {
         use crate::vault::Vault;
@@ -2759,7 +2875,10 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("edit entry"), "{joined}");
         assert!(joined.contains("leave empty to keep"), "{joined}");
-        assert!(!joined.contains("s3cret-pw"), "the form leaked the stored secret");
+        assert!(
+            !joined.contains("s3cret-pw"),
+            "the form leaked the stored secret"
+        );
         // Typed content masks as bullets, one per char. Two Tabs land in
         // the password box; the caret jumps to the end of an empty box.
         app.next_form_field(true);
@@ -2770,11 +2889,14 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("•••"), "{joined}");
-        assert!(!joined.contains("new"), "the form showed the password in clear");
+        assert!(
+            !joined.contains("new"),
+            "the form showed the password in clear"
+        );
     }
 
     /* The delete confirm names the row it is about, so a yes is an answer
-       to a visible question, not a blind id. */
+    to a visible question, not a blind id. */
     #[test]
     fn the_delete_confirm_names_the_entry() {
         use crate::vault::Vault;
@@ -2800,7 +2922,7 @@ mod tests {
     }
 
     /* Inside the bin the same key asks the other question, and promises no
-       undo it does not have. */
+    undo it does not have. */
     #[test]
     fn the_delete_confirm_inside_the_bin_says_it_is_permanent() {
         use crate::vault::Vault;
@@ -2809,7 +2931,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         vault.recycle_entry(&id).unwrap();
         let bin = vault.recycle_bin_id().unwrap();
         app.open_vault(vault);
@@ -2824,7 +2948,7 @@ mod tests {
     }
 
     /* A long title must not push the verb off the popup: the name truncates,
-       the question never does. */
+    the question never does. */
     #[test]
     fn the_delete_confirm_keeps_its_verb_at_eighty_columns() {
         use crate::vault::Vault;
@@ -2850,11 +2974,14 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("bin entry"), "{joined}");
         assert!(joined.contains("y  delete"), "{joined}");
-        assert!(joined.contains("…”?"), "the title did not truncate: {joined}");
+        assert!(
+            joined.contains("…”?"),
+            "the title did not truncate: {joined}"
+        );
     }
 
     /* A deleted row that looks exactly like a live one is how somebody
-       copies a password they threw away last week, so the bin draws back. */
+    copies a password they threw away last week, so the bin draws back. */
     #[test]
     fn the_recycle_bin_draws_back_from_the_live_groups() {
         use crate::vault::Vault;
@@ -2864,7 +2991,9 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         vault.create_group(&root, "Banks").unwrap();
-        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         vault.recycle_entry(&id).unwrap();
         app.open_vault(vault);
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -2892,7 +3021,7 @@ mod tests {
     }
 
     /* The point of an expiry is spotting one in the list you were about to
-       reach for, so the marker has to be in the row and not only in the pane. */
+    reach for, so the marker has to be in the row and not only in the pane. */
     #[test]
     fn an_expired_entry_is_marked_in_the_list_and_named_in_the_pane() {
         use crate::vault::Vault;
@@ -2902,8 +3031,12 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let stale = vault.create_entry(&root, "old-cert", "octo", "p", "", "").unwrap();
-        vault.create_entry(&root, "fresh-cert", "octo", "p", "", "").unwrap();
+        let stale = vault
+            .create_entry(&root, "old-cert", "octo", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&root, "fresh-cert", "octo", "p", "", "")
+            .unwrap();
         vault
             .set_expiry(&stale, Some((Utc::now() - Duration::days(3)).naive_utc()))
             .unwrap();
@@ -2915,15 +3048,25 @@ mod tests {
         let rows = screen(&t);
         let stale_row = rows.iter().find(|r| r.contains("old-cert")).unwrap();
         let fresh_row = rows.iter().find(|r| r.contains("fresh-cert")).unwrap();
-        assert!(stale_row.contains('⧖'), "no marker on the expired row: {stale_row:?}");
-        assert!(!fresh_row.contains('⧖'), "a live row was marked: {fresh_row:?}");
+        assert!(
+            stale_row.contains('⧖'),
+            "no marker on the expired row: {stale_row:?}"
+        );
+        assert!(
+            !fresh_row.contains('⧖'),
+            "a live row was marked: {fresh_row:?}"
+        );
 
         /* The glyph carries it without colour, but the colour is what the eye
-           catches first, so both are checked. */
+        catches first, so both are checked. */
         let buf = t.backend().buffer();
         let y = rows.iter().position(|r| r.contains("old-cert")).unwrap() as u16;
         let x = stale_row.chars().take_while(|c| *c != '⧖').count() as u16;
-        assert_eq!(buf[(x, y)].fg, crate::theme::WARM.warn, "the marker is not in warn");
+        assert_eq!(
+            buf[(x, y)].fg,
+            crate::theme::WARM.warn,
+            "the marker is not in warn"
+        );
 
         // And the pane spells it out, because a date alone makes the reader
         // do the arithmetic.
@@ -2933,7 +3076,7 @@ mod tests {
     }
 
     /* An entry that does not expire costs no row: "expires never" is a line
-       that says nothing happens. */
+    that says nothing happens. */
     #[test]
     fn an_entry_without_an_expiry_gets_no_row() {
         use crate::vault::Vault;
@@ -2942,7 +3085,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "plain", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "plain", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -2952,14 +3097,14 @@ mod tests {
     }
 
     /* Every glyph this file draws has to be one cell wide, or a row budgeted
-       in columns renders wider than the pane and wraps on somebody else's
-       terminal. This is not a thing you can eyeball: `⌛` and `🔒` look
-       single-width in most editors and are East Asian Wide, which is how the
-       expired marker shipped two cells wide.
+    in columns renders wider than the pane and wraps on somebody else's
+    terminal. This is not a thing you can eyeball: `⌛` and `🔒` look
+    single-width in most editors and are East Asian Wide, which is how the
+    expired marker shipped two cells wide.
 
-       Reads this file's own source, so a glyph added next year is covered
-       without anybody remembering to add it here. Comments are stripped
-       first — they discuss wide glyphs on purpose. */
+    Reads this file's own source, so a glyph added next year is covered
+    without anybody remembering to add it here. Comments are stripped
+    first — they discuss wide glyphs on purpose. */
     #[test]
     fn every_glyph_the_ui_draws_is_one_cell_wide() {
         let source = include_str!("ui.rs");
@@ -2985,7 +3130,7 @@ mod tests {
             .join("\n");
 
         /* Only string and char literals: an identifier cannot reach the
-           screen, and the width of one is not a question. */
+        screen, and the width of one is not a question. */
         let mut glyphs: Vec<char> = Vec::new();
         let mut chars = code.chars().peekable();
         while let Some(c) = chars.next() {
@@ -3013,11 +3158,14 @@ mod tests {
             .collect();
         wide.sort();
         wide.dedup();
-        assert!(wide.is_empty(), "glyphs that are not one cell wide: {wide:?}");
+        assert!(
+            wide.is_empty(),
+            "glyphs that are not one cell wide: {wide:?}"
+        );
     }
 
     /* The bin was told apart by dimming alone, and NO_COLOR takes dimming
-       away — the same reason the pane marker is a glyph and not a shade. */
+    away — the same reason the pane marker is a glyph and not a shade. */
     #[test]
     fn the_recycle_bin_is_marked_as_well_as_dimmed() {
         use crate::vault::Vault;
@@ -3033,7 +3181,10 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
 
         let rows = screen(&t);
-        let bin = rows.iter().find(|r| r.contains("Recycle Bin")).expect("no bin row");
+        let bin = rows
+            .iter()
+            .find(|r| r.contains("Recycle Bin"))
+            .expect("no bin row");
         assert!(bin.contains('⌦'), "the bin has no marker: {bin:?}");
         // A live group beside it has none, so this reads as the bin and not
         // as something every folder gets.
@@ -3042,7 +3193,7 @@ mod tests {
     }
 
     /* The mark in the header is the app's own, so it gets its own assertion:
-       a rook, one cell, and actually on screen. */
+    a rook, one cell, and actually on screen. */
     #[test]
     fn the_header_carries_the_rook() {
         use crate::vault::Vault;
@@ -3056,7 +3207,7 @@ mod tests {
         assert!(top.contains("Sennel"), "{top:?}");
         assert_eq!(cols(MARK), 1, "the mark is not one cell");
         /* Left of the name, which is where a logo goes — and the header's
-           own column budget counts it, so the vault name still fits. */
+        own column budget counts it, so the vault name still fits. */
         assert!(
             top.find(MARK).unwrap() < top.find("Sennel").unwrap(),
             "{top:?}"
@@ -3064,9 +3215,9 @@ mod tests {
     }
 
     /* Click-to-copy: the rows have to line up with what the draw put on
-       screen, and the pane's rows move — url, notes, the code and the expiry
-       are each optional — so this checks the map against the rendered text
-       rather than against an assumed layout. */
+    screen, and the pane's rows move — url, notes, the code and the expiry
+    are each optional — so this checks the map against the rendered text
+    rather than against an assumed layout. */
     #[test]
     fn clicking_a_detail_row_copies_that_field() {
         use crate::vault::Vault;
@@ -3076,7 +3227,14 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let id = vault
-            .create_entry(&root, "checking", "octo", "s3cret-pw", "https://b.example", "")
+            .create_entry(
+                &root,
+                "checking",
+                "octo",
+                "s3cret-pw",
+                "https://b.example",
+                "",
+            )
             .unwrap();
         app.open_vault(vault);
         app.switch_pane();
@@ -3084,25 +3242,40 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
 
         /* Every row the map claims is a copy target sits on the line the
-           draw gave that field. */
+        draw gave that field. */
         let rows = screen(&t);
         /* A fn over the map rather than a closure over `app`: the closure
-           would hold a borrow across the redraw below. */
+        would hold a borrow across the redraw below. */
         fn at(app: &App, what: app::CopyRow) -> Option<u16> {
-            app.copy_rows.iter().find(|(_, w)| *w == what).map(|(y, _)| *y)
+            app.copy_rows
+                .iter()
+                .find(|(_, w)| *w == what)
+                .map(|(y, _)| *y)
         }
         let user_y = at(&app, app::CopyRow::Username).expect("no username row");
         let pass_y = at(&app, app::CopyRow::Password).expect("no password row");
         let url_y = at(&app, app::CopyRow::Url).expect("no url row");
-        assert!(rows[user_y as usize].contains("octo"), "{:?}", rows[user_y as usize]);
-        assert!(rows[pass_y as usize].contains("••••"), "{:?}", rows[pass_y as usize]);
-        assert!(rows[url_y as usize].contains("b.example"), "{:?}", rows[url_y as usize]);
+        assert!(
+            rows[user_y as usize].contains("octo"),
+            "{:?}",
+            rows[user_y as usize]
+        );
+        assert!(
+            rows[pass_y as usize].contains("••••"),
+            "{:?}",
+            rows[pass_y as usize]
+        );
+        assert!(
+            rows[url_y as usize].contains("b.example"),
+            "{:?}",
+            rows[url_y as usize]
+        );
         // Three rows, three distinct lines.
         assert_eq!(app.copy_rows.len(), 3);
         assert!(user_y != pass_y && pass_y != url_y);
 
         /* An entry with no url has no url target, and the password row moves
-           up — which is the whole reason the map is rebuilt by the draw. */
+        up — which is the whole reason the map is rebuilt by the draw. */
         let bare = {
             let vault = app.session.vault_mut().unwrap();
             vault.create_entry(&root, "bare", "u", "p", "", "").unwrap()
@@ -3110,13 +3283,17 @@ mod tests {
         app.snap();
         app.entry_cursor = Some(bare);
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert_eq!(app.copy_rows.len(), 2, "a url row survived an entry with no url");
+        assert_eq!(
+            app.copy_rows.len(),
+            2,
+            "a url row survived an entry with no url"
+        );
         assert!(at(&app, app::CopyRow::Url).is_none());
     }
 
     /* A short pane truncates its rows, and a click target left behind at a
-       row that did not render would copy a password nobody can see — the one
-       way click-to-copy could put a secret on the clipboard silently. */
+    row that did not render would copy a password nobody can see — the one
+    way click-to-copy could put a secret on the clipboard silently. */
     #[test]
     fn a_row_the_pane_was_too_short_to_draw_is_not_clickable() {
         use crate::vault::Vault;
@@ -3131,7 +3308,7 @@ mod tests {
         app.entry_cursor = Some(id);
 
         /* Wide enough for the detail pane, then shrinking: each row falls off
-           the bottom in turn, and the map has to shrink with it. */
+        the bottom in turn, and the map has to shrink with it. */
         let mut seen = Vec::new();
         for height in (4..=14).rev() {
             let mut t = Terminal::new(TestBackend::new(110, height)).unwrap();
@@ -3143,7 +3320,7 @@ mod tests {
                     "{what:?} is clickable at row {y} on a {height}-row screen"
                 );
                 /* And the row it points at is really that field's, not a
-                   stamp or the hint line that slid up into its place. */
+                stamp or the hint line that slid up into its place. */
                 let line = &rows[*y as usize];
                 let wants = match what {
                     app::CopyRow::Username => "octo",
@@ -3166,22 +3343,27 @@ mod tests {
     }
 
     /* A narrow terminal draws no detail pane at all, so last frame's targets
-       must not be left sitting over the entries pane — a click there would
-       copy a password instead of selecting a row. */
+    must not be left sitting over the entries pane — a click there would
+    copy a password instead of selecting a row. */
     #[test]
     fn narrowing_the_window_takes_the_click_targets_with_it() {
         use crate::vault::Vault;
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         app.entry_cursor = Some(id);
 
         let mut wide = Terminal::new(TestBackend::new(110, 24)).unwrap();
         wide.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(!app.copy_rows.is_empty(), "the wide pane registered nothing");
+        assert!(
+            !app.copy_rows.is_empty(),
+            "the wide pane registered nothing"
+        );
 
         // Below PREVIEW_FROM there is no detail pane to click.
         let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -3193,18 +3375,21 @@ mod tests {
         );
 
         /* And the popup, which is the narrow terminal's detail view, puts
-           them back — then takes them away again when it closes. */
+        them back — then takes them away again when it closes. */
         app.detail = true;
         narrow.draw(|f| draw(f, &mut app)).unwrap();
         assert!(!app.copy_rows.is_empty(), "the popup registered nothing");
         app.detail = false;
         narrow.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(app.copy_rows.is_empty(), "the closed popup left targets behind");
+        assert!(
+            app.copy_rows.is_empty(),
+            "the closed popup left targets behind"
+        );
     }
 
     /* A copy is otherwise invisible — the clipboard is somewhere else, and
-       the status flash is at the far end of the screen from the hand that
-       just moved — so the row lights up and then goes back on its own. */
+    the status flash is at the far end of the screen from the hand that
+    just moved — so the row lights up and then goes back on its own. */
     #[test]
     fn a_copied_row_lights_up_and_settles_back() {
         use crate::vault::Vault;
@@ -3213,7 +3398,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         app.entry_cursor = Some(id);
@@ -3224,12 +3411,15 @@ mod tests {
             .find(|(_, w)| *w == app::CopyRow::Username)
             .map(|(y, _)| *y)
             .unwrap();
-        assert!(screen(&t)[user_y as usize].contains("user"), "no label before the click");
+        assert!(
+            screen(&t)[user_y as usize].contains("user"),
+            "no label before the click"
+        );
 
         /* The click goes through the same path the mouse takes. No clipboard
-           in a test environment, so the copy itself may fail — the row lights
-           either way, because a row that stayed dark reads as a click the app
-           missed. */
+        in a test environment, so the copy itself may fail — the row lights
+        either way, because a row that stayed dark reads as a click the app
+        missed. */
         app.click(app.copy_rows[0].0.max(1), user_y);
         assert!(app.glowing(app::CopyRow::Username));
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -3241,15 +3431,24 @@ mod tests {
         assert!(!app.glowing(app::CopyRow::Password));
 
         /* And it settles back on its own, without a keypress: the frame loop
-           already wakes every 120ms, so the decay needs nothing scheduled. */
-        app.copied = Some((app::CopyRow::Username, std::time::Instant::now() - std::time::Duration::from_secs(2)));
-        assert!(!app.glowing(app::CopyRow::Username), "the glow never expires");
+        already wakes every 120ms, so the decay needs nothing scheduled. */
+        app.copied = Some((
+            app::CopyRow::Username,
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        ));
+        assert!(
+            !app.glowing(app::CopyRow::Username),
+            "the glow never expires"
+        );
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t)[user_y as usize].contains("user"), "the label did not come back");
+        assert!(
+            screen(&t)[user_y as usize].contains("user"),
+            "the label did not come back"
+        );
     }
 
     /* Custom fields and attachments were a count and nothing else, which
-       told the user something was there and gave them no way to reach it. */
+    told the user something was there and gave them no way to reach it. */
     #[test]
     fn the_fields_screen_shows_values_and_masks_the_secret_ones() {
         use crate::vault::Vault;
@@ -3258,10 +3457,14 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "vpn", "octo", "p", "", "")
+            .unwrap();
         vault.set_field(&id, "recovery", "8888-4444", true).unwrap();
         vault.set_field(&id, "account", "AC-9", false).unwrap();
-        vault.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+        vault
+            .add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec())
+            .unwrap();
         app.open_vault(vault);
         app.entry_cursor = Some(id);
         app.open_fields();
@@ -3270,7 +3473,10 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("vpn · fields"), "{joined}");
         // A protected field masks; an unprotected one is not a secret.
-        assert!(!joined.contains("8888-4444"), "a protected field drew in the clear");
+        assert!(
+            !joined.contains("8888-4444"),
+            "a protected field drew in the clear"
+        );
         assert!(joined.contains("AC-9"), "{joined}");
         // A file says how big it is, which is the only thing to say about bytes.
         assert!(joined.contains("key.pem"), "{joined}");
@@ -3279,12 +3485,15 @@ mod tests {
         // `*` is the reveal, the same key and the same rule as the password.
         app.fields_reveal();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t).join("\n").contains("8888-4444"), "* revealed nothing");
+        assert!(
+            screen(&t).join("\n").contains("8888-4444"),
+            "* revealed nothing"
+        );
     }
 
     /* Extracting the same attachment twice hits the exclusive-create that
-       stops a planted symlink redirecting the write. Correct, but the bare
-       "File exists" it produced named neither the file nor the reason. */
+    stops a planted symlink redirecting the write. Correct, but the bare
+    "File exists" it produced named neither the file nor the reason. */
     #[test]
     fn extracting_an_attachment_twice_says_which_file_is_in_the_way() {
         use crate::vault::Vault;
@@ -3296,8 +3505,12 @@ mod tests {
 
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
-        vault.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+        let id = vault
+            .create_entry(&root, "vpn", "octo", "p", "", "")
+            .unwrap();
+        vault
+            .add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec())
+            .unwrap();
         vault.save_as(&path, "pw", None).unwrap();
         let mut app = App::new();
         app.open_vault(vault);
@@ -3313,20 +3526,25 @@ mod tests {
         assert!(app.stage.contains("already there"), "{}", app.stage);
         assert!(app.stage.contains("key.pem"), "{}", app.stage);
         // And the file that was there is untouched.
-        assert_eq!(std::fs::read(dir.join("key.pem")).unwrap(), b"-----BEGIN-----");
+        assert_eq!(
+            std::fs::read(dir.join("key.pem")).unwrap(),
+            b"-----BEGIN-----"
+        );
         std::fs::remove_file(dir.join("key.pem")).ok();
         std::fs::remove_file(&path).ok();
     }
 
     /* `D` removes the row under the cursor, and the list has to stop showing
-       what is no longer there. */
+    what is no longer there. */
     #[test]
     fn removing_a_field_updates_the_list_under_the_cursor() {
         use crate::vault::Vault;
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "vpn", "octo", "p", "", "")
+            .unwrap();
         vault.set_field(&id, "account", "AC-9", false).unwrap();
         vault.set_field(&id, "recovery", "8888", true).unwrap();
         app.open_vault(vault);
@@ -3347,15 +3565,17 @@ mod tests {
     }
 
     /* The add prompt takes a name and a value, and what it writes is
-       protected: a field somebody adds by hand to a password manager is more
-       likely to be a secret than not. */
+    protected: a field somebody adds by hand to a password manager is more
+    likely to be a secret than not. */
     #[test]
     fn adding_a_field_writes_it_protected() {
         use crate::vault::Vault;
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "vpn", "octo", "p", "", "").unwrap();
+        let id = vault
+            .create_entry(&root, "vpn", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.entry_cursor = Some(id);
         app.open_fields();
@@ -3381,11 +3601,14 @@ mod tests {
         // A name and nothing else keeps the prompt rather than writing junk.
         app.fields_add(false);
         app.fields_add_submit();
-        assert!(app.fields.as_ref().unwrap().adding.is_some(), "an empty name went in");
+        assert!(
+            app.fields.as_ref().unwrap().adding.is_some(),
+            "an empty name went in"
+        );
     }
 
     /* A list, not a score: the point is that `enter` takes you to the row,
-       so the fix is two keys from the finding. */
+    so the fix is two keys from the finding. */
     #[test]
     fn the_audit_lists_what_is_wrong_and_enter_goes_there() {
         use crate::vault::Vault;
@@ -3395,8 +3618,12 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "checking", "octo", "shared-pw", "", "").unwrap();
-        vault.create_entry(&root, "savings", "octo", "shared-pw", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "shared-pw", "", "")
+            .unwrap();
+        vault
+            .create_entry(&root, "savings", "octo", "shared-pw", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.open_audit();
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -3406,10 +3633,13 @@ mod tests {
         assert!(joined.contains("checking"), "{joined}");
         assert!(joined.contains("reused across 2"), "{joined}");
         // The finding names the problem; it never prints the password itself.
-        assert!(!joined.contains("shared-pw"), "the audit printed a password");
+        assert!(
+            !joined.contains("shared-pw"),
+            "the audit printed a password"
+        );
 
         /* Enter lands the cursor on the row, in the group that holds it —
-           a finding in a group the pane is not pointed at is unreachable. */
+        a finding in a group the pane is not pointed at is unreachable. */
         app.audit_open_selected();
         assert!(app.audit.is_none(), "the popup stayed open");
         assert_eq!(app.group_cursor, Some(banks), "the pane did not follow");
@@ -3434,7 +3664,7 @@ mod tests {
     }
 
     /* The one action nobody can take back and nothing can remind them of, so
-       the popup has to say so, mask both boxes and name the file. */
+    the popup has to say so, mask both boxes and name the file. */
     #[test]
     fn the_change_password_popup_warns_and_masks_both_boxes() {
         use crate::vault::Vault;
@@ -3450,17 +3680,23 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("change master password"), "{joined}");
         assert!(joined.contains("nothing can recover"), "{joined}");
-        assert!(!joined.contains("hunter2"), "the password drew in the clear");
+        assert!(
+            !joined.contains("hunter2"),
+            "the password drew in the clear"
+        );
         assert!(joined.contains("•••••••"), "the box did not mask: {joined}");
 
         // ^r is the way to read it back, the same as every other secret box.
         app.rekey_reveal();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t).join("\n").contains("hunter2"), "^r revealed nothing");
+        assert!(
+            screen(&t).join("\n").contains("hunter2"),
+            "^r revealed nothing"
+        );
     }
 
     /* The group prompt: one box, named for what it does, prefilled with the
-       current name. */
+    current name. */
     #[test]
     fn the_group_prompt_draws_a_single_named_box() {
         use crate::vault::Vault;
@@ -3525,7 +3761,7 @@ mod tests {
     }
 
     /* The band draws `/needle` with a block caret and the status bar counts
-       honestly: "N of M shown" over the whole vault, not just this pane. */
+    honestly: "N of M shown" over the whole vault, not just this pane. */
     #[test]
     fn the_search_band_draws_the_needle_and_counts_matches() {
         use crate::vault::Vault;
@@ -3557,8 +3793,8 @@ mod tests {
     }
 
     /* `h keys` is the one hint that always matters, so it is pinned to the
-       right of the bar and the notes are what drop when 80 columns run out.
-       Unsaved work is named for as long as it is unsaved, not for one flash. */
+    right of the bar and the notes are what drop when 80 columns run out.
+    Unsaved work is named for as long as it is unsaved, not for one flash. */
     #[test]
     fn the_status_bar_pins_the_hint_and_names_unsaved_work() {
         use crate::vault::Vault;
@@ -3589,8 +3825,8 @@ mod tests {
     }
 
     /* Every column of a row is measured against one budget: the username used
-       to be appended after a title already truncated to the pane, so the line
-       ran off the edge and was clipped with no marker. */
+    to be appended after a title already truncated to the pane, so the line
+    ran off the edge and was clipped with no marker. */
     #[test]
     fn an_entry_row_never_runs_past_its_pane() {
         use crate::vault::Vault;
@@ -3620,11 +3856,14 @@ mod tests {
         assert!(cols(&row) <= 80, "the row overran: {row:?}");
         // Both columns are there, and the cut one says it was cut.
         assert!(row.contains("grant.deelstra"), "{row:?}");
-        assert!(row.contains('…'), "the title was cut without a marker: {row:?}");
+        assert!(
+            row.contains('…'),
+            "the title was cut without a marker: {row:?}"
+        );
     }
 
     /* The scrollbar draws into the pane's last column, so the list stops one
-       column short while one is live — otherwise the thumb lands on a name. */
+    column short while one is live — otherwise the thumb lands on a name. */
     #[test]
     fn the_scrollbar_gets_a_column_of_its_own() {
         use crate::vault::Vault;
@@ -3642,19 +3881,22 @@ mod tests {
         let listed: Vec<&String> = rows.iter().filter(|l| l.contains("Group ")).collect();
         assert!(!listed.is_empty(), "nothing drew: {rows:?}");
         /* The groups pane is 35% of 60 = 21 columns, and the thumb owns the
-           last of them: no name may reach it. */
+        last of them: no name may reach it. */
         for row in listed {
             if let Some(at) = row.chars().position(|c| c == '█') {
                 assert_eq!(at, 20, "the thumb left its column: {row:?}");
             }
         }
         // And the thumb is actually drawn somewhere, or this proves nothing.
-        assert!(rows.iter().any(|l| l.contains('█')), "no scrollbar: {rows:?}");
+        assert!(
+            rows.iter().any(|l| l.contains('█')),
+            "no scrollbar: {rows:?}"
+        );
     }
 
     /* A help table that does not fit says how much it is hiding. Dropping the
-       rows behind the border — which is what it used to do — is a help screen
-       lying about the keymap. */
+    rows behind the border — which is what it used to do — is a help screen
+    lying about the keymap. */
     #[test]
     fn the_overlay_admits_when_it_cannot_show_everything() {
         use crate::vault::Vault;
@@ -3669,7 +3911,7 @@ mod tests {
     }
 
     /* Under 40 columns the copy keys are what has to go: the hint is the
-       row's reason to exist. */
+    row's reason to exist. */
     #[test]
     fn a_narrow_bar_keeps_the_hint_and_drops_the_rest() {
         use crate::vault::Vault;
@@ -3683,7 +3925,7 @@ mod tests {
     }
 
     /* Notes hold newlines; one Line welded them together and Enter submitted
-       the form, so a break could be lost but never typed. */
+    the form, so a break could be lost but never typed. */
     #[test]
     fn the_form_shows_notes_one_line_at_a_time() {
         use crate::vault::Vault;
@@ -3693,7 +3935,14 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         vault
-            .create_entry(&root, "checking", "octo", "p", "", "first line\nsecond line")
+            .create_entry(
+                &root,
+                "checking",
+                "octo",
+                "p",
+                "",
+                "first line\nsecond line",
+            )
             .unwrap();
         app.open_vault(vault);
         app.switch_pane();
@@ -3701,7 +3950,10 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let rows = screen(&t);
         let joined = rows.join("\n");
-        assert!(!joined.contains("first linesecond"), "the break was welded: {joined}");
+        assert!(
+            !joined.contains("first linesecond"),
+            "the break was welded: {joined}"
+        );
         assert!(joined.contains("first line⏎"), "{joined}");
         assert!(
             rows.iter().any(|l| l.contains("second line")),
@@ -3710,7 +3962,7 @@ mod tests {
     }
 
     /* The box says what it is worth while it holds something: `^s` and a
-       typed password answer the same way, in bits and in a word. */
+    typed password answer the same way, in bits and in a word. */
     #[test]
     fn the_form_prices_the_password_it_holds() {
         use crate::vault::Vault;
@@ -3719,12 +3971,17 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         app.open_edit_form();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(!screen(&t).join("\n").contains("bits"), "priced an empty box");
+        assert!(
+            !screen(&t).join("\n").contains("bits"),
+            "priced an empty box"
+        );
         app.form_generate();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
@@ -3733,7 +3990,7 @@ mod tests {
     }
 
     /* `^r` in the form reveals what `^s` just generated: a password masked
-       end to end cannot be checked before it is stored. */
+    end to end cannot be checked before it is stored. */
     #[test]
     fn the_form_reveals_the_password_on_ctrl_r() {
         use crate::vault::Vault;
@@ -3742,7 +3999,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         app.open_edit_form();
@@ -3752,15 +4011,21 @@ mod tests {
             app.form_insert(c);
         }
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(!screen(&t).join("\n").contains("hunter2"), "masked by default");
+        assert!(
+            !screen(&t).join("\n").contains("hunter2"),
+            "masked by default"
+        );
         app.toggle_form_reveal();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t).join("\n").contains("hunter2"), "^r did not reveal");
+        assert!(
+            screen(&t).join("\n").contains("hunter2"),
+            "^r did not reveal"
+        );
     }
 
     /* Three unlabelled columns could not say which pane you were in, which
-       folder you were looking at, or how it was sorted. The headers answer
-       all three, and the live one is the bold, cream one. */
+    folder you were looking at, or how it was sorted. The headers answer
+    all three, and the live one is the bold, cream one. */
     #[test]
     fn the_pane_headers_name_the_place_and_the_order() {
         use crate::vault::Vault;
@@ -3770,8 +4035,12 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banking").unwrap();
-        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
-        vault.create_entry(&banks, "savings", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "savings", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.step_group(true);
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -3783,7 +4052,7 @@ mod tests {
         // Counts turn the tree into a map.
         assert!(joined.contains("Banking  2"), "{joined}");
         /* A narrow header keeps the front of the list and drops the tail,
-           rather than truncating every part of itself into an ellipsis. */
+        rather than truncating every part of itself into an ellipsis. */
         let narrow = TestBackend::new(100, 24);
         let mut t2 = Terminal::new(narrow).unwrap();
         t2.draw(|f| draw(f, &mut app)).unwrap();
@@ -3794,12 +4063,15 @@ mod tests {
         // And `o` shows up where the order lives, not only in a flash.
         app.cycle_order();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t).join("\n").contains("sort: name"), "order not shown");
+        assert!(
+            screen(&t).join("\n").contains("sort: name"),
+            "order not shown"
+        );
     }
 
     /* The vault keeps the right-hand end of the header, so a flash no longer
-       costs the line that says which vault is open — and a failure carries a
-       glyph, since NO_COLOR takes the red away. */
+    costs the line that says which vault is open — and a failure carries a
+    glyph, since NO_COLOR takes the red away. */
     #[test]
     fn the_header_keeps_the_vault_beside_the_flash() {
         let backend = TestBackend::new(80, 24);
@@ -3812,7 +4084,10 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let header = screen(&t).first().cloned().unwrap_or_default();
         assert!(header.contains("save failed"), "{header:?}");
-        assert!(header.contains(&name), "the vault fell off the header: {header:?}");
+        assert!(
+            header.contains(&name),
+            "the vault fell off the header: {header:?}"
+        );
         assert!(header.contains('×'), "no severity glyph: {header:?}");
     }
 
@@ -3825,7 +4100,10 @@ mod tests {
             screen(&t)[0].clone()
         };
         let mut app = App::new();
-        assert!(!header(120, &mut app).contains("Vault  Entry"), "labels on the lock screen");
+        assert!(
+            !header(120, &mut app).contains("Vault  Entry"),
+            "labels on the lock screen"
+        );
         assert!(app.menu_bar.is_empty());
 
         app.open_vault(Vault::new());
@@ -3834,23 +4112,36 @@ mod tests {
         assert_eq!(app.menu_bar.len(), MENUS.len());
 
         app.mouse = false;
-        assert!(!header(120, &mut app).contains("Vault  Entry"), "labels nothing can open");
+        assert!(
+            !header(120, &mut app).contains("Vault  Entry"),
+            "labels nothing can open"
+        );
         assert!(app.menu_bar.is_empty());
         app.mouse = true;
 
         let error = "save failed  ·  the disk is full and nothing was written";
         app.error(error);
         let narrow = header(80, &mut app);
-        assert!(narrow.contains(error), "the flash was cut for the labels: {narrow:?}");
+        assert!(
+            narrow.contains(error),
+            "the flash was cut for the labels: {narrow:?}"
+        );
         assert!(!narrow.contains("Vault  Entry"), "{narrow:?}");
-        assert!(app.menu_bar.is_empty(), "hidden labels left click targets behind");
+        assert!(
+            app.menu_bar.is_empty(),
+            "hidden labels left click targets behind"
+        );
 
         // An open header menu keeps its labels, and the flash is cut instead.
         app.menu = Some(crate::app::MenuId::Vault);
         let open = header(80, &mut app);
         assert!(open.contains("Vault  Entry  Group  View  Help"), "{open:?}");
         assert!(open.contains("save failed"), "{open:?}");
-        assert_eq!(app.menu, Some(crate::app::MenuId::Vault), "the menu vanished under the flash");
+        assert_eq!(
+            app.menu,
+            Some(crate::app::MenuId::Vault),
+            "the menu vanished under the flash"
+        );
     }
 
     #[test]
@@ -3861,8 +4152,16 @@ mod tests {
         let mut app = App::new();
         app.open_vault(Vault::new());
         t.draw(|f| draw(f, &mut app)).unwrap();
-        let (at, _) = *app.menu_bar.iter().find(|(_, id)| *id == MenuId::Group).unwrap();
-        let drawn: String = screen(&t)[0].chars().skip(at.x as usize).take(at.width as usize).collect();
+        let (at, _) = *app
+            .menu_bar
+            .iter()
+            .find(|(_, id)| *id == MenuId::Group)
+            .unwrap();
+        let drawn: String = screen(&t)[0]
+            .chars()
+            .skip(at.x as usize)
+            .take(at.width as usize)
+            .collect();
         assert_eq!(drawn, "Group");
 
         app.click(at.x + at.width - 1, at.y);
@@ -3872,7 +4171,10 @@ mod tests {
 
         app.open_search();
         app.click(at.x, at.y);
-        assert_eq!(app.menu, None, "a menu opened while the search band had the keys");
+        assert_eq!(
+            app.menu, None,
+            "a menu opened while the search band had the keys"
+        );
         app.band = false;
 
         app.click(at.x, at.y);
@@ -3881,7 +4183,7 @@ mod tests {
     }
 
     /* The empty states name the key that fills them: this is the first screen
-       after a vault is created. */
+    after a vault is created. */
     #[test]
     fn empty_panes_name_the_way_out() {
         use crate::vault::Vault;
@@ -3891,12 +4193,15 @@ mod tests {
         app.open_vault(Vault::new());
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("no entries here  ·  a adds one"), "{joined}");
+        assert!(
+            joined.contains("no entries here  ·  a adds one"),
+            "{joined}"
+        );
     }
 
     /* `^v` lists the vaults this machine has opened, marks the one the
-       session is pointed at, and says which have gone missing rather than
-       failing at the password box. */
+    session is pointed at, and says which have gone missing rather than
+    failing at the password box. */
     #[test]
     fn the_library_names_the_current_vault_and_the_missing_one() {
         let dir = std::env::temp_dir().join(format!("sennel-lib-ui-{}", std::process::id()));
@@ -3915,15 +4220,24 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("personal.kdbx"), "{joined}");
-        assert!(joined.contains("current"), "the open vault is unmarked: {joined}");
-        assert!(joined.contains("missing"), "a vanished vault reads as fine: {joined}");
+        assert!(
+            joined.contains("current"),
+            "the open vault is unmarked: {joined}"
+        );
+        assert!(
+            joined.contains("missing"),
+            "a vanished vault reads as fine: {joined}"
+        );
         // The unlock boxes step aside rather than sitting under the popup.
         assert!(!joined.contains("key file"), "two popups at once: {joined}");
 
         // And the lock screen offers the key only once there is a list behind it.
         app.close_library();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&t).join("\n").contains("^v"), "the key is unadvertised");
+        assert!(
+            screen(&t).join("\n").contains("^v"),
+            "the key is unadvertised"
+        );
         app.set_recent(Vec::new());
         t.draw(|f| draw(f, &mut app)).unwrap();
         assert!(
@@ -3934,8 +4248,8 @@ mod tests {
     }
 
     /* The popup shows the password itself, the price of it, and which
-       classes it was drawn from: a generator you have to trust is one you
-       cannot check against the site's rules. */
+    classes it was drawn from: a generator you have to trust is one you
+    cannot check against the site's rules. */
     #[test]
     fn the_generator_shows_the_password_and_what_it_is_made_of() {
         use crate::vault::Vault;
@@ -3947,10 +4261,16 @@ mod tests {
         let password = app.mint.as_ref().unwrap().password.clone();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains(&password), "the password is not on screen: {joined}");
+        assert!(
+            joined.contains(&password),
+            "the password is not on screen: {joined}"
+        );
         assert!(joined.contains("20 chars"), "{joined}");
         assert!(joined.contains("bits"), "{joined}");
-        assert!(joined.contains("y copy"), "the copy key is unadvertised: {joined}");
+        assert!(
+            joined.contains("y copy"),
+            "the copy key is unadvertised: {joined}"
+        );
         // The knobs are the state, so every class has a key beside it.
         for knob in ["u A–Z", "d 0–9", "s !@#", "a l1IO0"] {
             assert!(joined.contains(knob), "the overlay forgot {knob}: {joined}");
@@ -3958,9 +4278,9 @@ mod tests {
     }
 
     /* The keys survive a password that does not fit. At 256 characters on a
-       short terminal the hint line used to be pushed off the bottom, and it
-       is the only place on screen that says `y` copies — so what was left was
-       a password with no visible way to take it. */
+    short terminal the hint line used to be pushed off the bottom, and it
+    is the only place on screen that says `y` copies — so what was left was
+    a password with no visible way to take it. */
     #[test]
     fn a_password_too_tall_for_the_screen_keeps_its_keys() {
         use crate::vault::Vault;
@@ -3979,14 +4299,17 @@ mod tests {
         // And it says how much of the password is off screen, not just less of it.
         assert!(joined.contains("more"), "the clipping is silent: {joined}");
         /* Both knob rows are there: at this width they wrap, and a knob
-           clipped by the border is a setting whose state cannot be read. */
+        clipped by the border is a setting whose state cannot be read. */
         assert!(joined.contains("u A–Z"), "{joined}");
-        assert!(joined.contains("a l1IO0"), "the last knob was cut: {joined}");
+        assert!(
+            joined.contains("a l1IO0"),
+            "the last knob was cut: {joined}"
+        );
     }
 
     /* A long password wraps instead of truncating. Shortened to an ellipsis
-       it would be a password nobody can read back, which is the one thing
-       this screen exists to let them do. */
+    it would be a password nobody can read back, which is the one thing
+    this screen exists to let them do. */
     #[test]
     fn a_long_password_wraps_rather_than_being_cut() {
         use crate::vault::Vault;
@@ -4003,8 +4326,8 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let rows = screen(&t);
         /* The rows that are part of the password are the rows that are part
-           of the password: nothing else the popup draws is a substring of
-           one, so gluing them back together must give it back whole. */
+        of the password: nothing else the popup draws is a substring of
+        one, so gluing them back together must give it back whole. */
         let rebuilt: String = rows
             .iter()
             .map(|row| row.replace('│', ""))
@@ -4012,7 +4335,12 @@ mod tests {
             .filter(|row| !row.is_empty() && password.contains(row.as_str()))
             .collect();
         assert!(rows.len() > 1);
-        assert_eq!(rebuilt, password, "the password was cut: {}", rows.join("\n"));
+        assert_eq!(
+            rebuilt,
+            password,
+            "the password was cut: {}",
+            rows.join("\n")
+        );
         assert!(
             !rows.join("").contains('…'),
             "it truncated instead of wrapping"
@@ -4020,9 +4348,9 @@ mod tests {
     }
 
     /* The marker outlives the name when the popup is narrow. It used to be
-       the first thing clipped, which left a vanished vault reading as a
-       healthy one right up until `enter` offered to create an empty one over
-       the top of it. */
+    the first thing clipped, which left a vanished vault reading as a
+    healthy one right up until `enter` offered to create an empty one over
+    the top of it. */
     #[test]
     fn a_narrow_library_keeps_the_marker_and_drops_the_name() {
         let backend = TestBackend::new(34, 24);
@@ -4035,7 +4363,10 @@ mod tests {
         app.open_library();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("missing"), "the marker was clipped: {joined}");
+        assert!(
+            joined.contains("missing"),
+            "the marker was clipped: {joined}"
+        );
         assert!(joined.contains('…'), "the name was not truncated: {joined}");
         // And nothing spilled past the popup frame.
         for line in screen(&t) {
@@ -4044,8 +4375,8 @@ mod tests {
     }
 
     /* Nobody knows the path to a vault they have not opened yet, so `^o`
-       lists what is there: folders and vaults, nothing else, with a typed
-       filter that narrows rather than ranks. */
+    lists what is there: folders and vaults, nothing else, with a typed
+    filter that narrows rather than ranks. */
     #[test]
     fn the_picker_lists_folders_and_vaults_and_narrows() {
         let dir = std::env::temp_dir().join(format!("sennel-pick-ui-{}", std::process::id()));
@@ -4063,7 +4394,10 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(joined.contains("Work/"), "{joined}");
         assert!(joined.contains("personal.kdbx"), "{joined}");
-        assert!(!joined.contains("notes.txt"), "the picker listed a non-vault");
+        assert!(
+            !joined.contains("notes.txt"),
+            "the picker listed a non-vault"
+        );
         // The unlock boxes step aside rather than sitting under the popup.
         assert!(!joined.contains("key file"), "two popups at once: {joined}");
 
@@ -4071,14 +4405,17 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
         assert!(joined.contains("shared.kdbx"), "{joined}");
-        assert!(!joined.contains("personal.kdbx"), "the filter did not narrow");
+        assert!(
+            !joined.contains("personal.kdbx"),
+            "the filter did not narrow"
+        );
         assert!(joined.contains("/h"), "the filter is not shown: {joined}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* The pane builds only the rows it can show, so the window it picks has
-       to be the right one: the cursor is always on screen, and what is far
-       above it is not. */
+    to be the right one: the cursor is always on screen, and what is far
+    above it is not. */
     #[test]
     fn a_long_list_draws_the_window_around_the_cursor() {
         use crate::vault::Vault;
@@ -4099,8 +4436,14 @@ mod tests {
         }
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(joined.contains("entry-40"), "the cursor row is off screen: {joined}");
-        assert!(!joined.contains("entry-00"), "the whole list drew: {joined}");
+        assert!(
+            joined.contains("entry-40"),
+            "the cursor row is off screen: {joined}"
+        );
+        assert!(
+            !joined.contains("entry-00"),
+            "the whole list drew: {joined}"
+        );
         // The scrollbar still speaks in whole-list terms.
         assert!(joined.contains('█'), "no scrollbar for a list this long");
 
@@ -4113,9 +4456,9 @@ mod tests {
     }
 
     /* A theme may change colour and must never change layout. Every built-in
-       draws the same screen, cell for cell, as the one before it — so a
-       palette cannot quietly take a column with a wider glyph or drop a span,
-       and the frame tests that pin content stay true under all of them. */
+    draws the same screen, cell for cell, as the one before it — so a
+    palette cannot quietly take a column with a wider glyph or drop a span,
+    and the frame tests that pin content stay true under all of them. */
     #[test]
     fn every_palette_draws_the_same_frame() {
         use crate::theme::BUILT_INS;
@@ -4149,8 +4492,8 @@ mod tests {
     }
 
     /* The gradient is painted from the palette, so a theme's ground has to
-       arrive on screen — a palette whose colours change while the background
-       stays put is the light theme's failure mode. */
+    arrive on screen — a palette whose colours change while the background
+    stays put is the light theme's failure mode. */
     #[test]
     fn the_background_comes_from_the_palette() {
         use crate::vault::Vault;
@@ -4172,7 +4515,7 @@ mod tests {
     }
 
     /* A cut name has to look cut: "Root/Bankin" is otherwise a group
-       somebody named Bankin. Columns, so a wide glyph never straddles. */
+    somebody named Bankin. Columns, so a wide glyph never straddles. */
     #[test]
     fn truncation_says_that_it_truncated() {
         assert_eq!(truncate("Banking", 20), "Banking");
@@ -4185,7 +4528,7 @@ mod tests {
     }
 
     /* One label column across the lock, the form and the group prompt: at
-       eight, "password" ran straight into its own value. */
+    eight, "password" ran straight into its own value. */
     #[test]
     fn labels_keep_a_gap_before_their_value() {
         let backend = TestBackend::new(80, 24);
@@ -4195,12 +4538,15 @@ mod tests {
         app.caret = 6;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let joined = screen(&t).join("\n");
-        assert!(!joined.contains("password\u{2022}"), "the label ran into the box");
+        assert!(
+            !joined.contains("password\u{2022}"),
+            "the label ran into the box"
+        );
         assert!(joined.contains("password  "), "{joined}");
     }
 
     /* Stamps are stored UTC and read local: an hour that has to be shifted
-       in the reader's head is an hour they end up checking elsewhere. */
+    in the reader's head is an hour they end up checking elsewhere. */
     #[test]
     fn stamps_render_in_local_time() {
         use chrono::{NaiveDate, TimeZone};
@@ -4221,8 +4567,8 @@ mod tests {
     }
 
     /* The 80-column terminal has no side pane, so Enter's popup is where an
-       entry is read: it carries the fields, the notes and its own keys, and
-       masks the password until `*` says otherwise. */
+    entry is read: it carries the fields, the notes and its own keys, and
+    masks the password until `*` says otherwise. */
     #[test]
     fn the_detail_popup_reads_an_entry_at_eighty_columns() {
         use crate::vault::Vault;
@@ -4253,7 +4599,10 @@ mod tests {
         assert!(joined.contains("second line"), "{joined}");
         assert!(joined.contains("updated"), "{joined}");
         assert!(joined.contains("esc"), "{joined}");
-        assert!(!joined.contains("s3cret-pw"), "the popup leaked the password");
+        assert!(
+            !joined.contains("s3cret-pw"),
+            "the popup leaked the password"
+        );
         app.toggle_password();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let shown = screen(&t).join("\n");
@@ -4261,7 +4610,7 @@ mod tests {
     }
 
     /* The popup is the detail view below 100 columns, so the next entry must
-       be one key away — and the reveal must not ride along to it. */
+    be one key away — and the reveal must not ride along to it. */
     #[test]
     fn the_detail_popup_walks_to_the_next_entry() {
         use crate::vault::Vault;
@@ -4270,8 +4619,12 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "octo", "aaa-pw", "", "").unwrap();
-        vault.create_entry(&root, "savings", "gecko", "bbb-pw", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "octo", "aaa-pw", "", "")
+            .unwrap();
+        vault
+            .create_entry(&root, "savings", "gecko", "bbb-pw", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.switch_pane();
         app.open_detail();
@@ -4292,7 +4645,7 @@ mod tests {
     }
 
     /* A sorted list still leaves the reader working out why each row is
-       there: the matched characters are lit, so the answer is visible. */
+    there: the matched characters are lit, so the answer is visible. */
     #[test]
     fn search_lights_the_characters_it_matched() {
         use crate::vault::Vault;
@@ -4302,7 +4655,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.open_search();
         for ch in "chk".chars() {
@@ -4316,7 +4671,7 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
         /* c, h and k of "checking" are lit; the marker is teal too, so the
-           assertion is about the letters being in there. */
+        assertion is about the letters being in there. */
         for c in ['c', 'h', 'k'] {
             assert!(lit.contains(c), "{c} was not lit: {lit:?}");
         }
@@ -4332,8 +4687,12 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banking").unwrap();
-        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
-        vault.create_entry(&root, "loose", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&root, "loose", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.step_group(true);
         app.open_search();
@@ -4348,7 +4707,7 @@ mod tests {
     }
 
     /* Enter keeps the filter and hands the keys back, so the band stops being
-       a box: the needle stays visible as a chip with no caret to type into. */
+    a box: the needle stays visible as a chip with no caret to type into. */
     #[test]
     fn a_kept_filter_draws_as_a_chip_without_a_caret() {
         use crate::vault::Vault;
@@ -4357,7 +4716,9 @@ mod tests {
         let mut app = App::new();
         let mut vault = Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "octo", "p", "", "")
+            .unwrap();
         app.open_vault(vault);
         app.open_search();
         for ch in "check".chars() {
@@ -4372,8 +4733,8 @@ mod tests {
     }
 
     /* A live needle widens the pane to the whole vault: a hit from another
-       folder carries its group path so it is locatable, and a needle that
-       matches nothing says so instead of leaving a blank pane. */
+    folder carries its group path so it is locatable, and a needle that
+    matches nothing says so instead of leaving a blank pane. */
     #[test]
     fn global_search_names_the_folder_and_the_empty_state() {
         use crate::vault::Vault;

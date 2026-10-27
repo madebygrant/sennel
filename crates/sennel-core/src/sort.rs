@@ -1,7 +1,7 @@
 /* How the entries pane orders itself. `Stored` is the file's own order; the
-   rest are views over it — the vault vec is never re-ordered, so `o` cycling
-   back always lands exactly where the file left things. Session-only for
-   now: config has no write-back, so the choice does not survive a restart. */
+rest are views over it — the vault vec is never re-ordered, so `o` cycling
+back always lands exactly where the file left things. Session-only for
+now: config has no write-back, so the choice does not survive a restart. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SortOrder {
     #[default]

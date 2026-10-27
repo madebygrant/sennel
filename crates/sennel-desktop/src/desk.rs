@@ -6,17 +6,17 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use keepass::db::{EntryId, GroupId};
-use serde::{Deserialize, Serialize};
 use sennel_core::clipboard::Board;
 use sennel_core::config;
 use sennel_core::search::Searcher;
-use sennel_core::sort::SortOrder;
 use sennel_core::session::{
-    Cut, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent, Resolve, SaveNow, Saved,
-    Sealing, Session, Undo, UnlockError, Undone, Unlocked,
+    Cut, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent,
+    Resolve, SaveNow, Saved, Sealing, Session, Undo, Undone, UnlockError, Unlocked,
 };
+use sennel_core::sort::SortOrder;
 use sennel_core::touchid::{Refused, Sealed};
 use sennel_core::vault::{EntryExt, Extra};
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::settings::Settings;
@@ -37,15 +37,24 @@ pub struct Note {
 }
 
 fn info(text: impl Into<String>) -> Note {
-    Note { level: Level::Info, text: text.into() }
+    Note {
+        level: Level::Info,
+        text: text.into(),
+    }
 }
 
 fn warn(text: impl Into<String>) -> Note {
-    Note { level: Level::Warn, text: text.into() }
+    Note {
+        level: Level::Warn,
+        text: text.into(),
+    }
 }
 
 fn error(text: impl Into<String>) -> Note {
-    Note { level: Level::Error, text: text.into() }
+    Note {
+        level: Level::Error,
+        text: text.into(),
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -159,11 +168,19 @@ pub struct Reply {
 
 impl Reply {
     fn notes(notes: Vec<Note>) -> Self {
-        Reply { notes, select: None, ok: true }
+        Reply {
+            notes,
+            select: None,
+            ok: true,
+        }
     }
 
     fn refused(note: Note) -> Self {
-        Reply { notes: vec![note], select: None, ok: false }
+        Reply {
+            notes: vec![note],
+            select: None,
+            ok: false,
+        }
     }
 
     fn one(note: Note) -> Self {
@@ -187,15 +204,22 @@ pub struct Desk {
 }
 
 pub fn entry_id(text: &str) -> Result<EntryId, String> {
-    uuid::Uuid::parse_str(text).map(EntryId::from_uuid).map_err(|_| "not an entry id".to_string())
+    uuid::Uuid::parse_str(text)
+        .map(EntryId::from_uuid)
+        .map_err(|_| "not an entry id".to_string())
 }
 
 pub fn group_id(text: &str) -> Result<GroupId, String> {
-    uuid::Uuid::parse_str(text).map(GroupId::from_uuid).map_err(|_| "not a group id".to_string())
+    uuid::Uuid::parse_str(text)
+        .map(GroupId::from_uuid)
+        .map_err(|_| "not a group id".to_string())
 }
 
 fn name_of(path: &Path) -> String {
-    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 impl Desk {
@@ -205,7 +229,11 @@ impl Desk {
         session.set_ssh_agent(settings.ssh_agent, settings.ssh_lifetime);
         session.set_lock_timeout(settings.lock_timeout);
         session.touch_id = settings.touch_id;
-        let db = settings.db.as_deref().or(settings.recent.first().map(PathBuf::as_path)).map(config::absolute);
+        let db = settings
+            .db
+            .as_deref()
+            .or(settings.recent.first().map(PathBuf::as_path))
+            .map(config::absolute);
         session.aim(db.as_deref());
         Desk {
             session: Mutex::new(session),
@@ -224,7 +252,9 @@ impl Desk {
     }
 
     fn ask_for_key(&self, s: &Session<Sealed>, what: &str) {
-        let keyed = s.vault().is_some_and(sennel_core::vault::Vault::has_challenge);
+        let keyed = s
+            .vault()
+            .is_some_and(sennel_core::vault::Vault::has_challenge);
         if let (true, Some(prompt)) = (keyed, &self.prompt) {
             prompt(info(format!("touch your key {what}…")));
         }
@@ -268,7 +298,13 @@ impl Desk {
             vault_name: db.as_deref().filter(|_| s.is_open()).map(name_of),
             creates: db.as_ref().is_some_and(|p| !p.is_file()),
             db: db.map(|p| p.display().to_string()),
-            recent: self.recent.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| p.display().to_string()).collect(),
+            recent: self
+                .recent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
             touch_id: s.quick_here(),
             yubikey: self.settings.yubikey.as_ref().map(ToString::to_string),
             dirty: s.is_dirty(),
@@ -295,7 +331,12 @@ impl Desk {
     }
 
     // The password arrives as a JS string, which cannot be wiped on that side; the bytes here are.
-    pub fn unlock(&self, mut password: String, key_file: Option<String>, confirm: Option<String>) -> Reply {
+    pub fn unlock(
+        &self,
+        mut password: String,
+        key_file: Option<String>,
+        confirm: Option<String>,
+    ) -> Reply {
         let mut bytes = password.as_bytes().to_vec();
         password.zeroize();
         let confirm = confirm.map(Zeroizing::new);
@@ -313,9 +354,14 @@ impl Desk {
         let creating = !path.is_file();
         if creating && confirm.is_none() {
             bytes.zeroize();
-            return Reply::one(warn("no vault there yet · type the password twice to create it"));
+            return Reply::one(warn(
+                "no vault there yet · type the password twice to create it",
+            ));
         }
-        let again = confirm.as_deref().filter(|_| creating).map(String::as_bytes);
+        let again = confirm
+            .as_deref()
+            .filter(|_| creating)
+            .map(String::as_bytes);
         self.ask_for_key_to_unlock();
         let result = self.session().unlock(
             &path,
@@ -336,7 +382,10 @@ impl Desk {
             Err(note) => return Reply::one(note),
         };
         self.ask_for_key_to_unlock();
-        let result = self.session().quick_unlock(key.as_deref().map(|k| k.as_slice()), self.settings.yubikey.as_ref());
+        let result = self.session().quick_unlock(
+            key.as_deref().map(|k| k.as_slice()),
+            self.settings.yubikey.as_ref(),
+        );
         self.after_unlock(&path, result)
     }
 
@@ -352,12 +401,18 @@ impl Desk {
     fn after_unlock(&self, path: &Path, result: Result<Unlocked, QuickError>) -> Reply {
         let unlocked = match result {
             Ok(unlocked) => unlocked,
-            Err(QuickError::Nothing) => return Reply::one(warn("nothing sealed for this vault · type the password")),
+            Err(QuickError::Nothing) => {
+                return Reply::one(warn("nothing sealed for this vault · type the password"));
+            }
             Err(QuickError::Refused(Refused::Again(why))) => {
-                return Reply::one(warn(format!("Touch ID {why} · try again, or type the password")));
+                return Reply::one(warn(format!(
+                    "Touch ID {why} · try again, or type the password"
+                )));
             }
             Err(QuickError::Refused(Refused::Void(why))) => {
-                return Reply::one(warn(format!("Touch ID cannot open this any more · {why} · type the password")));
+                return Reply::one(warn(format!(
+                    "Touch ID cannot open this any more · {why} · type the password"
+                )));
             }
             Err(QuickError::Unlock(e)) => {
                 return Reply::one(match e {
@@ -374,17 +429,30 @@ impl Desk {
         if let Some(first) = agent.problems.first() {
             notes.push(warn(format!("ssh agent: {first}")));
         } else if agent.added > 0 {
-            notes.push(info(format!("{} ssh key(s) added to the agent for {}s", agent.added, agent.lifetime)));
+            notes.push(info(format!(
+                "{} ssh key(s) added to the agent for {}s",
+                agent.added, agent.lifetime
+            )));
         }
         notes.push(info(match unlocked.created {
             true => format!("created {}", name_of(path)),
-            false => format!("unlocked {} {}", unlocked.entries, if unlocked.entries == 1 { "entry" } else { "entries" }),
+            false => format!(
+                "unlocked {} {}",
+                unlocked.entries,
+                if unlocked.entries == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                }
+            ),
         }));
         if let Sealing::Off(why) = unlocked.sealing {
             notes.push(warn(format!("Touch ID off this session · {why}")));
         }
         if let Some(format) = unlocked.read_only {
-            notes.push(error(format!("{format} · read-only · edits cannot be saved")));
+            notes.push(error(format!(
+                "{format} · read-only · edits cannot be saved"
+            )));
         }
         self.remember(path);
         Reply::notes(notes)
@@ -406,7 +474,9 @@ impl Desk {
         let failed = self.session().lock();
         let mut notes = vec![info("locked")];
         if failed > 0 {
-            notes.push(warn(format!("ssh agent: {failed} key(s) not removed · they expire on their own")));
+            notes.push(warn(format!(
+                "ssh agent: {failed} key(s) not removed · they expire on their own"
+            )));
         }
         Reply::notes(notes)
     }
@@ -419,9 +489,14 @@ impl Desk {
             return None;
         }
         let failed = s.lock();
-        let mut notes = vec![warn(format!("locked after {} seconds idle", self.settings.lock_timeout))];
+        let mut notes = vec![warn(format!(
+            "locked after {} seconds idle",
+            self.settings.lock_timeout
+        ))];
         if failed > 0 {
-            notes.push(warn(format!("ssh agent: {failed} key(s) not removed · they expire on their own")));
+            notes.push(warn(format!(
+                "ssh agent: {failed} key(s) not removed · they expire on their own"
+            )));
         }
         Some(notes)
     }
@@ -454,7 +529,11 @@ impl Desk {
 
     // A group's entries in stored order, or with a needle the whole vault ranked best first. The
     // same rows the terminal app shows, kept until the vault, group or needle moves.
-    pub fn entries(&self, group: Option<&str>, needle: Option<&str>) -> Result<Vec<EntryRow>, String> {
+    pub fn entries(
+        &self,
+        group: Option<&str>,
+        needle: Option<&str>,
+    ) -> Result<Vec<EntryRow>, String> {
         let needle = needle.map(str::trim).filter(|n| !n.is_empty());
         let s = self.session();
         let Some(vault) = s.vault() else {
@@ -464,10 +543,21 @@ impl Desk {
             Some(g) => group_id(g)?,
             None => vault.root_id(),
         };
-        let key = (s.revision(), Some(group.to_string()), needle.map(String::from));
+        let key = (
+            s.revision(),
+            Some(group.to_string()),
+            needle.map(String::from),
+        );
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         if rows.0.as_ref() != Some(&key) {
-            let ids = sennel_core::search::rows(vault, needle.is_some(), Some(group), needle, SortOrder::Stored, &mut rows.2);
+            let ids = sennel_core::search::rows(
+                vault,
+                needle.is_some(),
+                Some(group),
+                needle,
+                SortOrder::Stored,
+                &mut rows.2,
+            );
             *rows = (Some(key), ids, std::mem::take(&mut rows.2));
         }
         Ok(rows
@@ -491,7 +581,14 @@ impl Desk {
         let e = vault.get_entry(&id).ok_or("that entry is gone")?;
         let group = vault
             .parent_group_of_entry(&id)
-            .map(|g| vault.group_path(&g).into_iter().skip(1).collect::<Vec<_>>().join(" / "))
+            .map(|g| {
+                vault
+                    .group_path(&g)
+                    .into_iter()
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            })
             .unwrap_or_default();
         Ok(EntryView {
             id: id.to_string(),
@@ -501,7 +598,9 @@ impl Desk {
             url: e.url().to_string(),
             notes: e.notes().to_string(),
             tags: e.tags.join(", "),
-            expires: sennel_core::vault::expires_at(&e).map(|at| at.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+            expires: sennel_core::vault::expires_at(&e)
+                .map(|at| at.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
             has_password: !e.password().is_empty(),
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
             extras: sennel_core::vault::extra_rows(&e).len(),
@@ -558,9 +657,9 @@ impl Desk {
             Field::Fixed("password") => e.password().to_string(),
             Field::Fixed("username") => e.username().to_string(),
             Field::Fixed("url") => e.url().to_string(),
-            Field::Fixed("otp") => {
-                sennel_core::vault::totp_now(&e).map(|(code, _)| code).ok_or("no one-time code on this entry")?
-            }
+            Field::Fixed("otp") => sennel_core::vault::totp_now(&e)
+                .map(|(code, _)| code)
+                .ok_or("no one-time code on this entry")?,
             Field::Fixed(other) => return Err(format!("no field {other}")),
             Field::Custom(name) => sennel_core::vault::extra_rows(&e)
                 .iter()
@@ -599,13 +698,20 @@ impl Desk {
         self.ask_for_key(s, "to save");
         match s.persist(true) {
             Saved::Written | Saved::Locked | Saved::NoFile | Saved::Deferred(_) => {}
-            Saved::Conflict => notes.push(error("vault changed on disk · merge, overwrite or reload")),
+            Saved::Conflict => {
+                notes.push(error("vault changed on disk · merge, overwrite or reload"))
+            }
             Saved::Failed(e) => notes.push(error(format!("save failed · {e} · kept in memory"))),
         }
         notes
     }
 
-    pub fn save_entry(&self, target: Option<&str>, group: Option<&str>, form: &EntryForm) -> Result<Reply, String> {
+    pub fn save_entry(
+        &self,
+        target: Option<&str>,
+        group: Option<&str>,
+        form: &EntryForm,
+    ) -> Result<Reply, String> {
         let target = match target {
             Some(id) => EntryTarget::Edit(entry_id(id)?),
             None => EntryTarget::Add(group.map(group_id).transpose()?),
@@ -642,7 +748,11 @@ impl Desk {
             EntryTarget::Edit(_) => info(format!("entry saved{note}")),
         };
         let select = saved.id.map(|id| id.to_string());
-        Ok(Reply { notes: self.saved(&mut s, said), select, ok: true })
+        Ok(Reply {
+            notes: self.saved(&mut s, said),
+            select,
+            ok: true,
+        })
     }
 
     pub fn delete_entry(&self, id: &str) -> Result<Reply, String> {
@@ -650,7 +760,10 @@ impl Desk {
         let mut s = self.session();
         Ok(Reply::notes(match s.delete_entry(id) {
             Ok(true) => self.saved(&mut s, warn("entry deleted for good · undo restores it")),
-            Ok(false) => self.saved(&mut s, info("entry moved to the recycle bin · undo restores it")),
+            Ok(false) => self.saved(
+                &mut s,
+                info("entry moved to the recycle bin · undo restores it"),
+            ),
             Err(Delete::Missing) => Vec::new(),
             Err(Delete::Vault(e)) => vec![warn(format!("cannot delete · {e}"))],
         }))
@@ -700,7 +813,11 @@ impl Desk {
         let parent = group_id(parent)?;
         let mut s = self.session();
         Ok(match s.add_group(Some(parent), name) {
-            Ok(id) => Reply { notes: self.saved(&mut s, info("group added")), select: Some(id.to_string()), ok: true },
+            Ok(id) => Reply {
+                notes: self.saved(&mut s, info("group added")),
+                select: Some(id.to_string()),
+                ok: true,
+            },
             Err(e) => Reply::one(warn(format!("cannot add · {e}"))),
         })
     }
@@ -722,7 +839,10 @@ impl Desk {
         let mut s = self.session();
         Ok(Reply::notes(match s.delete_group(id) {
             Ok(true) => self.saved(&mut s, warn("group deleted for good")),
-            Ok(false) => self.saved(&mut s, info("group moved to the recycle bin · undo restores it")),
+            Ok(false) => self.saved(
+                &mut s,
+                info("group moved to the recycle bin · undo restores it"),
+            ),
             Err(Delete::Missing) => Vec::new(),
             Err(Delete::Vault(e)) => vec![warn(format!("cannot delete · {e}"))],
         }))
@@ -740,7 +860,11 @@ impl Desk {
             Undone::Removed { title } => (format!("removed {title}"), None),
             Undone::Renamed { before } => (format!("restored name {before}"), None),
         };
-        Reply { notes: self.saved(&mut s, info(said)), select, ok: true }
+        Reply {
+            notes: self.saved(&mut s, info(said)),
+            select,
+            ok: true,
+        }
     }
 
     pub fn save(&self) -> Reply {
@@ -754,8 +878,12 @@ impl Desk {
             SaveNow::OverwriteFailed(e) => error(format!("save failed · {e}")),
             SaveNow::Clean => info("nothing to save · every change saves itself"),
             SaveNow::Saved(Saved::Written) => info("saved"),
-            SaveNow::Saved(Saved::Conflict) => error("vault changed on disk · merge, overwrite or reload"),
-            SaveNow::Saved(Saved::Failed(e)) => error(format!("save failed · {e} · kept in memory")),
+            SaveNow::Saved(Saved::Conflict) => {
+                error("vault changed on disk · merge, overwrite or reload")
+            }
+            SaveNow::Saved(Saved::Failed(e)) => {
+                error(format!("save failed · {e} · kept in memory"))
+            }
             SaveNow::Saved(_) => info("not saved"),
         })
     }
@@ -764,7 +892,10 @@ impl Desk {
         let mut s = self.session();
         self.ask_for_key(&s, "twice: to read the file, then to save");
         Reply::one(match s.merge(true) {
-            Ok(summary) => info(format!("merged with the file on disk · {}", summary.describe())),
+            Ok(summary) => info(format!(
+                "merged with the file on disk · {}",
+                summary.describe()
+            )),
             Err(e) => resolve_note(e),
         })
     }
@@ -804,7 +935,10 @@ impl Desk {
                 at: v.at,
                 title: v.title.clone(),
                 username: v.username.clone(),
-                modified: v.modified.map(|m| m.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default(),
+                modified: v
+                    .modified
+                    .map(|m| m.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default(),
             })
             .collect())
     }
@@ -813,7 +947,10 @@ impl Desk {
         let id = entry_id(id)?;
         let mut s = self.session();
         Ok(Reply::notes(match s.clear_history(id) {
-            Ok(gone) => self.saved(&mut s, warn(format!("cleared {gone} old version(s) · this has no undo"))),
+            Ok(gone) => self.saved(
+                &mut s,
+                warn(format!("cleared {gone} old version(s) · this has no undo")),
+            ),
             Err(e) => vec![error(format!("cannot clear · {e}"))],
         }))
     }
@@ -826,7 +963,11 @@ impl Desk {
         Ok(sennel_core::vault::extra_rows(&e)
             .iter()
             .map(|row| match row {
-                Extra::Field { name, value, secret } => FieldRow {
+                Extra::Field {
+                    name,
+                    value,
+                    secret,
+                } => FieldRow {
                     name: name.clone(),
                     file: false,
                     secret: *secret,
@@ -864,7 +1005,12 @@ impl Desk {
         let path = config::expand(path.trim());
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(e) => return Ok(Reply::one(error(format!("cannot read {} · {e}", path.display())))),
+            Err(e) => {
+                return Ok(Reply::one(error(format!(
+                    "cannot read {} · {e}",
+                    path.display()
+                ))));
+            }
         };
         let mut s = self.session();
         Ok(Reply::notes(match s.attach(id, name.trim(), bytes) {
@@ -876,8 +1022,15 @@ impl Desk {
     pub fn remove_field(&self, id: &str, name: &str, file: bool) -> Result<Reply, String> {
         let id = entry_id(id)?;
         let row = match file {
-            true => Extra::File { name: name.to_string(), bytes: 0 },
-            false => Extra::Field { name: name.to_string(), value: String::new(), secret: false },
+            true => Extra::File {
+                name: name.to_string(),
+                bytes: 0,
+            },
+            false => Extra::Field {
+                name: name.to_string(),
+                value: String::new(),
+                secret: false,
+            },
         };
         let mut s = self.session();
         Ok(Reply::notes(match s.remove_extra(id, &row) {
@@ -889,10 +1042,15 @@ impl Desk {
     pub fn extract(&self, id: &str, name: &str) -> Result<Note, String> {
         let id = entry_id(id)?;
         Ok(match self.session().extract(id, name) {
-            Ok((at, len)) => warn(format!("wrote {} · {len} bytes, owner-only, outside the vault", at.display())),
+            Ok((at, len)) => warn(format!(
+                "wrote {} · {len} bytes, owner-only, outside the vault",
+                at.display()
+            )),
             Err(Extract::Gone) => error("the attachment is not there any more"),
             Err(Extract::NoFolder) => error("no vault file to write beside"),
-            Err(Extract::Exists(at)) => warn(format!("{} is already there · move it first", at.display())),
+            Err(Extract::Exists(at)) => {
+                warn(format!("{} is already there · move it first", at.display()))
+            }
             Err(Extract::Write(at, e)) => error(format!("cannot write {} · {e}", at.display())),
         })
     }

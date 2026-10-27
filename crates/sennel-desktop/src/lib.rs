@@ -9,15 +9,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use desk::{AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Status, VersionRow};
+use desk::{
+    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Status,
+    VersionRow,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
 
 type Shared<'a> = State<'a, Arc<Desk>>;
 
-async fn off_main<T: Send + 'static>(desk: &Shared<'_>, work: impl FnOnce(&Desk) -> T + Send + 'static) -> Result<T, String> {
+async fn off_main<T: Send + 'static>(
+    desk: &Shared<'_>,
+    work: impl FnOnce(&Desk) -> T + Send + 'static,
+) -> Result<T, String> {
     let desk = Arc::clone(desk.inner());
-    tauri::async_runtime::spawn_blocking(move || work(&desk)).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || work(&desk))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // Set by the quit command once the window has asked, so the second close goes through.
@@ -66,8 +74,15 @@ async fn tree(desk: Shared<'_>) -> Result<Vec<GroupRow>, String> {
 }
 
 #[tauri::command]
-async fn entries(desk: Shared<'_>, group: Option<String>, needle: Option<String>) -> Result<Vec<EntryRow>, String> {
-    off_main(&desk, move |d| d.entries(group.as_deref(), needle.as_deref())).await?
+async fn entries(
+    desk: Shared<'_>,
+    group: Option<String>,
+    needle: Option<String>,
+) -> Result<Vec<EntryRow>, String> {
+    off_main(&desk, move |d| {
+        d.entries(group.as_deref(), needle.as_deref())
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -101,8 +116,16 @@ async fn generate(desk: Shared<'_>) -> Result<Zeroizing<String>, String> {
 }
 
 #[tauri::command]
-async fn save_entry(desk: Shared<'_>, id: Option<String>, group: Option<String>, form: EntryForm) -> Result<Reply, String> {
-    off_main(&desk, move |d| d.save_entry(id.as_deref(), group.as_deref(), &form)).await?
+async fn save_entry(
+    desk: Shared<'_>,
+    id: Option<String>,
+    group: Option<String>,
+    form: EntryForm,
+) -> Result<Reply, String> {
+    off_main(&desk, move |d| {
+        d.save_entry(id.as_deref(), group.as_deref(), &form)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -181,7 +204,12 @@ async fn fields(desk: Shared<'_>, id: String) -> Result<Vec<FieldRow>, String> {
 }
 
 #[tauri::command]
-async fn add_field(desk: Shared<'_>, id: String, name: String, value: String) -> Result<Reply, String> {
+async fn add_field(
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+    value: String,
+) -> Result<Reply, String> {
     off_main(&desk, move |d| d.add_field(&id, &name, &value)).await?
 }
 
@@ -191,7 +219,12 @@ async fn attach(desk: Shared<'_>, id: String, name: String, path: String) -> Res
 }
 
 #[tauri::command]
-async fn remove_field(desk: Shared<'_>, id: String, name: String, file: bool) -> Result<Reply, String> {
+async fn remove_field(
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+    file: bool,
+) -> Result<Reply, String> {
     off_main(&desk, move |d| d.remove_field(&id, &name, file)).await?
 }
 

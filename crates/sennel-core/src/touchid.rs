@@ -43,16 +43,19 @@ mod imp {
             .set_access_control(access);
         let key = SecKey::new(&options).map_err(|e| e.to_string())?;
         let public = key.public_key().ok_or("the enclave gave no public key")?;
-        let blob = public.encrypt_data(SEAL, secret).map_err(|e| e.to_string())?;
+        let blob = public
+            .encrypt_data(SEAL, secret)
+            .map_err(|e| e.to_string())?;
         Ok(Sealed { key, blob })
     }
 
     impl Sealed {
         // Blocks until the fingerprint is read or the prompt is dismissed.
         pub fn open(&self) -> Result<Zeroizing<Vec<u8>>, Refused> {
-            self.key.decrypt_data(SEAL, &self.blob).map(Zeroizing::new).map_err(|e| {
-                classify(&e.domain().to_string(), e.code(), e.to_string())
-            })
+            self.key
+                .decrypt_data(SEAL, &self.blob)
+                .map(Zeroizing::new)
+                .map_err(|e| classify(&e.domain().to_string(), e.code(), e.to_string()))
         }
     }
 

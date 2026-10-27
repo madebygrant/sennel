@@ -11,8 +11,8 @@ pub use sennel_core::export::ExportFormat;
 #[command(name = "sennel", version, about, long_about = None)]
 pub struct Cli {
     /* Optional, so bare `sennel` still opens the TUI. Everything a
-       subcommand needs from the flags above is marked global, or `sennel get
-       x --db v.kdbx` would have to put the flag before the verb. */
+    subcommand needs from the flags above is marked global, or `sennel get
+    x --db v.kdbx` would have to put the flag before the verb. */
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -21,8 +21,8 @@ pub struct Cli {
     pub db: Option<String>,
 
     /* Every subcommand opens a vault, and a vault with a key file could not
-       be opened by any of them — they all passed `None`. Global, so `get`,
-       `audit`, `import`, `convert` and `--list` all take it. */
+    be opened by any of them — they all passed `None`. Global, so `get`,
+    `audit`, `import`, `convert` and `--list` all take it. */
     /// Key file the database also needs, if it has one
     #[arg(long, value_name = "PATH", global = true)]
     pub key_file: Option<String>,
@@ -65,8 +65,8 @@ pub struct Cli {
 }
 
 /* One verb so far. A subcommand rather than a flag because it takes a
-   positional needle and changes what the whole run is for: `sennel` opens a
-   TUI, `sennel get` answers a question and exits. */
+positional needle and changes what the whole run is for: `sennel` opens a
+TUI, `sennel get` answers a question and exits. */
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Copy one field of the entry a needle finds, without opening the TUI
@@ -99,7 +99,7 @@ pub enum Command {
         force: bool,
     },
 
-        /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
+    /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
     Convert {
         /// Where to write it. Defaults to `<name>-kdbx4.kdbx` beside the original
         #[arg(long, value_name = "PATH")]
@@ -107,8 +107,8 @@ pub enum Command {
     },
 
     /* No vault, no needle, no unlock: it generates rather than reads. The
-       flags override the `[generator]` table for this one run, so a site that
-       forbids symbols is `--no-symbols` and not an edit. */
+    flags override the `[generator]` table for this one run, so a site that
+    forbids symbols is `--no-symbols` and not an edit. */
     /// Generate a password without storing it anywhere
     Gen {
         /// What shape: complex, passphrase or pin. Defaults to the config.
@@ -236,7 +236,7 @@ impl Field {
             0 => Ok(Field::Password),
             1 => Ok(asked[0]),
             /* Refused rather than ranked: two fields means one clipboard
-               would silently win, and the user cannot tell which. */
+            would silently win, and the user cannot tell which. */
             _ => anyhow::bail!("name one field · -u, -p, --url or --otp"),
         }
     }
@@ -293,7 +293,7 @@ pub struct Config {
 
 impl Config {
     /* Values, not negations, so the rule is simpler than earworm's: the
-       command line wins, then the file, then the built-in default. */
+    command line wins, then the file, then the built-in default. */
     pub fn build(cli: Cli) -> Result<Self> {
         let mut config_file = None;
         let file = if cli.no_config {
@@ -342,7 +342,10 @@ impl Config {
                 .or(file.yubikey.as_deref())
                 .map(|spec| spec.parse().map_err(|why: String| anyhow::anyhow!("{why}")))
                 .transpose()?,
-            backup_dir: file.backup_dir.as_deref().map_or_else(default_backup_dir, expand),
+            backup_dir: file
+                .backup_dir
+                .as_deref()
+                .map_or_else(default_backup_dir, expand),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             theme: palette,
             theme_warnings: warnings,
@@ -361,7 +364,7 @@ impl Config {
     /// Shown in the help overlay, so a session's settings are visible without
     /// remembering which flags were passed.
     /* Unused until a settings write-back exists; kept because the wording is
-       the one place the effective values are summarised in one line. */
+    the one place the effective values are summarised in one line. */
     #[allow(dead_code)]
     pub fn describe(&self) -> String {
         let db = self
@@ -376,26 +379,28 @@ impl Config {
 }
 
 /* A name Sennel does not know is a startup error, not a silent fallback to
-   stored order: an ignored setting looks like a setting that does nothing. */
+stored order: an ignored setting looks like a setting that does nothing. */
 fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
     let Some(name) = name else {
         return Ok(crate::app::SortOrder::default());
     };
-    crate::app::SortOrder::from_name(name).ok_or_else(|| {
-        anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated")
-    })
+    crate::app::SortOrder::from_name(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated"))
 }
 
 /* A name nobody ships is a startup error naming the ones that exist, not a
-   silent fallback: a theme that quietly does not apply reads as a theme that
-   does not work. */
+silent fallback: a theme that quietly does not apply reads as a theme that
+does not work. */
 fn theme(
     name: Option<&str>,
     colors: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<(crate::theme::Palette, Vec<String>)> {
     let mut palette = match name {
         Some(name) => crate::theme::Palette::named(name).ok_or_else(|| {
-            anyhow::anyhow!("unknown theme {name:?} · {}", crate::theme::Palette::names())
+            anyhow::anyhow!(
+                "unknown theme {name:?} · {}",
+                crate::theme::Palette::names()
+            )
         })?,
         None => crate::theme::Palette::default(),
     };
@@ -403,12 +408,11 @@ fn theme(
         return Ok((palette, Vec::new()));
     };
     /* Applied on top of a named base, so an override is a diff rather than a
-       whole palette: nobody should have to restate nine colours to change
-       one. A key or a value that cannot work stops startup — a colour that
-       silently does not apply reads as a theme that does not work. */
+    whole palette: nobody should have to restate nine colours to change
+    one. A key or a value that cannot work stops startup — a colour that
+    silently does not apply reads as a theme that does not work. */
     for (slot, value) in colors {
-        let color = hex(value)
-            .with_context(|| format!("theme colour {slot} = {value:?}"))?;
+        let color = hex(value).with_context(|| format!("theme colour {slot} = {value:?}"))?;
         let field = palette.slot_mut(slot).ok_or_else(|| {
             anyhow::anyhow!(
                 "unknown theme colour {slot:?} · {}",
@@ -424,8 +428,8 @@ fn theme(
 /// picker and stylesheet in the world hands you.
 fn hex(value: &str) -> Result<ratatui::style::Color> {
     /* The `#` is required, not merely tolerated: the error says `#rrggbb` and
-       so does the README, and a second accepted spelling nobody documents is
-       one more thing that works on one machine and not the next. */
+    so does the README, and a second accepted spelling nobody documents is
+    one more thing that works on one machine and not the next. */
     let Some(digits) = value.strip_prefix('#') else {
         anyhow::bail!("not a #rrggbb colour");
     };
@@ -470,14 +474,12 @@ mod tests {
     }
 
     /* Unique per call, not just per process: the harness runs tests in
-       parallel, and two sharing a path would delete each other's file. */
+    parallel, and two sharing a path would delete each other's file. */
     fn temp(tag: &str) -> Temp {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "sennel-test-{tag}-{}-{n}.toml",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("sennel-test-{tag}-{}-{n}.toml", std::process::id()));
         Temp {
             handle: std::fs::File::create(&path).unwrap(),
             path: path.display().to_string(),
@@ -506,8 +508,13 @@ mod tests {
     #[test]
     fn a_yubikey_comes_from_the_flag_or_the_file() {
         assert_eq!(build("", &[]).yubikey, None);
-        assert_eq!(build("yubikey = \"2\"\n", &[]).yubikey.map(|y| y.slot), Some(2));
-        let flagged = build("yubikey = \"2\"\n", &["--yubikey", "1:77"]).yubikey.unwrap();
+        assert_eq!(
+            build("yubikey = \"2\"\n", &[]).yubikey.map(|y| y.slot),
+            Some(2)
+        );
+        let flagged = build("yubikey = \"2\"\n", &["--yubikey", "1:77"])
+            .yubikey
+            .unwrap();
         assert_eq!((flagged.slot, flagged.serial), (1, Some(77)));
     }
 
@@ -515,7 +522,10 @@ mod tests {
     fn backups_go_to_a_state_folder_unless_told_otherwise() {
         let dir = build("", &[]).backup_dir;
         assert!(dir.ends_with("sennel/backups"), "{}", dir.display());
-        assert_eq!(build("backup_dir = \"/mnt/safe\"\n", &[]).backup_dir, PathBuf::from("/mnt/safe"));
+        assert_eq!(
+            build("backup_dir = \"/mnt/safe\"\n", &[]).backup_dir,
+            PathBuf::from("/mnt/safe")
+        );
     }
 
     #[test]
@@ -534,8 +544,8 @@ mod tests {
 
     #[test]
     fn no_config_and_config_together_are_rejected() {
-        let err = Cli::try_parse_from(["sennel", "--no-config", "--config", "/tmp/x.toml"])
-            .unwrap_err();
+        let err =
+            Cli::try_parse_from(["sennel", "--no-config", "--config", "/tmp/x.toml"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
@@ -550,13 +560,17 @@ mod tests {
     }
 
     /* The entries order survives a restart, and a name Sennel does not know
-       stops startup rather than quietly meaning "stored". */
+    stops startup rather than quietly meaning "stored". */
     #[test]
     fn sort_comes_from_the_file_and_refuses_nonsense() {
         let cfg = build("sort = \"updated\"\n", &[]);
         assert_eq!(cfg.sort, crate::app::SortOrder::Updated);
         let cfg = build("sort = \"updated\"\n", &["--sort", "name"]);
-        assert_eq!(cfg.sort, crate::app::SortOrder::Name, "the flag lost to the file");
+        assert_eq!(
+            cfg.sort,
+            crate::app::SortOrder::Name,
+            "the flag lost to the file"
+        );
         let cfg = build("", &[]);
         assert_eq!(cfg.sort, crate::app::SortOrder::Stored);
 
@@ -576,7 +590,7 @@ mod tests {
     }
 
     /* `^s` was 20 characters and no symbols, full stop — wrong for every site
-       that demands one. A length that could never work stops startup. */
+    that demands one. A length that could never work stops startup. */
     #[test]
     fn the_generator_reads_the_file_and_refuses_nonsense() {
         let cfg = build("[generator]\nlength = 32\nsymbols = true\n", &[]);
@@ -663,8 +677,8 @@ mod tests {
     }
 
     /* A vault chosen in the app has to still be the vault next launch, and
-       the file it is written into belongs to the user: comments, ordering and
-       keys Sennel does not know all survive. */
+    the file it is written into belongs to the user: comments, ordering and
+    keys Sennel does not know all survive. */
     #[test]
     fn remembering_a_vault_rewrites_only_the_db_key() {
         let mut file = temp("remember");
@@ -677,9 +691,15 @@ mod tests {
 
         remember_db(Some(&path), std::path::Path::new("/vaults/new.kdbx")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# my settings"), "the comment was eaten: {text}");
+        assert!(
+            text.contains("# my settings"),
+            "the comment was eaten: {text}"
+        );
         assert!(text.contains("db = \"/vaults/new.kdbx\""), "{text}");
-        assert!(!text.contains("/old/path.kdbx"), "the old path stayed: {text}");
+        assert!(
+            !text.contains("/old/path.kdbx"),
+            "the old path stayed: {text}"
+        );
         assert!(text.contains("lock_timeout = 90"), "{text}");
         assert!(text.contains("length = 24"), "the table was lost: {text}");
 
@@ -695,7 +715,7 @@ mod tests {
     }
 
     /* A file with no `db` line gains one above any table header, or the key
-       would be read as part of the last table in the file. */
+    would be read as part of the last table in the file. */
     #[test]
     fn remembering_adds_the_key_above_the_tables() {
         let mut file = temp("remember-add");
@@ -712,7 +732,7 @@ mod tests {
     }
 
     /* A theme comes from the file or the flag, and a name nobody ships stops
-       startup naming the ones that do — the same contract as `sort`. */
+    startup naming the ones that do — the same contract as `sort`. */
     #[test]
     fn the_theme_reads_from_the_file_and_the_flag() {
         let cfg = build("theme = \"neon\"\n", &[]);
@@ -745,13 +765,10 @@ mod tests {
     }
 
     /* An override is a diff on top of a named theme, not a whole palette:
-       changing one colour must not mean restating nine. */
+    changing one colour must not mean restating nine. */
     #[test]
     fn colours_override_one_slot_at_a_time() {
-        let cfg = build(
-            "theme = \"neon\"\n[colors]\ncursor = \"#00ff00\"\n",
-            &[],
-        );
+        let cfg = build("theme = \"neon\"\n[colors]\ncursor = \"#00ff00\"\n", &[]);
         assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 0));
         // Everything else is still the theme it was built on.
         assert_eq!(cfg.theme.accent, crate::theme::NEON.accent);
@@ -766,7 +783,7 @@ mod tests {
     }
 
     /* A colour that cannot work stops startup; one that merely measures badly
-       warns and renders, because it is the user's screen. */
+    warns and renders, because it is the user's screen. */
     #[test]
     fn bad_colours_stop_startup_and_dim_ones_only_warn() {
         for bad in ["\"#12345\"", "\"blue\"", "\"#gggggg\"", "\"ff8800\""] {
@@ -799,11 +816,14 @@ mod tests {
             Ok(_) => panic!("an unknown slot started the session"),
         };
         assert!(err.contains("unknown theme colour"), "{err}");
-        assert!(err.contains("muted"), "the message does not list the slots: {err}");
+        assert!(
+            err.contains("muted"),
+            "the message does not list the slots: {err}"
+        );
 
         /* `masked` and `ink` are palette slots that nothing draws in, so a
-           config naming one is refused rather than quietly repainting a
-           colour that never reaches the screen. */
+        config naming one is refused rather than quietly repainting a
+        colour that never reaches the screen. */
         for dead in ["masked", "ink"] {
             let mut file = temp("deadslot");
             writeln!(file.handle, "[colors]\n{dead} = \"#ffffff\"").unwrap();
@@ -821,7 +841,7 @@ mod tests {
         }
 
         /* Legible-but-barely is a warning, not a refusal: the session starts,
-           and the note names the slot and what it measured. */
+        and the note names the slot and what it measured. */
         let cfg = build("[colors]\nmuted = \"#3a3a3a\"\n", &[]);
         assert_eq!(cfg.theme.muted, ratatui::style::Color::Rgb(58, 58, 58));
         assert!(
@@ -833,16 +853,19 @@ mod tests {
         assert!(build("theme = \"cool\"\n", &[]).theme_warnings.is_empty());
 
         /* Whether anything is repainting the theme, which `^t` says out loud:
-           the walk moves the base and the table stays in the file. */
+        the walk moves the base and the table stays in the file. */
         assert!(build("[colors]\ncursor = \"#00ff88\"\n", &[]).theme_overridden);
         assert!(!build("theme = \"neon\"\n", &[]).theme_overridden);
-        assert!(!build("[colors]\n", &[]).theme_overridden, "an empty table repaints nothing");
+        assert!(
+            !build("[colors]\n", &[]).theme_overridden,
+            "an empty table repaints nothing"
+        );
     }
 
     /* The library is written by the app and read back by the parser, so the
-       one thing that can break it is a path TOML cannot spell: a quote or a
-       backslash in a folder name would otherwise make the next launch refuse
-       to start. */
+    one thing that can break it is a path TOML cannot spell: a quote or a
+    backslash in a folder name would otherwise make the next launch refuse
+    to start. */
     #[test]
     fn the_vault_library_survives_awkward_paths() {
         let mut file = temp("recent");
@@ -874,7 +897,7 @@ mod tests {
     }
 
     /* `~` means home in the library the way it does in `db`: a config copied
-       between machines names the same vault on both. */
+    between machines names the same vault on both. */
     #[test]
     fn the_library_expands_a_tilde() {
         let cfg = build("recent = [\"~/vaults/x.kdbx\"]\n", &[]);
@@ -883,9 +906,9 @@ mod tests {
     }
 
     /* A value that spans lines is replaced whole. Swapping only its first
-       line used to orphan the rest, which left a config file that no longer
-       parsed — and then nothing started, not even `--check`, until somebody
-       edited it by hand. Every TOML formatter writes ten paths this way. */
+    line used to orphan the rest, which left a config file that no longer
+    parsed — and then nothing started, not even `--check`, until somebody
+    edited it by hand. Every TOML formatter writes ten paths this way. */
     #[test]
     fn a_value_that_spans_lines_is_replaced_whole() {
         let mut file = temp("multiline");
@@ -905,14 +928,21 @@ mod tests {
         ]);
         assert_eq!(cfg.recent, vec![PathBuf::from("/vaults/c.kdbx")]);
         assert_eq!(cfg.lock_timeout, 90);
-        assert_eq!(cfg.theme, crate::theme::COOL, "a key after the array was lost");
+        assert_eq!(
+            cfg.theme,
+            crate::theme::COOL,
+            "a key after the array was lost"
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# mine"), "{text}");
-        assert!(!text.contains("/vaults/a.kdbx"), "the old rows survived: {text}");
+        assert!(
+            !text.contains("/vaults/a.kdbx"),
+            "the old rows survived: {text}"
+        );
     }
 
     /* A bracket inside a path is text, not structure: counting it would make
-       the rewriter eat the wrong lines. */
+    the rewriter eat the wrong lines. */
     #[test]
     fn a_bracket_in_a_path_does_not_confuse_the_rewriter() {
         let mut file = temp("bracket");
@@ -922,7 +952,10 @@ mod tests {
         )
         .unwrap();
         let path = std::path::PathBuf::from(&file.path);
-        let awkward = vec![PathBuf::from("/vaults/x[1].kdbx"), PathBuf::from("/vaults/y.kdbx")];
+        let awkward = vec![
+            PathBuf::from("/vaults/x[1].kdbx"),
+            PathBuf::from("/vaults/y.kdbx"),
+        ];
         remember_recent(Some(&path), &awkward).unwrap();
         let cfg = run(vec![
             "sennel".to_string(),
@@ -934,8 +967,8 @@ mod tests {
     }
 
     /* `^d` on the startup vault drops the key rather than writing something
-       in its place: left alone, the next launch would reopen the vault that
-       was just forgotten and put it back in the library. */
+    in its place: left alone, the next launch would reopen the vault that
+    was just forgotten and put it back in the library. */
     #[test]
     fn forgetting_the_startup_vault_removes_the_key() {
         let mut file = temp("forgetdb");
@@ -961,16 +994,23 @@ mod tests {
     }
 
     /* A commented-out key is a comment, not the key: rewriting it would
-       leave the live one below it untouched and the setting unchanged. */
+    leave the live one below it untouched and the setting unchanged. */
     #[test]
     fn a_commented_out_key_is_left_alone() {
         let mut file = temp("commented");
-        write!(file.handle, "# db = \"/vaults/note.kdbx\"\ndb = \"/vaults/live.kdbx\"\n").unwrap();
+        write!(
+            file.handle,
+            "# db = \"/vaults/note.kdbx\"\ndb = \"/vaults/live.kdbx\"\n"
+        )
+        .unwrap();
         let path = std::path::PathBuf::from(&file.path);
         remember_db(Some(&path), std::path::Path::new("/vaults/new.kdbx")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# db = \"/vaults/note.kdbx\""), "{text}");
-        assert!(!text.contains("/vaults/live.kdbx"), "the live key was skipped: {text}");
+        assert!(
+            !text.contains("/vaults/live.kdbx"),
+            "the live key was skipped: {text}"
+        );
         let cfg = run(vec![
             "sennel".to_string(),
             "--config".into(),

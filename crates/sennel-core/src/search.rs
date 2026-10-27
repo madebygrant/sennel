@@ -2,19 +2,19 @@ use std::collections::HashMap;
 
 use keepass::db::{EntryId, EntryRef, GroupId};
 use nucleo_matcher::Matcher;
-use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::Utf32Str;
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 
 use crate::vault::Vault;
 
 /* What an entry answers to. Notes are deliberately left out: they are long
-   free text that matches almost any needle and floods the list with hits the
-   user did not mean. Title, user, url and the group path are the fields a
-   person reaches for when looking for an entry. If notes search is ever
-   wanted, it becomes an opt-in toggle, not a default.
+free text that matches almost any needle and floods the list with hits the
+user did not mean. Title, user, url and the group path are the fields a
+person reaches for when looking for an entry. If notes search is ever
+wanted, it becomes an opt-in toggle, not a default.
 
-   Tests only: `haystacks` does the whole-vault pass, resolving each group
-   path once. This stays as the single-entry statement of the join. */
+Tests only: `haystacks` does the whole-vault pass, resolving each group
+path once. This stays as the single-entry statement of the join. */
 #[cfg(test)]
 pub fn haystack(vault: &Vault, id: &EntryId) -> String {
     let Some(entry) = vault.get_entry(id) else {
@@ -29,7 +29,12 @@ pub fn haystack(vault: &Vault, id: &EntryId) -> String {
 
 // The needle parsed once for a whole pass, not once per entry.
 pub fn pattern(needle: &str) -> Pattern {
-    Pattern::new(needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy)
+    Pattern::new(
+        needle,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    )
 }
 
 // Haystacks for `ids`, in order, with each group path resolved once.
@@ -64,8 +69,8 @@ fn haystack_from(entry: &EntryRef<'_>, group_path: &str) -> String {
 }
 
 /* A matcher plus the scratch buffers fuzzy_match wants. Buffers live here so
-   repeated ranks reuse their allocations instead of growing fresh vecs every
-   keypress — the band re-ranks the whole vault on each typed character. */
+repeated ranks reuse their allocations instead of growing fresh vecs every
+keypress — the band re-ranks the whole vault on each typed character. */
 pub struct Searcher {
     matcher: Matcher,
     /// Scratch the haystack is decoded into, kept so a whole-vault pass reuses
@@ -86,17 +91,23 @@ impl Searcher {
     /// lossless in practice; clamp keeps the u16 ceiling honest.
     pub fn score(&mut self, pattern: &Pattern, hay: &str) -> Option<u16> {
         /* Destructured so the scratch buffer and the matcher are two borrows
-           of two fields rather than one of the whole Searcher. */
-        let Searcher { matcher, hay_chars, .. } = self;
+        of two fields rather than one of the whole Searcher. */
+        let Searcher {
+            matcher, hay_chars, ..
+        } = self;
         let hay = Utf32Str::new(hay, hay_chars);
-        pattern.score(hay, matcher).map(|s| s.min(u16::MAX as u32) as u16)
+        pattern
+            .score(hay, matcher)
+            .map(|s| s.min(u16::MAX as u32) as u16)
     }
 
     /// Raw fuzzy score, tests only. None means "no match"; an empty needle
     /// matches everything with score 0.
     #[cfg(test)]
     pub fn rank(&mut self, needle: &str, hay: &str) -> Option<u16> {
-        let Searcher { matcher, hay_chars, .. } = self;
+        let Searcher {
+            matcher, hay_chars, ..
+        } = self;
         let mut needle_chars = Vec::new();
         let needle = Utf32Str::new(needle, &mut needle_chars);
         let hay = Utf32Str::new(hay, hay_chars);
@@ -111,7 +122,9 @@ impl Searcher {
             return Vec::new();
         }
         let pattern = Pattern::parse(needle, CaseMatching::Smart, Normalization::Smart);
-        let Searcher { matcher, hay_chars, .. } = self;
+        let Searcher {
+            matcher, hay_chars, ..
+        } = self;
         let hay = Utf32Str::new(text, hay_chars);
         let mut out = Vec::new();
         pattern.indices(hay, matcher, &mut out);
@@ -164,7 +177,11 @@ pub fn rows(
         SortOrder::Updated => entries.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification)),
     }
     if let Some(prefix) = needle.and_then(crate::vault::tag_needle) {
-        return entries.iter().filter(|e| crate::vault::has_tag(e, prefix)).map(|e| e.id()).collect();
+        return entries
+            .iter()
+            .filter(|e| crate::vault::has_tag(e, prefix))
+            .map(|e| e.id())
+            .collect();
     }
     let ids: Vec<EntryId> = entries.iter().map(|e| e.id()).collect();
     let Some(needle) = needle.filter(|n| global && !n.is_empty()) else {
@@ -212,7 +229,7 @@ mod tests {
     }
 
     /* Empty band shows everything: an empty needle scores 0 on any haystack
-       rather than filtering the list to nothing. */
+    rather than filtering the list to nothing. */
     #[test]
     fn an_empty_needle_matches_everything() {
         let mut s = Searcher::new();
@@ -220,7 +237,7 @@ mod tests {
     }
 
     /* nucleo normalises latin accents itself (Smart normalisation), so a
-       needle typed without accents still finds accented titles. */
+    needle typed without accents still finds accented titles. */
     #[test]
     fn accents_normalise() {
         let mut s = Searcher::new();
@@ -245,7 +262,7 @@ mod tests {
     }
 
     /* The group path is searchable: "bank" should find entries filed under
-       Banks even when the title says nothing about banking. */
+    Banks even when the title says nothing about banking. */
     #[test]
     fn the_group_path_is_searchable() {
         let (vault, id) = vault_with("checking", "u", "", "Banks");

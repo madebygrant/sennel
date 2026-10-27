@@ -25,8 +25,8 @@ pub fn word_count() -> usize {
 }
 
 /* What a password is shaped like. `Complex` is the historical generator —
-   character classes over a length. `Passphrase` is words off the list.
-   `Pin` is digits, for the screens that only accept those. */
+character classes over a length. `Passphrase` is words off the list.
+`Pin` is digits, for the screens that only accept those. */
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
@@ -65,12 +65,12 @@ impl Kind {
 }
 
 /* Characters that read differently in some fonts or get mangled when read
-   aloud: l 1 I O 0. Excluding them shrinks the alphabet, so it is opt-in. */
+aloud: l 1 I O 0. Excluding them shrinks the alphabet, so it is opt-in. */
 const AMBIGUOUS: &[u8] = b"l1IO0";
 
 /* One requested class. `chars` holds the pool, `required` whether the
-   generator must place at least one of them — a class asked for and missing
-   is a generator that lied about what it produces. */
+generator must place at least one of them — a class asked for and missing
+is a generator that lied about what it produces. */
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Classes {
     pub lower: bool,
@@ -129,7 +129,11 @@ impl Classes {
     /// Combined alphabet size, for the entropy estimate. Ambiguity excluded
     /// here too, so the number matches what was actually drawn from.
     pub fn alphabet_len(self, exclude_ambiguous: bool) -> usize {
-        self.pools(exclude_ambiguous).0.iter().map(|p| p.len()).sum()
+        self.pools(exclude_ambiguous)
+            .0
+            .iter()
+            .map(|p| p.len())
+            .sum()
     }
 }
 
@@ -192,8 +196,8 @@ pub fn generate(len: usize, classes: Classes, exclude_ambiguous: bool) -> Result
         out.push(all[at]);
     }
     /* Shuffle the forced picks out of their positions: class order at the
-       front would be structure a guesser could use. Fisher-Yates with the
-       same OS source. */
+    front would be structure a guesser could use. Fisher-Yates with the
+    same OS source. */
     for i in (1..out.len()).rev() {
         let j = os_index(i + 1)?;
         out.swap(i, j);
@@ -260,9 +264,9 @@ pub fn generate_pin(len: usize) -> Result<String, String> {
 }
 
 /* What a typed password is worth, judged only by what is in it: the classes
-   it actually uses times its length. An over-estimate for "Password1!" — no
-   estimate from characters alone can know a word — so the UI shows it as a
-   rough number, never as a verdict. */
+it actually uses times its length. An over-estimate for "Password1!" — no
+estimate from characters alone can know a word — so the UI shows it as a
+rough number, never as a verdict. */
 pub fn typed_bits(password: &str) -> f64 {
     if password.is_empty() {
         return 0.0;
@@ -318,7 +322,7 @@ mod tests {
     #[test]
     fn the_length_is_exactly_what_was_asked() {
         /* One class: a single character has room for it. Default turns on
-           three, which a length of one cannot honour. */
+        three, which a length of one cannot honour. */
         let one = generate(
             1,
             Classes {
@@ -338,17 +342,15 @@ mod tests {
     }
 
     /* With a long enough password every class shows up at least once. This
-       is probabilistic only in the pathological sense: 256 draws over a
-       90-character alphabet missing a whole class is ~2^-38. */
+    is probabilistic only in the pathological sense: 256 draws over a
+    90-character alphabet missing a whole class is ~2^-38. */
     #[test]
     fn every_requested_class_appears() {
         let pw = generate(256, all_on(), false).unwrap();
         assert!(pw.chars().any(char::is_lowercase));
         assert!(pw.chars().any(char::is_uppercase));
         assert!(pw.chars().any(|c| c.is_ascii_digit()));
-        assert!(pw
-            .chars()
-            .any(|c| SYMBOLS.contains(&(c as u8))));
+        assert!(pw.chars().any(|c| SYMBOLS.contains(&(c as u8))));
     }
 
     #[test]
@@ -365,15 +367,25 @@ mod tests {
         assert!(pw.chars().any(char::is_lowercase));
         assert!(pw.chars().any(char::is_uppercase));
         assert!(pw.chars().any(|c| c.is_ascii_digit()));
-        assert!(!pw
-            .chars()
-            .any(|c| SYMBOLS.contains(&(c as u8))));
+        assert!(!pw.chars().any(|c| SYMBOLS.contains(&(c as u8))));
     }
 
     #[test]
     fn impossible_asks_are_errors_not_panics() {
         assert!(generate(0, all_on(), false).is_err());
-        assert!(generate(8, Classes { lower: false, upper: false, digits: false, symbols: false }, false).is_err());
+        assert!(
+            generate(
+                8,
+                Classes {
+                    lower: false,
+                    upper: false,
+                    digits: false,
+                    symbols: false
+                },
+                false
+            )
+            .is_err()
+        );
         /* Four classes but only two characters of room. */
         assert!(generate(2, all_on(), false).is_err());
     }
@@ -386,8 +398,8 @@ mod tests {
     }
 
     /* The estimate reads what is in the password, not what a generator was
-       asked for: four classes in twelve characters is worth more than twelve
-       lowercase letters, and empty is worth nothing. */
+    asked for: four classes in twelve characters is worth more than twelve
+    lowercase letters, and empty is worth nothing. */
     #[test]
     fn typed_entropy_reads_the_classes_actually_used() {
         assert_eq!(typed_bits(""), 0.0);
@@ -407,7 +419,7 @@ mod tests {
     }
 
     /* The list survived embedding: thousands of words, all lowercase ASCII,
-       none hyphenated (they would read as separators). */
+    none hyphenated (they would read as separators). */
     #[test]
     fn the_wordlist_is_what_the_passphrase_draws_from() {
         assert_eq!(word_count(), 7772, "only {} words", word_count());
@@ -477,7 +489,16 @@ mod probe {
     use super::*;
     #[test]
     fn probe_256() {
-        let pw = generate(256, Classes { lower: true, upper: true, digits: true, symbols: true }, false);
+        let pw = generate(
+            256,
+            Classes {
+                lower: true,
+                upper: true,
+                digits: true,
+                symbols: true,
+            },
+            false,
+        );
         eprintln!("PROBE: {:?}", pw.as_ref().map(|s| s.len()));
         assert!(pw.is_ok());
     }

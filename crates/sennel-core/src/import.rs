@@ -1,21 +1,21 @@
 /* Reading somebody else's export. Migration is when people try a new password
-   manager, so the bar is: point it at whatever your old tool gave you and
-   have it work, or say exactly which column it could not find.
+manager, so the bar is: point it at whatever your old tool gave you and
+have it work, or say exactly which column it could not find.
 
-   One reader, not three. KeePassXC, Bitwarden and 1Password all export CSV
-   with a header row and different names for the same six things, so the
-   mapping is by header rather than by format — which means a tool nobody
-   here has heard of also works if it names its columns like everyone else.
+One reader, not three. KeePassXC, Bitwarden and 1Password all export CSV
+with a header row and different names for the same six things, so the
+mapping is by header rather than by format — which means a tool nobody
+here has heard of also works if it names its columns like everyone else.
 
-   The CSV parser is here rather than a dependency because RFC 4180 is small
-   and the alternative is pulling a crate into a password manager to read
-   about sixty lines' worth of quoting rules. */
+The CSV parser is here rather than a dependency because RFC 4180 is small
+and the alternative is pulling a crate into a password manager to read
+about sixty lines' worth of quoting rules. */
 
 /// One row of an export, in Sennel's terms.
 /* Holds a password and a one-time seed in the clear, so it wipes on drop. The
-   file it came from is plaintext on disk either way — which is why `import`
-   tells the user to delete it — but that is a reason to handle the copy in
-   memory properly, not a reason to stop bothering. */
+file it came from is plaintext on disk either way — which is why `import`
+tells the user to delete it — but that is a reason to handle the copy in
+memory properly, not a reason to stop bothering. */
 #[derive(Debug, PartialEq, Default)]
 pub struct Row {
     pub group: String,
@@ -48,7 +48,7 @@ impl Drop for Row {
 /// What a header column is, whatever the exporting tool called it.
 fn column(name: &str) -> Option<&'static str> {
     /* Lower-cased and stripped of the punctuation exporters sprinkle in, so
-       "Login Name", "login_name" and "login-name" are one column. */
+    "Login Name", "login_name" and "login-name" are one column. */
     let key: String = name
         .to_lowercase()
         .chars()
@@ -76,7 +76,7 @@ pub struct Import {
 }
 
 /* A title is the one column with no sensible default: an entry called "" is
-   an entry nobody can find again. Everything else may be absent. */
+an entry nobody can find again. Everything else may be absent. */
 pub fn read_csv(text: &str) -> Result<Import, String> {
     let mut records = parse(text).into_iter();
     let Some(header) = records.next() else {
@@ -119,7 +119,7 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
                 _ => continue,
             };
             /* First one wins: 1Password writes several url columns, and the
-               first is the one the item is actually for. */
+            first is the one the item is actually for. */
             if slot.is_empty() {
                 *slot = field;
             }
@@ -133,9 +133,9 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
 }
 
 /* RFC 4180: fields split on commas, quotes protect commas and newlines, and
-   a doubled quote inside a quoted field is one quote. Anything else is taken
-   literally rather than refused — an export with a stray quote in a notes
-   field should still import. */
+a doubled quote inside a quoted field is one quote. Anything else is taken
+literally rather than refused — an export with a stray quote in a notes
+field should still import. */
 fn parse(text: &str) -> Vec<Vec<String>> {
     let mut records = Vec::new();
     let mut record = Vec::new();
@@ -171,14 +171,14 @@ fn parse(text: &str) -> Vec<Vec<String>> {
 }
 
 /* The rows into a vault, under one new group. Split from the command so the
-   shape of what lands can be tested without a file, a password prompt or a
-   process: the CLI wrapper is then only "read the file, open the vault, call
-   this, save".
+shape of what lands can be tested without a file, a password prompt or a
+process: the CLI wrapper is then only "read the file, open the vault, call
+this, save".
 
-   One new group rather than merged into the tree the file describes, because
-   an import is the operation most likely to be regretted and one group is one
-   thing to delete when it is. The file's own group column becomes a subgroup,
-   so the shape survives without colonising the vault. */
+One new group rather than merged into the tree the file describes, because
+an import is the operation most likely to be regretted and one group is one
+thing to delete when it is. The file's own group column becomes a subgroup,
+so the shape survives without colonising the vault. */
 pub fn into_vault(
     vault: &mut crate::vault::Vault,
     rows: &[Row],
@@ -194,23 +194,37 @@ pub fn into_vault(
         // KeePassXC writes a nested group as "Root/Bank"; each part is its own group.
         let mut parent = top;
         let mut path = String::new();
-        for part in row.group.split('/').map(str::trim).filter(|p| !p.is_empty()) {
+        for part in row
+            .group
+            .split('/')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             path.push('/');
             path.push_str(part);
             parent = match made.get(&path) {
                 Some(id) => *id,
                 None => {
-                    let id = vault.create_group(&parent, part).map_err(|e| e.to_string())?;
+                    let id = vault
+                        .create_group(&parent, part)
+                        .map_err(|e| e.to_string())?;
                     made.insert(path.clone(), id);
                     id
                 }
             };
         }
         let id = vault
-            .create_entry(&parent, &row.title, &row.username, &row.password, &row.url, &row.notes)
+            .create_entry(
+                &parent,
+                &row.title,
+                &row.username,
+                &row.password,
+                &row.url,
+                &row.notes,
+            )
             .map_err(|e| e.to_string())?;
         /* A seed that will not parse is not worth failing a whole import
-           over: the entry lands without a code and the caller names it. */
+        over: the entry lands without a code and the caller names it. */
         if !row.otp.trim().is_empty() {
             match crate::vault::totp_url(&row.otp, &row.title, &row.username) {
                 Ok(url) => {
@@ -229,7 +243,7 @@ mod tests {
     use super::*;
 
     /* The three exporters people actually arrive from, each naming the same
-       six things differently. One reader has to answer all of them. */
+    six things differently. One reader has to answer all of them. */
     #[test]
     fn the_headers_every_exporter_writes_map_onto_the_same_fields() {
         // KeePassXC.
@@ -263,8 +277,12 @@ mod tests {
         assert_eq!(bw.rows[0].url, "https://j.example");
         assert_eq!(bw.rows[0].otp, "SEED");
         /* Columns nothing was done with are named rather than dropped in
-           silence: the user can then decide whether they mattered. */
-        assert!(bw.ignored.contains(&"favorite".to_string()), "{:?}", bw.ignored);
+        silence: the user can then decide whether they mattered. */
+        assert!(
+            bw.ignored.contains(&"favorite".to_string()),
+            "{:?}",
+            bw.ignored
+        );
         assert!(bw.ignored.contains(&"type".to_string()));
 
         // 1Password's spelling, where several url columns are normal.
@@ -276,7 +294,7 @@ mod tests {
     }
 
     /* Quoting is the whole reason this is not a `split(',')`: a notes field
-       with a comma, a newline or a quote in it is ordinary. */
+    with a comma, a newline or a quote in it is ordinary. */
     #[test]
     fn quoted_fields_survive_commas_newlines_and_quotes() {
         let got = read_csv(
@@ -291,7 +309,7 @@ mod tests {
     }
 
     /* The shape that lands in the vault: one new group, the file's own groups
-       as subgroups under it, and nothing touching the tree that was there. */
+    as subgroups under it, and nothing touching the tree that was there. */
     #[test]
     fn an_import_lands_under_one_new_group() {
         let mut vault = crate::vault::Vault::new();
@@ -307,18 +325,26 @@ mod tests {
         assert_eq!(added, 4);
 
         /* A seed that will not parse costs its own entry a code and nothing
-           else: failing the whole import over one bad column would strand
-           somebody mid-migration. */
+        else: failing the whole import over one bad column would strand
+        somebody mid-migration. */
         assert_eq!(skipped.len(), 1, "{skipped:?}");
         assert!(skipped[0].contains("broken-seed"), "{skipped:?}");
 
         // One new group at the root, beside what was already there.
-        let top: Vec<String> = vault.groups_in(&root).iter().map(|g| g.name.clone()).collect();
+        let top: Vec<String> = vault
+            .groups_in(&root)
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
         assert_eq!(top, vec!["Existing", "Imported"]);
         let imported = vault.groups_in(&root)[1].id();
 
         // The file's own group becomes a subgroup, made once for two rows.
-        let under: Vec<String> = vault.groups_in(&imported).iter().map(|g| g.name.clone()).collect();
+        let under: Vec<String> = vault
+            .groups_in(&imported)
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
         assert_eq!(under, vec!["Work"]);
         let work = vault.groups_in(&imported)[0].id();
         assert_eq!(vault.entries_in(&work).len(), 2);
@@ -328,30 +354,35 @@ mod tests {
         assert_eq!(vault.entries_in(&root).len(), 1);
 
         /* The values land where they belong, and a bare seed is wrapped into
-           the otpauth url KDBX stores. */
+        the otpauth url KDBX stores. */
         let jira = vault.entries_in(&work)[0].id();
         let entry = vault.get_entry(&jira).unwrap();
         use crate::vault::EntryExt;
         assert_eq!(entry.title(), "jira");
         assert_eq!(entry.password(), "pw");
-        assert!(crate::vault::totp_now(&entry).is_some(), "the seed did not become a code");
+        assert!(
+            crate::vault::totp_now(&entry).is_some(),
+            "the seed did not become a code"
+        );
     }
 
     #[test]
     fn a_group_path_becomes_nested_groups() {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
-        let found = read_csv(
-            "group,title\nA/B,one\nA/B,two\nA,three\n A / C ,four\nA//D,five\n",
-        )
-        .unwrap();
+        let found =
+            read_csv("group,title\nA/B,one\nA/B,two\nA,three\n A / C ,four\nA//D,five\n").unwrap();
         into_vault(&mut vault, &found.rows, "Imported").unwrap();
 
         let names = |v: &crate::vault::Vault, id| -> Vec<String> {
             v.groups_in(id).iter().map(|g| g.name.clone()).collect()
         };
         let imported = vault.groups_in(&root)[0].id();
-        assert_eq!(names(&vault, &imported), vec!["A"], "A was made more than once");
+        assert_eq!(
+            names(&vault, &imported),
+            vec!["A"],
+            "A was made more than once"
+        );
         let a = vault.groups_in(&imported)[0].id();
         assert_eq!(names(&vault, &a), vec!["B", "C", "D"]);
         assert_eq!(vault.entries_in(&a).len(), 1);
@@ -360,16 +391,16 @@ mod tests {
     }
 
     /* Every row holds a password in the clear. The file it came from is
-       plaintext on disk either way — which is why `import` says to delete it
-       — but that is a reason to handle the copy in memory properly, not a
-       reason to stop bothering.
+    plaintext on disk either way — which is why `import` says to delete it
+    — but that is a reason to handle the copy in memory properly, not a
+    reason to stop bothering.
 
-       On a live value, for the reason `vault`'s equivalent test gives. */
+    On a live value, for the reason `vault`'s equivalent test gives. */
     #[test]
     fn a_parsed_row_wipes_its_secrets() {
         /* Every field named: `..Row::default()` cannot be used on a type
-           with a Drop impl, since the struct-update syntax moves out of a
-           value that owns a destructor. */
+        with a Drop impl, since the struct-update syntax moves out of a
+        value that owns a destructor. */
         let mut row = Row {
             group: String::new(),
             title: "mail".into(),
@@ -396,7 +427,7 @@ mod tests {
     }
 
     /* A file with no title column cannot be imported into anything useful,
-       and the message has to name what it did find. */
+    and the message has to name what it did find. */
     #[test]
     fn a_file_without_a_title_column_says_what_it_found_instead() {
         let err = read_csv("user,pass\nocto,pw\n").unwrap_err();

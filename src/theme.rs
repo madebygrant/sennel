@@ -3,10 +3,10 @@ use std::sync::OnceLock;
 use ratatui::style::Color;
 
 /* A palette is a set of roles, not a set of pigments. The names used to be
-   the colours themselves — CREAM, GOLD — which reads fine on one warm dark
-   theme and lies on every other: a light theme's "cream" is near-black ink.
-   What each slot is *for* is the part that survives a theme change, so that
-   is what they are called. */
+the colours themselves — CREAM, GOLD — which reads fine on one warm dark
+theme and lies on every other: a light theme's "cream" is near-black ink.
+What each slot is *for* is the part that survives a theme change, so that
+is what they are called. */
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Palette {
     /// Entry titles and anything the eye should land on first.
@@ -28,18 +28,18 @@ pub struct Palette {
     pub surface: Color,
     /// Masked secrets and other text that is deliberately unreadable.
     /* Unused today — the masks draw in `muted`. Kept: it is the slot for
-       "readable-but-not-text", the natural colour for a masked field. */
+    "readable-but-not-text", the natural colour for a masked field. */
     #[allow(dead_code)]
     pub masked: Color,
     /// Text on a filled band, where the gradient is covered.
     /* Unused today — no filled band draws. Kept with the palette for the same
-       reason the gradient sits in one file: a future banner should not invent
-       its own ink. */
+    reason the gradient sits in one file: a future banner should not invent
+    its own ink. */
     #[allow(dead_code)]
     pub ink: Color,
     /* The diagonal gradient behind everything, as its two ends. Part of the
-       palette because a light theme is not a light palette over a dark
-       ground: they move together or nothing is legible. */
+    palette because a light theme is not a light palette over a dark
+    ground: they move together or nothing is legible. */
     pub near: (u8, u8, u8),
     pub far: (u8, u8, u8),
     /// Where the gradient stop sits: past it the whole corner is flat `far`.
@@ -47,28 +47,28 @@ pub struct Palette {
 }
 
 /* Warm cream-on-dark: gold carries structure, teal marks where you are, and
-   everything secondary is a muted sand rather than a grey. Text and ground
-   are both warm, so the one cool colour is what the eye lands on. Every
-   colour clears 4.5:1 over the lightest corner of the gradient except `rule`,
-   which is meant to be barely there. */
+everything secondary is a muted sand rather than a grey. Text and ground
+are both warm, so the one cool colour is what the eye lands on. Every
+colour clears 4.5:1 over the lightest corner of the gradient except `rule`,
+which is meant to be barely there. */
 /* Measured, not asserted: `every_palette_is_legible_on_its_own_ground` runs
-   the numbers over every built-in, against both ends of the gradient and the
-   tone popups raise themselves with.
+the numbers over every built-in, against both ends of the gradient and the
+tone popups raise themselves with.
 
-   The gradient is the hues of
-   linear-gradient(45deg, hsla(10,19%,36%,1) 0%, hsla(290,95%,9%,1) 76%) at
-   half brightness, so text stays the brightest thing on screen. */
+The gradient is the hues of
+linear-gradient(45deg, hsla(10,19%,36%,1) 0%, hsla(290,95%,9%,1) 76%) at
+half brightness, so text stays the brightest thing on screen. */
 pub const WARM: Palette = Palette {
     text: Color::Rgb(236, 223, 192),
     /* Darker than the text on purpose: the two were 1.13:1 apart before and
-       read as one. */
+    read as one. */
     accent: Color::Rgb(214, 180, 96),
     // Cool against the warm ground, so it separates from warn by hue.
     cursor: Color::Rgb(96, 178, 158),
     warn: Color::Rgb(214, 154, 78),
     /* Lifted from (196,106,92), which measured 3.73:1 over `near` — under the
-       4.5:1 this file has always claimed, on the one colour a failed save is
-       read in. The same red, two shades up: 4.74:1. */
+    4.5:1 this file has always claimed, on the one colour a failed save is
+    read in. The same red, two shades up: 4.74:1. */
     error: Color::Rgb(214, 126, 112),
     muted: Color::Rgb(158, 148, 128),
     rule: Color::Rgb(92, 84, 66),
@@ -82,8 +82,8 @@ pub const WARM: Palette = Palette {
 
 impl Palette {
     /* Every slot with its name, so a check that must cover the palette cannot
-       quietly miss one: adding a field to the struct without adding it here
-       is the mistake this exists to make hard. */
+    quietly miss one: adding a field to the struct without adding it here
+    is the mistake this exists to make hard. */
     pub fn slots(&self) -> [(&'static str, Color); 10] {
         [
             ("text", self.text),
@@ -101,9 +101,9 @@ impl Palette {
 }
 
 /* Ink on parchment, for a terminal with a light background — where every
-   other palette here is unreadable. The inversion is the whole palette, not
-   the text: the gradient's ends go light too, and `surface` is lighter than
-   the page rather than darker, so a popup still reads as raised. */
+other palette here is unreadable. The inversion is the whole palette, not
+the text: the gradient's ends go light too, and `surface` is lighter than
+the page rather than darker, so a popup still reads as raised. */
 pub const LIGHT: Palette = Palette {
     text: Color::Rgb(38, 34, 30),
     accent: Color::Rgb(124, 84, 14),
@@ -122,7 +122,7 @@ pub const LIGHT: Palette = Palette {
 };
 
 /* Slate and steel: the same structure as warm with the warmth taken out, for
-   anyone who finds a gold-and-cream terminal too much furniture. */
+anyone who finds a gold-and-cream terminal too much furniture. */
 pub const COOL: Palette = Palette {
     text: Color::Rgb(226, 232, 240),
     accent: Color::Rgb(126, 176, 222),
@@ -140,9 +140,9 @@ pub const COOL: Palette = Palette {
 };
 
 /* Magenta and cyan over a violet-to-black ground. The hazard in a neon
-   palette is always `muted` — usernames, urls and every hint draw in it, and
-   the temptation is a dim purple that measures 2:1. This one is light enough
-   to read and cool enough to stay behind the text. */
+palette is always `muted` — usernames, urls and every hint draw in it, and
+the temptation is a dim purple that measures 2:1. This one is light enough
+to read and cool enough to stay behind the text. */
 pub const NEON: Palette = Palette {
     text: Color::Rgb(226, 232, 255),
     accent: Color::Rgb(255, 92, 213),
@@ -160,8 +160,8 @@ pub const NEON: Palette = Palette {
 };
 
 /* Every palette Sennel ships. The list is what the contrast, quantise and
-   NO_COLOR checks iterate, so a new theme is covered the moment it is added
-   here and cannot be shipped unmeasured. */
+NO_COLOR checks iterate, so a new theme is covered the moment it is added
+here and cannot be shipped unmeasured. */
 pub const BUILT_INS: [(&str, Palette); 4] = [
     ("warm", WARM),
     ("light", LIGHT),
@@ -170,8 +170,8 @@ pub const BUILT_INS: [(&str, Palette); 4] = [
 ];
 
 /* WCAG 2.1 relative luminance and contrast ratio. A palette is a claim about
-   legibility — theme.rs has carried one in a comment since the first commit —
-   and a claim nothing measures is a claim that quietly stops being true. */
+legibility — theme.rs has carried one in a comment since the first commit —
+and a claim nothing measures is a claim that quietly stops being true. */
 pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     let luminance = |c: (u8, u8, u8)| {
         let channel = |v: u8| {
@@ -213,8 +213,8 @@ impl Palette {
         match BUILT_INS.iter().position(|(_, known)| known == self) {
             Some(at) => BUILT_INS[(at + 1) % BUILT_INS.len()].1,
             /* A palette with [colors] on it is in no walk, so the walk starts
-               at its own beginning. Stepping off it to the *second* built-in
-               would make `warm` the one theme `^t` could never reach. */
+            at its own beginning. Stepping off it to the *second* built-in
+            would make `warm` the one theme `^t` could never reach. */
             None => BUILT_INS[0].1,
         }
     }
@@ -231,9 +231,9 @@ impl Palette {
 
 impl Palette {
     /* One slot by name, for a config that overrides a colour or two on top of
-       a built-in. Returning the field to write into keeps the name list in
-       one place — `slots()` and this have to agree, and a mismatch is a key
-       that parses and paints nothing. */
+    a built-in. Returning the field to write into keeps the name list in
+    one place — `slots()` and this have to agree, and a mismatch is a key
+    that parses and paints nothing. */
     pub fn slot_mut(&mut self, slot: &str) -> Option<&mut Color> {
         Some(match slot {
             "text" => &mut self.text,
@@ -245,16 +245,16 @@ impl Palette {
             "rule" => &mut self.rule,
             "surface" => &mut self.surface,
             /* `masked` and `ink` are deliberately absent: the palette holds
-               them but nothing draws in them yet, and a key that parses and
-               repaints nothing is worse than a key that is refused. They go
-               in here the day something reads them. */
+            them but nothing draws in them yet, and a key that parses and
+            repaints nothing is worse than a key that is refused. They go
+            in here the day something reads them. */
             _ => return None,
         })
     }
 
     /// Every slot name a config may override, for the error that lists them.
     /* Asked of `slot_mut` rather than listed again, so the message cannot
-       offer a slot that does nothing — or omit one that works. */
+    offer a slot that does nothing — or omit one that works. */
     pub fn slot_names() -> String {
         let mut probe = WARM;
         WARM.slots()
@@ -266,13 +266,13 @@ impl Palette {
     }
 
     /* Which overridden colours are hard to read on this palette's own ground.
-       A warning, never a refusal: it is the user's screen and their eyes, and
-       a warning that blocks is one people learn to route around. */
+    A warning, never a refusal: it is the user's screen and their eyes, and
+    a warning that blocks is one people learn to route around. */
     pub fn unreadable(&self) -> Vec<String> {
         let mut grounds = vec![("the gradient", self.near), ("the gradient", self.far)];
         /* A ground nobody can measure drops out of the check on its own: a
-           surface that is not RGB used to return from this function, which
-           silently switched off the gradient checks as well. */
+        surface that is not RGB used to return from this function, which
+        silently switched off the gradient checks as well. */
         if let Color::Rgb(r, g, b) = self.surface {
             grounds.push(("popups", (r, g, b)));
         }
@@ -314,8 +314,8 @@ impl Palette {
             }
         };
         /* Normalised in cell space rather than pixels: terminal cells are
-           about twice as tall as they are wide, so a true 45° would barely
-           tilt. */
+        about twice as tall as they are wide, so a true 45° would barely
+        tilt. */
         let axis = (frac(col, width) + (1.0 - frac(row, height))) / 2.0;
         let t = (axis / self.stop).min(1.0);
         let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
@@ -328,10 +328,10 @@ impl Palette {
 }
 
 /* Every colour here is 24-bit, which a terminal that cannot do 24-bit renders
-   by its own rules: the gradient turns to bands and cream can land on a grey
-   that no longer reads as the brightest thing on screen. Resolved once and
-   applied to the finished buffer, so the palette above stays one set of
-   numbers rather than three. */
+by its own rules: the gradient turns to bands and cream can land on a grey
+that no longer reads as the brightest thing on screen. Resolved once and
+applied to the finished buffer, so the palette above stays one set of
+numbers rather than three. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Depth {
     Full,
@@ -346,7 +346,7 @@ pub enum Depth {
 /// decision it is, rather than as whatever the machine running the tests is.
 pub fn depth_from(no_color: Option<&str>, colorterm: &str, term: &str) -> Depth {
     /* The convention is presence, not truth: any non-empty value means no
-       colour, and setting it to "0" still means no. */
+    colour, and setting it to "0" still means no. */
     if no_color.is_some_and(|v| !v.is_empty()) {
         return Depth::Plain;
     }
@@ -359,9 +359,9 @@ pub fn depth_from(no_color: Option<&str>, colorterm: &str, term: &str) -> Depth 
         return Depth::Full;
     }
     /* Assumed rather than detected, and deliberately the cautious way round:
-       a truecolor terminal shown 256 colours loses some smoothness in the
-       gradient, where the other way round loses the text. COLORTERM=truecolor
-       is how to say otherwise. */
+    a truecolor terminal shown 256 colours loses some smoothness in the
+    gradient, where the other way round loses the text. COLORTERM=truecolor
+    is how to say otherwise. */
     Depth::Ansi256
 }
 
@@ -403,7 +403,10 @@ pub fn quantise(r: u8, g: u8, b: u8) -> Color {
 
     let grey_at = |n: usize| 8 + 10 * n as u8;
     let greys: Vec<u8> = (0..24).map(grey_at).collect();
-    let grey = nearest(((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8, &greys);
+    let grey = nearest(
+        ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8,
+        &greys,
+    );
     let grey_rgb = [greys[grey]; 3];
 
     let apart = |a: [u8; 3]| {
@@ -471,7 +474,7 @@ mod tests {
     }
 
     /* The cautious way round on purpose: a truecolor terminal shown 256
-       colours loses smoothness, where the other way round loses the text. */
+    colours loses smoothness, where the other way round loses the text. */
     #[test]
     fn the_depth_is_read_from_the_environment_the_way_round_that_is_safe() {
         assert_eq!(depth_from(None, "truecolor", "xterm"), Depth::Full);
@@ -499,11 +502,15 @@ mod tests {
             return (grey, grey, grey);
         }
         let n = n - 16;
-        (RAMP[n as usize / 36], RAMP[n as usize % 36 / 6], RAMP[n as usize % 6])
+        (
+            RAMP[n as usize / 36],
+            RAMP[n as usize % 36 / 6],
+            RAMP[n as usize % 6],
+        )
     }
 
     /* The palette is what has to survive the trip, not any colour: a cream
-       that lands on a grey stops being the brightest thing on screen. */
+    that lands on a grey stops being the brightest thing on screen. */
     #[test]
     fn every_palette_colour_survives_the_256_colour_cube() {
         for (name, color) in WARM.slots() {
@@ -522,8 +529,8 @@ mod tests {
     }
 
     /* The three grounds anything is ever read against: the two ends of the
-       gradient, and the flat tone popups raise themselves with. The popup one
-       is not in the original claim, but half the app's text is drawn on it. */
+    gradient, and the flat tone popups raise themselves with. The popup one
+    is not in the original claim, but half the app's text is drawn on it. */
     fn grounds(p: &Palette) -> [(&'static str, (u8, u8, u8)); 3] {
         [
             ("near", p.near),
@@ -533,11 +540,11 @@ mod tests {
     }
 
     /* Slots that carry meaning as text, and the ratio each has to clear.
-       4.5:1 is WCAG's bar for body text, which is what all of these are.
+    4.5:1 is WCAG's bar for body text, which is what all of these are.
 
-       One is named rather than silently skipped: `rule` is structure, not
-       text, and is meant to be barely there. Everything else — including the
-       red that a failed save is read in — clears the bar. */
+    One is named rather than silently skipped: `rule` is structure, not
+    text, and is meant to be barely there. Everything else — including the
+    red that a failed save is read in — clears the bar. */
     fn required(slot: &str) -> f64 {
         match slot {
             "rule" => 1.8,
@@ -546,7 +553,7 @@ mod tests {
     }
 
     /* The claim theme.rs has always made, now measured: every palette, every
-       readable slot, against every ground it can land on. */
+    readable slot, against every ground it can land on. */
     #[test]
     fn every_palette_is_legible_on_its_own_ground() {
         for (theme, palette) in BUILT_INS {
@@ -568,9 +575,9 @@ mod tests {
     }
 
     /* A terminal without 24-bit colour gets the nearest cube or grey, and the
-       nearest grey to a warm brown is a long way from it. 3:1 is WCAG's bar
-       for large text and interface parts, which is the honest bar for a
-       palette somebody else's terminal has already approximated. */
+    nearest grey to a warm brown is a long way from it. 3:1 is WCAG's bar
+    for large text and interface parts, which is the honest bar for a
+    palette somebody else's terminal has already approximated. */
     #[test]
     fn every_palette_stays_legible_after_quantising() {
         for (theme, palette) in BUILT_INS {
@@ -580,8 +587,7 @@ mod tests {
                 }
                 let ink = rgb_of(shade_at(Depth::Ansi256, color));
                 for (ground, bg) in grounds(&palette) {
-                    let ground_rgb =
-                        rgb_of(shade_at(Depth::Ansi256, Color::Rgb(bg.0, bg.1, bg.2)));
+                    let ground_rgb = rgb_of(shade_at(Depth::Ansi256, Color::Rgb(bg.0, bg.1, bg.2)));
                     let ratio = contrast(ink, ground_rgb);
                     assert!(
                         ratio >= 3.0,
@@ -593,8 +599,8 @@ mod tests {
     }
 
     /* The default palette is the one this app has always drawn in: the move
-       to role names was a rename, and a rename that changes a colour is not a
-       rename. Pinned by value so a future edit has to mean it. */
+    to role names was a rename, and a rename that changes a colour is not a
+    rename. Pinned by value so a future edit has to mean it. */
     #[test]
     fn the_default_palette_is_the_warm_one_unchanged() {
         assert_eq!(Palette::default(), WARM);
@@ -603,17 +609,20 @@ mod tests {
         assert_eq!(WARM.cursor, Color::Rgb(96, 178, 158));
         assert_eq!(WARM.warn, Color::Rgb(214, 154, 78));
         /* The one slot that moved, and the reason: 3.73:1 over `near` failed
-           the bar this file claims, on the colour a failed save is read in. */
+        the bar this file claims, on the colour a failed save is read in. */
         assert_eq!(WARM.error, Color::Rgb(214, 126, 112));
         assert_eq!(WARM.muted, Color::Rgb(158, 148, 128));
         assert_eq!(WARM.rule, Color::Rgb(92, 84, 66));
         assert_eq!(WARM.surface, Color::Rgb(46, 41, 33));
-        assert_eq!((WARM.near, WARM.far, WARM.stop), ((55, 40, 37), (18, 1, 22), 0.76));
+        assert_eq!(
+            (WARM.near, WARM.far, WARM.stop),
+            ((55, 40, 37), (18, 1, 22), 0.76)
+        );
     }
 
     /* A palette with [colors] on it is in no walk. Stepping off it has to
-       reach the first built-in, or `warm` becomes the one theme `^t` can
-       never get back to. */
+    reach the first built-in, or `warm` becomes the one theme `^t` can
+    never get back to. */
     #[test]
     fn a_repainted_palette_steps_onto_the_first_built_in() {
         let mut custom = NEON;
@@ -629,14 +638,19 @@ mod tests {
     }
 
     /* A key that parses and repaints nothing is worse than a key that is
-       refused: `masked` and `ink` are held by the palette and drawn by
-       nothing, so a config naming one has to be told. */
+    refused: `masked` and `ink` are held by the palette and drawn by
+    nothing, so a config naming one has to be told. */
     #[test]
     fn only_the_slots_something_draws_in_can_be_repainted() {
         let mut palette = WARM;
-        for slot in ["text", "accent", "cursor", "warn", "error", "muted", "rule", "surface"] {
+        for slot in [
+            "text", "accent", "cursor", "warn", "error", "muted", "rule", "surface",
+        ] {
             assert!(palette.slot_mut(slot).is_some(), "{slot} cannot be set");
-            assert!(Palette::slot_names().contains(slot), "{slot} is not offered");
+            assert!(
+                Palette::slot_names().contains(slot),
+                "{slot} is not offered"
+            );
         }
         for dead in ["masked", "ink"] {
             assert!(palette.slot_mut(dead).is_none(), "{dead} took a colour");
@@ -645,7 +659,7 @@ mod tests {
     }
 
     /* A ground nobody can measure drops out of the check on its own — it used
-       to take the gradient checks with it. */
+    to take the gradient checks with it. */
     #[test]
     fn an_unmeasurable_surface_does_not_switch_off_the_other_grounds() {
         let mut palette = WARM;
@@ -656,8 +670,8 @@ mod tests {
     }
 
     /* The gradient reads off the palette now, so its ends have to be the
-       palette's ends: a theme whose ground does not move with its ink is the
-       one way a light theme becomes unreadable. */
+    palette's ends: a theme whose ground does not move with its ink is the
+    one way a light theme becomes unreadable. */
     #[test]
     fn the_gradient_runs_between_the_palettes_own_stops() {
         // Bottom-left is `near`; the far corner is flat past the stop.

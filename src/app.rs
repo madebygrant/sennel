@@ -9,23 +9,23 @@ use zeroize::Zeroize;
 use crate::clipboard::Board;
 use crate::vault::{EntryExt, Vault, YubiSpec};
 use sennel_core::session::{
-    AgentReport, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent, Resolve,
-    SaveNow, Saved, Sealing, Session, UnlockError, Undone, Unlocked,
+    AgentReport, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent,
+    Resolve, SaveNow, Saved, Sealing, Session, Undone, UnlockError, Unlocked,
 };
 use sennel_core::touchid::Refused;
 
 /* Which screen owns the keys. Unlock gates everything: with no open vault
-   the browser has nothing to act on, so it is a screen and not a prompt. */
+the browser has nothing to act on, so it is a screen and not a prompt. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Unlock,
     /* Constructed from Wave 1 on, once a vault is open. Kept here so the
-       key-dispatch shape in main.rs is final from the start. */
+    key-dispatch shape in main.rs is final from the start. */
     Browser,
 }
 
 /* Which pane has the keys. The panes move different cursors over different
-   lists, so a key live on the wrong one acts on a row that is not there. */
+lists, so a key live on the wrong one acts on a row that is not there. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Pane {
     #[default]
@@ -44,7 +44,11 @@ pub struct MenuItem {
 }
 
 const fn item(label: &'static str, shortcut: &'static str, run: fn(&mut App)) -> MenuItem {
-    MenuItem { label, shortcut, run }
+    MenuItem {
+        label,
+        shortcut,
+        run,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,7 +117,10 @@ pub const MENUS: &[(MenuId, &str, &[MenuItem])] = &[
     (
         MenuId::Help,
         "Help",
-        &[item("Keys", "h", App::open_help), item("Commands", ":", App::open_commands)],
+        &[
+            item("Keys", "h", App::open_help),
+            item("Commands", ":", App::open_commands),
+        ],
     ),
 ];
 
@@ -125,7 +132,7 @@ pub struct Commands {
 }
 
 /* Which box on the unlock screen has the keys. Password first because it is
-   the one every unlock needs; the confirm only exists in create mode. */
+the one every unlock needs; the confirm only exists in create mode. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum UnlockField {
     #[default]
@@ -138,9 +145,9 @@ pub enum UnlockField {
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
-   answer, so it carries no reply channel: the session carries on behind it. */
+answer, so it carries no reply channel: the session carries on behind it. */
 /* Copy was dropped when deletes joined: a delete confirm names the entry it
-   is about, and the title text cannot be copied around a String. */
+is about, and the title text cannot be copied around a String. */
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Confirm {
     Quit,
@@ -151,11 +158,19 @@ pub enum Confirm {
        destroying it, which are different questions: the popup asks the one
        that matches, so a user in the bin is never told `u` will save them
        from something it cannot. */
-    DeleteEntry { id: EntryId, title: String, forever: bool },
+    DeleteEntry {
+        id: EntryId,
+        title: String,
+        forever: bool,
+    },
     /* Same rule as the entry delete: the title rides along for the prompt
-       line only. A group goes to the bin with its whole subtree, so the
-       non-empty refusal is gone and `forever` carries the same meaning. */
-    DeleteGroup { id: GroupId, title: String, forever: bool },
+    line only. A group goes to the bin with its whole subtree, so the
+    non-empty refusal is gone and `forever` carries the same meaning. */
+    DeleteGroup {
+        id: GroupId,
+        title: String,
+        forever: bool,
+    },
 }
 
 /// Which box of the entry form the keys are typing into.
@@ -177,7 +192,7 @@ pub enum FormField {
 }
 
 /* Add or edit. The edit carries the entry id so submit writes to the row the
-   form was opened from, not to wherever the cursor has drifted since. */
+form was opened from, not to wherever the cursor has drifted since. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FormKind {
     Add,
@@ -185,18 +200,18 @@ pub enum FormKind {
 }
 
 /* The modal entry editor. Values are plain Strings here: the password leaves
-   ProtectedString only while the user is literally looking at it, and the
-   form is closed (or the app exits) in every other state. */
+ProtectedString only while the user is literally looking at it, and the
+form is closed (or the app exits) in every other state. */
 /* The form holds plaintext until it is submitted or thrown away, and both
-   end in a drop: a generated password and a one-time seed would otherwise be
-   freed intact. Notes come too — they are stored protected in the vault, and
-   a recovery code is exactly the kind of thing people keep there. */
+end in a drop: a generated password and a one-time seed would otherwise be
+freed intact. Notes come too — they are stored protected in the vault, and
+a recovery code is exactly the kind of thing people keep there. */
 impl Form {
     /* What `Drop` does, split out so a test can watch it work on a value it
-       still owns. Checking a dropped one means reading a freed allocation,
-       which proves nothing either way: the allocator writes its own
-       bookkeeping into the block, so the secret is usually gone from it
-       whether or not anybody wiped it. */
+    still owns. Checking a dropped one means reading a freed allocation,
+    which proves nothing either way: the allocator writes its own
+    bookkeeping into the block, so the secret is usually gone from it
+    whether or not anybody wiped it. */
     pub fn wipe(&mut self) {
         self.password.zeroize();
         self.otp.zeroize();
@@ -212,8 +227,8 @@ impl Drop for Form {
 
 impl Form {
     /* One latch per secret box: empty means "keep what is stored" only while
-       the box has not been touched, so backspacing one empty clears it and
-       never looking at it keeps it. */
+    the box has not been touched, so backspacing one empty clears it and
+    never looking at it keeps it. */
     fn touch_secret(&mut self) {
         match self.field {
             FormField::Password => self.password_touched = true,
@@ -257,23 +272,23 @@ pub struct Form {
     /// Char index into the focused box, same rule as the unlock caret.
     pub caret: usize,
     /* Empty means keep — but only while untouched. A user who opened edit,
-       typed over the password, then backspaced it empty meant to clear it,
-       not to keep: so one keystroke in the box flips this latch, and submit
-       reads it rather than guessing from emptiness. */
+    typed over the password, then backspaced it empty meant to clear it,
+    not to keep: so one keystroke in the box flips this latch, and submit
+    reads it rather than guessing from emptiness. */
     pub password_touched: bool,
     pub otp_touched: bool,
     /// Whether this entry already carries a code, so the box can say that
     /// leaving it empty keeps it rather than that there is nothing there.
     pub had_otp: bool,
     /* Whether the password box shows what it holds. Off by default and per
-       form: `^s` generates into a masked box, and a secret you cannot read is
-       one you cannot check before saving. */
+    form: `^s` generates into a masked box, and a secret you cannot read is
+    one you cannot check before saving. */
     pub reveal: bool,
 }
 
 /* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
-   so unlike the entry form there is no field cycling — just a value, a caret
-   and the same char-index rule as every other box. */
+so unlike the entry form there is no field cycling — just a value, a caret
+and the same char-index rule as every other box. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GroupPromptKind {
     New,
@@ -288,9 +303,9 @@ pub struct GroupPrompt {
 }
 
 /* The `F` screen: everything on an entry the five fixed rows cannot show.
-   Rows are recomputed from the vault on every open and after every change —
-   the list is short, and a cached copy of a custom field is a cached copy of
-   a secret. */
+Rows are recomputed from the vault on every open and after every change —
+the list is short, and a cached copy of a custom field is a cached copy of
+a secret. */
 pub struct Fields {
     pub entry: EntryId,
     pub rows: Vec<crate::vault::Extra>,
@@ -309,7 +324,7 @@ pub struct AddField {
     pub on_value: bool,
     pub caret: usize,
     /* A file rather than a string: the value box is then a path to read, and
-       what lands in the vault is its bytes. */
+    what lands in the vault is its bytes. */
     pub from_file: bool,
 }
 
@@ -341,8 +356,8 @@ impl Drop for AddField {
 }
 
 /* The `H` screen: old versions of an entry, which only ever arrive from
-   another client. Held rather than recomputed because it carries passwords,
-   and rebuilding it per frame would mean rebuilding those per frame. */
+another client. Held rather than recomputed because it carries passwords,
+and rebuilding it per frame would mean rebuilding those per frame. */
 pub struct History {
     pub entry: EntryId,
     pub rows: Vec<crate::vault::Version>,
@@ -351,7 +366,7 @@ pub struct History {
 }
 
 /* What `!` found, held rather than recomputed: the walk touches every entry
-   and every password in the vault, which is fine once and wrong per frame. */
+and every password in the vault, which is fine once and wrong per frame. */
 pub struct Audit {
     pub rows: Vec<(EntryId, crate::vault::Issue)>,
     pub cursor: usize,
@@ -366,9 +381,9 @@ pub enum RekeyField {
 }
 
 /* Changing the master password: the new one, typed twice. Both boxes mask,
-   and both are zeroized on drop like every other typed secret — this prompt
-   holds the only plaintext copy of what is about to become the key to
-   everything. */
+and both are zeroized on drop like every other typed secret — this prompt
+holds the only plaintext copy of what is about to become the key to
+everything. */
 pub struct Rekey {
     pub password: String,
     pub confirm: String,
@@ -407,8 +422,8 @@ impl Drop for Rekey {
 }
 
 /* A row in the detail view that copies when clicked. The keyboard has had
-   `y p U t` all along; this is the same four fields for the hand that is
-   already on the mouse, and for anyone who has not read the key table yet. */
+`y p U t` all along; this is the same four fields for the hand that is
+already on the mouse, and for anyone who has not read the key table yet. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CopyRow {
     Username,
@@ -418,22 +433,22 @@ pub enum CopyRow {
 }
 
 /* How long a copied row stays lit. Long enough to read as a confirmation,
-   short enough that it is gone before the next thing you do — and the frame
-   loop already wakes every 120ms, so it decays on its own without anything
-   having to schedule a redraw. */
+short enough that it is gone before the next thing you do — and the frame
+loop already wakes every 120ms, so it decays on its own without anything
+having to schedule a redraw. */
 const GLOW: Duration = Duration::from_millis(700);
 
 pub use sennel_core::session::{Cut, Pending, Undo};
 pub use sennel_core::sort::SortOrder;
 
 /* A flash is timed by its length: four fixed seconds fits "saved" and not a
-   wrapped clipboard error, so the floor plus reading time travels with the
-   message instead of one number for all of them. */
+wrapped clipboard error, so the floor plus reading time travels with the
+message instead of one number for all of them. */
 const FLASH: Duration = Duration::from_secs(2);
 const PER_CHAR: Duration = Duration::from_millis(50);
 const FLASH_MAX: Duration = Duration::from_secs(8);
 /* Deep enough for two quick copies in a row, shallow enough that a backlog
-   nobody is still reading cannot build up behind one flash. */
+nobody is still reading cannot build up behind one flash. */
 const QUEUE: usize = 3;
 
 /// How a flash reads at a glance. Every message rendered the same cream, so
@@ -448,9 +463,9 @@ pub enum Level {
 }
 
 /* Rows of context kept either side of the cursor. `ListState` is built fresh
-   every frame, so with no offset of our own ratatui scrolls the least it can
-   to make the selection visible: past the first screenful the cursor sits on
-   the last row for the rest of the list. */
+every frame, so with no offset of our own ratatui scrolls the least it can
+to make the selection visible: past the first screenful the cursor sits on
+the last row for the rest of the list. */
 pub const SCROLLOFF: usize = 2;
 
 /// Where the list starts drawing from, given where it started last frame.
@@ -472,9 +487,7 @@ pub fn scroll_to(offset: usize, at: usize, len: usize, height: usize) -> usize {
 /// count bytes; this is the bridge, and clamping past the end means "the end"
 /// rather than a panic.
 pub fn char_index_to_byte(s: &str, at: usize) -> usize {
-    s.char_indices()
-        .nth(at)
-        .map_or(s.len(), |(byte, _)| byte)
+    s.char_indices().nth(at).map_or(s.len(), |(byte, _)| byte)
 }
 
 /// Where the picker starts when nothing else says: `$HOME`, or the working
@@ -489,8 +502,10 @@ fn home() -> PathBuf {
 /// The vault's file name — the whole path would push the header off the row,
 /// and the directory is not what tells two vaults apart.
 pub fn vault_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// One row of the file picker: a directory to step into, or a vault to open.
@@ -500,9 +515,9 @@ pub struct Listing {
 }
 
 /* The file picker behind `^o` on the unlock screen. Typing a path is fine
-   when you know it; nobody knows the path to a vault they have not opened
-   yet, and `~/Library/Mobile Documents/com~apple~CloudDocs/…` is not a thing
-   to type twice. */
+when you know it; nobody knows the path to a vault they have not opened
+yet, and `~/Library/Mobile Documents/com~apple~CloudDocs/…` is not a thing
+to type twice. */
 pub struct Browse {
     pub dir: PathBuf,
     pub rows: Vec<Listing>,
@@ -536,9 +551,9 @@ pub struct Shelf {
 }
 
 /* The vault library behind `^v`. `^o` answers "where is it"; this answers
-   "which one", which is the question anybody with a work vault and a personal
-   one actually has. The list is paths, never contents: nothing here is
-   unlocked, so it holds no secret. */
+"which one", which is the question anybody with a work vault and a personal
+one actually has. The list is paths, never contents: nothing here is
+unlocked, so it holds no secret. */
 pub struct Library {
     pub rows: Vec<Shelf>,
     pub cursor: usize,
@@ -553,14 +568,20 @@ impl Library {
         self.rows
             .iter()
             .filter(|row| {
-                needle.is_empty() || row.path.display().to_string().to_lowercase().contains(&needle)
+                needle.is_empty()
+                    || row
+                        .path
+                        .display()
+                        .to_string()
+                        .to_lowercase()
+                        .contains(&needle)
             })
             .collect()
     }
 }
 
 /* The standalone generator behind `P`: a password with no entry to hang it
-   on — a router, a disk, a site Sennel is not storing. Touches no vault. */
+on — a router, a disk, a site Sennel is not storing. Touches no vault. */
 pub struct Mint {
     pub password: String,
     /// Seeded from the config and never written back, so the toggles here
@@ -616,12 +637,12 @@ pub struct App {
     pub view: View,
     pub show_help: bool,
     /* The colours this session draws in. A value on `App`, not a global: a
-       theme that can be switched at runtime cannot live in a OnceLock, and a
-       mutable global would make the per-theme tests race each other. */
+    theme that can be switched at runtime cannot live in a OnceLock, and a
+    mutable global would make the per-theme tests race each other. */
     pub theme: crate::theme::Palette,
     /* Whether a `[colors]` table is repainting the theme. `^t` has to say so:
-       it walks the built-ins, but the overrides stay in the file, so the
-       palette it writes down is not the one the next launch draws. */
+    it walks the built-ins, but the overrides stay in the file, so the
+    palette it writes down is not the one the next launch draws. */
     pub theme_overridden: bool,
     pub stage: String,
     /// What the header goes back to once a flash expires.
@@ -636,8 +657,8 @@ pub struct App {
     pub confirm: Option<Confirm>,
     pub quit: bool,
     /* Selection state. Cursors hold ids, never row positions: rows shift
-       under every mutation and under the Wave 5/6 sort and filter views, while
-       an id still names the same group or entry. */
+    under every mutation and under the Wave 5/6 sort and filter views, while
+    an id still names the same group or entry. */
     /// Selected group. Always valid once a vault is open (`snap` keeps it so).
     pub group_cursor: Option<GroupId>,
     /// Selected entry within the cursor group. None when the group is empty.
@@ -647,15 +668,15 @@ pub struct App {
     pub group_scroll: usize,
     pub entry_scroll: usize,
     /* Rows the live pane last drew with, set by the draw that knows. A page
-       key has to move by what is on screen, and only the layout knows that. */
+    key has to move by what is on screen, and only the layout knows that. */
     pub viewport: usize,
     /* Whether the detail pane shows the real password. Off because the pane
-       is what the eye lands on, and a shown password is one screenshot away
-       from a leak. `*` flips it and says which way, so the key never reads
-       as dead. */
+    is what the eye lands on, and a shown password is one screenshot away
+    from a leak. `*` flips it and says which way, so the key never reads
+    as dead. */
     pub show_password: bool,
     /* Enter's detail popup: the side pane wants 100 columns, and a terminal
-       opens with 80. */
+    opens with 80. */
     pub detail: bool,
     /// Whether the last frame had room for the side pane, set by the draw
     /// that knows (as `viewport` is): `*` must refuse where nothing shows.
@@ -664,13 +685,13 @@ pub struct App {
     /// breadcrumb and the match count when they are drawn.
     pub heads: bool,
     /* Where the lists were last drawn, so a click can be turned into a row.
-       Only the draw knows this, the same deal as `viewport`. */
+    Only the draw knows this, the same deal as `viewport`. */
     pub group_area: Rect,
     pub entry_area: Rect,
     /* Which screen row copies what, rebuilt by each draw of the detail view.
-       The layout is the only thing that knows where a row landed — it moves
-       with the url, the notes, the code and the expiry all being optional —
-       so the draw records it rather than the click recomputing it. */
+    The layout is the only thing that knows where a row landed — it moves
+    with the url, the notes, the code and the expiry all being optional —
+    so the draw records it rather than the click recomputing it. */
     pub copy_rows: Vec<(u16, CopyRow)>,
     /// Where the header drew each menu label this frame, for `click`.
     pub menu_bar: Vec<(Rect, MenuId)>,
@@ -687,20 +708,20 @@ pub struct App {
     /// The row a click just copied, and when, for the glow.
     pub copied: Option<(CopyRow, Instant)>,
     /* Entries-pane ordering, cycled by `o`. A view over the stored vec, not
-       a re-ordering of it (see SortOrder above). */
+    a re-ordering of it (see SortOrder above). */
     pub order: SortOrder,
     /// Length and character classes for `^s`, from the config.
     generator: crate::config::Generator,
     /* Unlock state. The path comes from the config once at startup;
-       `unlock_new` caches whether it names a missing file so the draw loop
-       never stats. */
+    `unlock_new` caches whether it names a missing file so the draw loop
+    never stats. */
     pub db_path: Option<PathBuf>,
     /// True when the configured file is missing: Enter creates, with a confirm.
     pub unlock_new: bool,
     /* Enter has been pressed and the key derivation has not started yet. KDBX4
-       unlocks run Argon2 on this thread, which freezes the frame for a second
-       or more; the loop draws once with this set so the screen says what is
-       happening rather than appearing to have died. */
+    unlocks run Argon2 on this thread, which freezes the frame for a second
+    or more; the loop draws once with this set so the screen says what is
+    happening rather than appearing to have died. */
     pub unlocking: bool,
     pub unlock_field: UnlockField,
     pub unlock_password: String,
@@ -718,8 +739,8 @@ pub struct App {
     /// Every vault opened before, newest first, from the config.
     pub recent: Vec<PathBuf>,
     /* Where a chosen vault is remembered, and what is already written there.
-       Both `None` under --no-config, which asked for the file to be left out
-       of the run and so cannot be where a choice is kept. */
+    Both `None` under --no-config, which asked for the file to be left out
+    of the run and so cannot be where a choice is kept. */
     pub config_file: Option<PathBuf>,
     pub configured_db: Option<PathBuf>,
     /// Where typing lands, as a char index into the focused box (see below).
@@ -728,15 +749,15 @@ pub struct App {
     /// browser's `*` flips the detail pane; a fresh unlock starts hidden.
     pub unlock_reveal: bool,
     /* The last answer `entry_rows` gave, and what it was an answer to.
-       Ranking the whole vault took 45ms on five thousand entries and ran two
-       or three times a frame, so typing in the search band redrew at about
-       twelve frames a second. */
+    Ranking the whole vault took 45ms on five thousand entries and ran two
+    or three times a frame, so typing in the search band redrew at about
+    twelve frames a second. */
     rows_cache: Option<(RowsKey, Vec<EntryId>)>,
     /* The modal entry editor. None when closed; the browser hands its keys
-       over while Some, the way the unlock screen does. */
+    over while Some, the way the unlock screen does. */
     pub form: Option<Form>,
     /* The one-box group prompt (A/E). None when closed; same handover rule
-       as the entry form. */
+    as the entry form. */
     pub group_prompt: Option<GroupPrompt>,
     /// The change-master-password prompt, when it is open.
     pub rekey: Option<Rekey>,
@@ -748,19 +769,19 @@ pub struct App {
     /// Old versions of an entry, when that screen is open.
     pub history: Option<History>,
     /* Live fuzzy search. None when the band is closed; Some holds the typed
-       needle and filters the entries pane as a predicate — the vault itself
-       is never touched. `enter` closes the band keeping the filter; Esc
-       clears the filter first (and only quits-ish reports once empty). */
+    needle and filters the entries pane as a predicate — the vault itself
+    is never touched. `enter` closes the band keeping the filter; Esc
+    clears the filter first (and only quits-ish reports once empty). */
     pub search: Option<String>,
     /* Whether the band has the keyboard. Some-without-band is a kept filter:
-       Enter keeps the needle and hands the keys back to the browser, so key
-       routing reads this flag, never `search.is_some()`. */
+    Enter keeps the needle and hands the keys back to the browser, so key
+    routing reads this flag, never `search.is_some()`. */
     pub band: bool,
     /// Char index into the search band, same rule as every other caret.
     pub search_caret: usize,
     /* Whether a live needle searches the whole vault or only the group the
-       cursor is in. Whole-vault is right most of the time — it is why people
-       search — but it happens silently, and `^g` makes it a choice. */
+    cursor is in. Whole-vault is right most of the time — it is why people
+    search — but it happens silently, and `^g` makes it a choice. */
     pub search_global: bool,
     /// Ranks the current needle against every entry's haystack, reusing its
     /// scratch buffers. Lives here so the band and `entry_rows` share one.
@@ -770,8 +791,8 @@ pub struct App {
     use_yubikey: bool,
     flushing: bool,
     /* The OS clipboard with its auto-clear timer. `None` until startup wires
-       it from the config: `App::new` must stay callable in tests without
-       touching platform clipboard state. */
+    it from the config: `App::new` must stay callable in tests without
+    touching platform clipboard state. */
     board: Option<Board>,
 }
 
@@ -821,7 +842,7 @@ impl App {
             unlock_field: UnlockField::Password,
             unlock_password: secret_box(),
             /* A path, not a secret — but it is typed into the same screen and
-               wiped by the same lock, so it keeps the same shape. */
+            wiped by the same lock, so it keeps the same shape. */
             unlock_keyfile: secret_box(),
             unlock_file: String::new(),
             browse: None,
@@ -874,12 +895,12 @@ impl App {
     fn flash(&mut self, text: impl Into<String>, level: Level) {
         let text = text.into();
         /* A second message used to overwrite the first, so two quick copies
-           arrived and left inside one blink and only the last was ever
-           readable. */
+        arrived and left inside one blink and only the last was ever
+        readable. */
         if self.flash_until.is_some() {
             /* Except a failure, which takes the header now: a save that was
-               refused must not wait behind "copied username" for six
-               seconds, and by then the user has pressed three more keys. */
+            refused must not wait behind "copied username" for six
+            seconds, and by then the user has pressed three more keys. */
             if level == Level::Error {
                 self.show_flash(text, level);
                 return;
@@ -928,8 +949,8 @@ impl App {
     }
 
     /* `q` is the deliberate way out and stays one key everywhere nothing
-       would be lost. With unsaved changes it asks first; a second `q`
-       answers, so `qq` never reads the box. */
+    would be lost. With unsaved changes it asks first; a second `q`
+    answers, so `qq` never reads the box. */
     pub fn ask_quit(&mut self) {
         if self.working() {
             self.confirm = Some(Confirm::Quit);
@@ -949,18 +970,18 @@ impl App {
     /// path; the unlock path leaves it clear, so a fresh open quits straight
     /// out without interrogation.
     /* Test-only in practice: prod mutations cascade through persist(). Kept
-       pub so tests can arm the quit guard directly. */
+    pub so tests can arm the quit guard directly. */
     #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.session.mark_dirty();
     }
 
     /* Flip the detail pane between bullets and the real password. Showing
-       says so out loud: a silent reveal reads as a key that did nothing,
-       and the next `*` press must find the pane hidden again. */
+    says so out loud: a silent reveal reads as a key that did nothing,
+    and the next `*` press must find the pane hidden again. */
     pub fn toggle_password(&mut self) {
         /* Nowhere to show it is a refusal, not a flip: the flash would
-           otherwise announce a reveal the screen has no room for. */
+        otherwise announce a reveal the screen has no room for. */
         if !self.wide && !self.detail {
             self.warn("no detail pane this narrow  ·  enter opens the entry");
             return;
@@ -972,8 +993,8 @@ impl App {
     }
 
     /* Enter on the browser. On the groups pane it opens the group — unfold it
-       and hand the keys to its entries; on an entry it opens the detail
-       popup, which is the only detail there is below 100 columns. */
+    and hand the keys to its entries; on an entry it opens the detail
+    popup, which is the only detail there is below 100 columns. */
     pub fn open_selection(&mut self) {
         match self.active_pane {
             Pane::Groups => {
@@ -993,8 +1014,8 @@ impl App {
     }
 
     /* Walking entries with the popup open. The reveal drops on the way, the
-       same rule as closing it: a password shown for one entry is not consent
-       for the next. */
+    same rule as closing it: a password shown for one entry is not consent
+    for the next. */
     pub fn step_detail(&mut self, down: bool) {
         self.active_pane = Pane::Entries;
         self.show_password = false;
@@ -1021,11 +1042,11 @@ impl App {
     }
 
     /* Flip the lock screen between bullets and the typed master password.
-       Same contract as the detail pane's `*`, on `^r` because a printable
-       key would steal characters from real passwords. The flip says so out
-       loud, so a reveal never happens silently on the one screen that guards
-       everything. Hiding deliberately says nothing — the bullets going back
-       are visible proof enough. */
+    Same contract as the detail pane's `*`, on `^r` because a printable
+    key would steal characters from real passwords. The flip says so out
+    loud, so a reveal never happens silently on the one screen that guards
+    everything. Hiding deliberately says nothing — the bullets going back
+    are visible proof enough. */
     pub fn toggle_unlock_reveal(&mut self) {
         self.unlock_reveal = !self.unlock_reveal;
         if self.unlock_reveal {
@@ -1040,8 +1061,8 @@ impl App {
     }
 
     /* One keypress onto the clipboard. An empty or missing field says which:
-       copying an empty string would wipe whatever the user is holding in the
-       clipboard to protect nothing, and silence reads as a broken key. */
+    copying an empty string would wipe whatever the user is holding in the
+    clipboard to protect nothing, and silence reads as a broken key. */
     pub fn copy_username(&mut self) {
         self.copy_field("username", |e| e.username().to_string());
     }
@@ -1051,8 +1072,8 @@ impl App {
     }
 
     /* `t`: the one-time code, not the secret behind it. Copying the seed
-       would put a permanent credential on the clipboard to save typing six
-       digits. */
+    would put a permanent credential on the clipboard to save typing six
+    digits. */
     pub fn copy_totp(&mut self) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to copy from");
@@ -1078,11 +1099,11 @@ impl App {
     }
 
     /* EntryRef derefs to Entry, so the take closure reads both the ref the
-       selection hands over and the record type the crate stores. */
+    selection hands over and the record type the crate stores. */
     /* A value that is already in hand rather than read off the cursor's
-       entry: the fields screen has its own selection, and a custom field is
-       as much a secret as a password, so it goes through the same board and
-       the same auto-clear. */
+    entry: the fields screen has its own selection, and a custom field is
+    as much a secret as a password, so it goes through the same board and
+    the same auto-clear. */
     pub fn copy_named(&mut self, label: &str, text: &str) {
         if text.is_empty() {
             self.say(format!("{label} is empty"));
@@ -1126,8 +1147,8 @@ impl App {
     }
 
     /* Seconds of idleness before the vault locks itself. Zero means off:
-       a `Duration::ZERO` deadline would lock on the next frame, which reads
-       as the unlock failing. `None` is the absence of a deadline. */
+    a `Duration::ZERO` deadline would lock on the next frame, which reads
+    as the unlock failing. `None` is the absence of a deadline. */
     pub fn set_ssh_agent(&mut self, on: bool, lifetime: u32) {
         self.session.set_ssh_agent(on, lifetime);
     }
@@ -1139,7 +1160,10 @@ impl App {
             Some((first, rest)) => self.warn(format!("ssh agent: {first} (+{} more)", rest.len())),
             None if report.added > 0 => {
                 let plural = if report.added == 1 { "key" } else { "keys" };
-                self.say(format!("{} ssh {plural} added to the agent for {}s", report.added, report.lifetime));
+                self.say(format!(
+                    "{} ssh {plural} added to the agent for {}s",
+                    report.added, report.lifetime
+                ));
             }
             None => {}
         }
@@ -1154,7 +1178,9 @@ impl App {
 
     fn report_released(&mut self, failed: usize) {
         if failed > 0 {
-            self.warn(format!("ssh agent: {failed} key(s) not removed · they expire on their own"));
+            self.warn(format!(
+                "ssh agent: {failed} key(s) not removed · they expire on their own"
+            ));
         }
     }
 
@@ -1167,7 +1193,10 @@ impl App {
     /// "slot 2: on" for the lock screen, or nothing when no key is configured.
     pub fn yubikey_label(&self) -> Option<String> {
         let spec = self.yubikey.as_ref()?;
-        Some(format!("{spec}: {}", if self.use_yubikey { "on" } else { "off" }))
+        Some(format!(
+            "{spec}: {}",
+            if self.use_yubikey { "on" } else { "off" }
+        ))
     }
 
     fn active_yubikey(&self) -> Option<&YubiSpec> {
@@ -1203,10 +1232,14 @@ impl App {
             Ok(unlocked) => self.unlocked(unlocked),
             Err(QuickError::Nothing) => return false,
             Err(QuickError::Refused(Refused::Again(why))) => {
-                self.warn(format!("Touch ID {why}  ·  enter asks again, or type the password"));
+                self.warn(format!(
+                    "Touch ID {why}  ·  enter asks again, or type the password"
+                ));
             }
             Err(QuickError::Refused(Refused::Void(why))) => {
-                self.warn(format!("Touch ID cannot open this any more  ·  {why}  ·  type the password"));
+                self.warn(format!(
+                    "Touch ID cannot open this any more  ·  {why}  ·  type the password"
+                ));
             }
             Err(QuickError::Unlock(e)) => self.unlock_failed(e),
         }
@@ -1229,33 +1262,37 @@ impl App {
     }
 
     /* Whether the vault has sat untouched past the deadline. Takes the clock
-       so tests drive it without sleeping: the lock path is about elapsed
-       time, not about whatever the frame loop happened to do.
+    so tests drive it without sleeping: the lock path is about elapsed
+    time, not about whatever the frame loop happened to do.
 
-       Whichever clock says more time has passed is the one answered to. See
-       `last_activity_wall`: the monotonic reading alone slept through a
-       suspend, and the wall reading alone would be steerable by anything that
-       sets the clock back. */
+    Whichever clock says more time has passed is the one answered to. See
+    `last_activity_wall`: the monotonic reading alone slept through a
+    suspend, and the wall reading alone would be steerable by anything that
+    sets the clock back. */
     pub fn idle_expired(&self, now: Instant) -> bool {
         self.view == View::Browser && self.session.idle_expired(now)
     }
 
     /* Drop the vault and go back behind the password prompt. Dropping is the
-       wipe: secrets live in `ProtectedString` and the retained key, both of
-       which zeroize on drop, so nothing may be copied out first. Called once
-       per frame, not per keypress, since idleness is the absence of keys. */
+    wipe: secrets live in `ProtectedString` and the retained key, both of
+    which zeroize on drop, so nothing may be copied out first. Called once
+    per frame, not per keypress, since idleness is the absence of keys. */
     pub fn check_idle(&mut self) {
         if !self.idle_expired(Instant::now()) {
             return;
         }
         let secs = self.session.lock_after.map_or(0, |d| d.as_secs());
         self.lock();
-        let hint = if self.quick_ready() { "  ·  enter for Touch ID" } else { "" };
+        let hint = if self.quick_ready() {
+            "  ·  enter for Touch ID"
+        } else {
+            ""
+        };
         self.warn(format!("locked after {secs} seconds idle{hint}"));
     }
 
     /* `^l`: the same wipe on purpose rather than on a timer. Locking used to
-       mean quitting, which is a strange thing to have to do to step away. */
+    mean quitting, which is a strange thing to have to do to step away. */
     pub fn lock_now(&mut self) {
         if !self.session.is_open() {
             self.say("already locked");
@@ -1269,32 +1306,32 @@ impl App {
     }
 
     /* Drop the vault and go back behind the password prompt. Dropping is the
-       wipe: secrets live in `ProtectedString` and the retained key, both of
-       which zeroize on drop, so nothing may be copied out first. */
+    wipe: secrets live in `ProtectedString` and the retained key, both of
+    which zeroize on drop, so nothing may be copied out first. */
     fn lock(&mut self) {
         let failed = self.session.lock();
         self.report_released(failed);
         self.group_cursor = None;
         self.entry_cursor = None;
         /* Zeroized, not cleared: `String::clear` sets the length to zero and
-           leaves the bytes in the allocation, and this is the path whose
-           whole job is getting the typed password out of memory. */
+        leaves the bytes in the allocation, and this is the path whose
+        whole job is getting the typed password out of memory. */
         self.unlock_password.zeroize();
         self.unlock_confirm.zeroize();
         self.unlock_reveal = false;
         self.caret = 0;
         /* Nothing that was about the open vault may outlive it: a form, a
-           kept filter or an armed cut would come back over the next one. */
+        kept filter or an armed cut would come back over the next one. */
         self.detail = false;
         self.show_password = false;
         self.form = None;
         self.group_prompt = None;
         /* Dropping it zeroizes both boxes: a half-typed master password must
-           not survive the lock that was supposed to clear the screen. */
+        not survive the lock that was supposed to clear the screen. */
         self.rekey = None;
         self.audit = None;
         /* Holds field values, which are secrets as often as not, and the
-           add prompt's own box. Dropping it wipes them. */
+        add prompt's own box. Dropping it wipes them. */
         self.fields = None;
         // Holds old passwords, which is the whole reason it is worth showing.
         self.history = None;
@@ -1333,9 +1370,9 @@ impl App {
     }
 
     /* Writes the opened vault into the config as `db`, unless it is already
-       there or this session has no config file (--no-config). Says so out
-       loud: a tool that edits your dotfiles without a word is a tool you stop
-       trusting with your dotfiles. */
+    there or this session has no config file (--no-config). Says so out
+    loud: a tool that edits your dotfiles without a word is a tool you stop
+    trusting with your dotfiles. */
     fn remember_vault(&mut self, path: &Path) {
         if self.configured_db.as_deref() == Some(path) {
             return;
@@ -1352,8 +1389,8 @@ impl App {
                 ));
             }
             /* Not fatal: the vault is open, and the only thing lost is the
-               convenience. Worth naming, since the next launch will not do
-               what the user just asked for. */
+            convenience. Worth naming, since the next launch will not do
+            what the user just asked for. */
             Err(e) => self.warn(format!("cannot save your choice  ·  {e}")),
         }
     }
@@ -1368,15 +1405,15 @@ impl App {
     }
 
     /* `^t`: walk the shipped palettes with the screen in front of you, which
-       is the only way anyone picks a theme. The choice is written back the
-       way an opened vault is, so the next launch keeps it. */
+    is the only way anyone picks a theme. The choice is written back the
+    way an opened vault is, so the next launch keeps it. */
     pub fn cycle_theme(&mut self) {
         self.theme = self.theme.next();
         let name = self.theme.name();
         /* The walk only moves the base palette; a `[colors]` table in the
-           file is applied on top of whatever is named, and outlives this. So
-           the screen now and the screen next launch are different, and the
-           only honest thing is to say which key is still doing it. */
+        file is applied on top of whatever is named, and outlives this. So
+        the screen now and the screen next launch are different, and the
+        only honest thing is to say which key is still doing it. */
         let kept = if self.theme_overridden {
             "  ·  [colors] still repaints it"
         } else {
@@ -1386,7 +1423,7 @@ impl App {
             Some(file) => match crate::config::remember_theme(Some(&file), name) {
                 Ok(()) => self.say(format!("theme: {name}  ·  remembered{kept}")),
                 /* Not fatal: the theme applied, and only the remembering
-                   failed — but the next launch will not do what was asked. */
+                failed — but the next launch will not do what was asked. */
                 Err(e) => self.warn(format!("theme: {name}  ·  cannot save your choice · {e}")),
             },
             // --no-config asked for the file to be left out of the run.
@@ -1410,8 +1447,8 @@ impl App {
     pub fn set_db_path(&mut self, path: Option<PathBuf>) {
         self.db_path = path;
         /* Prefill the typed box only if the user has not typed their own:
-           `set_db_path` runs once at startup, and a later call (vault switch)
-           must not clobber whatever is mid-edit. */
+        `set_db_path` runs once at startup, and a later call (vault switch)
+        must not clobber whatever is mid-edit. */
         if self.unlock_file.is_empty()
             && let Some(p) = &self.db_path
         {
@@ -1419,9 +1456,9 @@ impl App {
         }
         self.refresh_db_state();
         /* No path from the config or --db: the first thing to fill is the file
-           box, not the password. Default focus is Password (right when a vault
-           is already named); with nothing configured, land on File so a typed
-           path goes where it belongs instead of into the password box. */
+        box, not the password. Default focus is Password (right when a vault
+        is already named); with nothing configured, land on File so a typed
+        path goes where it belongs instead of into the password box. */
         if self.db_path.is_none() {
             self.unlock_field = UnlockField::File;
         }
@@ -1462,7 +1499,9 @@ impl App {
 
     /// Whether the notes box has focus, the one box where a pasted line break is text.
     pub fn in_notes(&self) -> bool {
-        self.form.as_ref().is_some_and(|f| f.field == FormField::Notes)
+        self.form
+            .as_ref()
+            .is_some_and(|f| f.field == FormField::Notes)
     }
 
     /// Prefills the key-file box from `--key-file` or the config, once at startup.
@@ -1475,8 +1514,8 @@ impl App {
     }
 
     /* Whether Enter will create rather than open. Cached on keypresses, not
-       read per frame: the draw loop must not stat, and the answer only
-       changes when the file does. */
+    read per frame: the draw loop must not stat, and the answer only
+    changes when the file does. */
     pub fn refresh_db_state(&mut self) {
         self.unlock_new = self.db_path.as_ref().is_some_and(|p| !p.is_file());
         self.session.aim(self.db_path.as_deref());
@@ -1507,8 +1546,8 @@ impl App {
     // password buffer is wiped on every path out; the vault's key and, with `touch_id`,
     // the sealed copy in `quick` are the only copies that survive.
     /* Enter on the lock screen: say so, then let the loop draw before the
-       derivation starts. A second of frozen screen with the old stage on it
-       reads as a hang. */
+    derivation starts. A second of frozen screen with the old stage on it
+    reads as a hang. */
     pub fn begin_unlock(&mut self) {
         self.unlocking = true;
         self.stage = match (self.quick_ready(), self.active_yubikey()) {
@@ -1525,9 +1564,9 @@ impl App {
     pub fn try_unlock(&mut self, password: &mut Vec<u8>, key_file: Option<&[u8]>) {
         self.unlocking = false;
         /* A path typed in the file box but never confirmed with Enter (Tab
-           jumped to the password instead) is still the vault the user means:
-           apply it here so unlock reads the path off the box it was typed in
-           rather than opening the previous vault. */
+        jumped to the password instead) is still the vault the user means:
+        apply it here so unlock reads the path off the box it was typed in
+        rather than opening the previous vault. */
         if !self.sync_db_path_from_file_box() {
             // Enter on the password box skips the file box's own check.
             self.warn("another user's ~ cannot be resolved  ·  type the full path");
@@ -1540,14 +1579,16 @@ impl App {
             return;
         };
         /* Made absolute here, once, so everything downstream agrees on what
-           this vault is called: `--db vault.kdbx` is relative to the
-           directory it was typed in. */
+        this vault is called: `--db vault.kdbx` is relative to the
+        directory it was typed in. */
         let path = crate::config::absolute(&path);
         self.db_path = Some(path.clone());
         let yubikey = self.active_yubikey().cloned();
         // Borrowed, not copied: the confirm box is the new password when the two match.
         let confirm = self.unlock_new.then_some(self.unlock_confirm.as_bytes());
-        let result = self.session.unlock(&path, password, key_file, yubikey.as_ref(), confirm);
+        let result = self
+            .session
+            .unlock(&path, password, key_file, yubikey.as_ref(), confirm);
         match result {
             Ok(unlocked) => self.unlocked(unlocked),
             Err(e) => self.unlock_failed(e),
@@ -1557,12 +1598,12 @@ impl App {
     fn unlocked(&mut self, unlocked: Unlocked) {
         let path = self.db_path.clone().unwrap_or_default();
         /* Typed secrets do not linger behind the browser. The key-file
-           path stays: it names a file, not a secret, and prefills the
-           next unlock after an auto-lock. */
+        path stays: it names a file, not a secret, and prefills the
+        next unlock after an auto-lock. */
         self.unlock_password.zeroize();
         self.unlock_confirm.zeroize();
         /* The next screen opens on bullets again: a reveal is for
-           reading the box you are on, never a browser-side default. */
+        reading the box you are on, never a browser-side default. */
         self.unlock_reveal = false;
         self.unlock_field = UnlockField::Password;
         self.caret = 0;
@@ -1570,12 +1611,15 @@ impl App {
         self.enter_browser();
         self.report_agent(unlocked.agent);
         /* Which vault is open, for the rest of the session: pointing
-           one session at any vault is the app's headline feature, and
-           "ready" made two vaults look identical. */
+        one session at any vault is the app's headline feature, and
+        "ready" made two vaults look identical. */
         self.resting = vault_name(&path);
         if unlocked.created {
             // The first screen of an empty vault, which has nothing to show.
-            self.say(format!("created {}  ·  a adds your first entry", vault_name(&path)));
+            self.say(format!(
+                "created {}  ·  a adds your first entry",
+                vault_name(&path)
+            ));
         } else {
             let n = unlocked.entries;
             let plural = if n == 1 { "entry" } else { "entries" };
@@ -1585,17 +1629,17 @@ impl App {
             self.warn(format!("Touch ID off this session  ·  {why}"));
         }
         /* Said at unlock, not at the first failed autosave: an older
-           KDBX opens fine and can never be written, and finding that
-           out ten minutes into editing means ten minutes of work with
-           nowhere to go. */
+        KDBX opens fine and can never be written, and finding that
+        out ten minutes into editing means ten minutes of work with
+        nowhere to go. */
         if let Some(what) = unlocked.read_only {
             self.error(format!(
                 "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
             ));
         }
         /* A vault that opened is a vault worth remembering. Written after
-           the unlock, never before, so a mistyped path cannot become the
-           default. */
+        the unlock, never before, so a mistyped path cannot become the
+        default. */
         self.remember_vault(&path);
         self.remember_recent(&path);
     }
@@ -1656,7 +1700,7 @@ impl App {
     }
 
     /* `^o`: open the picker on the directory the current path names, or on
-       home when there is nothing to go by. */
+    home when there is nothing to go by. */
     pub fn open_browse(&mut self) {
         let start = {
             let typed = crate::config::expand(self.unlock_file.trim());
@@ -1688,8 +1732,8 @@ impl App {
     }
 
     /* `^v`: every vault this machine has opened, newest first. Statted once
-       here rather than per frame — the draw loop must not touch the disk, and
-       a vault on a network share can take its time answering. */
+    here rather than per frame — the draw loop must not touch the disk, and
+    a vault on a network share can take its time answering. */
     pub fn open_library(&mut self) {
         if self.recent.is_empty() {
             self.say("no vaults remembered yet  ·  ^o finds one, and opening it adds it here");
@@ -1757,9 +1801,9 @@ impl App {
     }
 
     /* Enter on the library: point the session at that vault and hand the keys
-       to the password box. A missing file is still chosen rather than
-       refused — the box then says "new database", which is the honest reading
-       of a path with nothing behind it. */
+    to the password box. A missing file is still chosen rather than
+    refused — the box then says "new database", which is the honest reading
+    of a path with nothing behind it. */
     pub fn library_choose(&mut self) {
         let Some(library) = &self.library else {
             return;
@@ -1788,8 +1832,8 @@ impl App {
     }
 
     /* `^d` on the library: drop a vault from the list. The file is never
-       touched — this is a list of paths, and a password manager that deletes
-       vaults off a keypress is not one anybody should run. */
+    touched — this is a list of paths, and a password manager that deletes
+    vaults off a keypress is not one anybody should run. */
     pub fn library_forget(&mut self) {
         let Some(library) = &self.library else {
             return;
@@ -1807,11 +1851,11 @@ impl App {
         }
         let name = vault_name(&path);
         /* The `db` key names the vault the next launch opens. Left alone, it
-           would reopen the one just forgotten, which would put it straight
-           back in the library: `^d` on the startup vault meant "forget until
-           the next launch". Dropped rather than repointed at another vault —
-           which vault starts the session is a choice, and `^d` is not where
-           it gets made. */
+        would reopen the one just forgotten, which would put it straight
+        back in the library: `^d` on the startup vault meant "forget until
+        the next launch". Dropped rather than repointed at another vault —
+        which vault starts the session is a choice, and `^d` is not where
+        it gets made. */
         let was_startup = self.configured_db.as_deref() == Some(path.as_path());
         let startup = if was_startup {
             match crate::config::forget_db(self.config_file.as_deref()) {
@@ -1848,7 +1892,7 @@ impl App {
     }
 
     /* `announce` is off for the toggles: the popup already shows the password
-       and its bits, so a flash per keystroke tells the user nothing new. */
+    and its bits, so a flash per keystroke tells the user nothing new. */
     fn mint_roll(&mut self, announce: bool) {
         let Some(mint) = &mut self.mint else {
             return;
@@ -1868,7 +1912,7 @@ impl App {
         match made {
             Ok(password) => {
                 /* Wiped rather than dropped: the old password's bytes would
-                   otherwise be freed intact behind the new one. */
+                otherwise be freed intact behind the new one. */
                 mint.password.zeroize();
                 mint.password = password;
             }
@@ -1925,7 +1969,11 @@ impl App {
         } else {
             &mut mint.settings.length
         };
-        let want = if longer { *len + 1 } else { len.saturating_sub(1) };
+        let want = if longer {
+            *len + 1
+        } else {
+            len.saturating_sub(1)
+        };
         if want < min || want > max {
             self.say(format!("length stays between {min} and {max}"));
             return;
@@ -1935,7 +1983,7 @@ impl App {
     }
 
     /* `t` walks complex, passphrase, pin and back round: the shape of the
-       secret, before the knobs that shape it further. */
+    secret, before the knobs that shape it further. */
     pub fn mint_cycle_kind(&mut self) {
         let Some(mint) = &mut self.mint else {
             return;
@@ -1964,15 +2012,13 @@ impl App {
             Knob::Upper => classes.upper = !classes.upper,
             Knob::Digits => classes.digits = !classes.digits,
             Knob::Symbols => classes.symbols = !classes.symbols,
-            Knob::Ambiguous => {
-                mint.settings.exclude_ambiguous = !mint.settings.exclude_ambiguous
-            }
+            Knob::Ambiguous => mint.settings.exclude_ambiguous = !mint.settings.exclude_ambiguous,
         }
         self.mint_roll(false);
     }
 
     /* The whole point of the popup: the password leaves on the clipboard,
-       under the same auto-clear timer every other copy gets. */
+    under the same auto-clear timer every other copy gets. */
     pub fn mint_copy(&mut self) {
         let Some(mint) = &self.mint else {
             return;
@@ -1982,8 +2028,8 @@ impl App {
             return;
         }
         /* Cloned only to release the borrow `say` would collide with, and
-           wiped before anything else happens: the bytes are on the clipboard
-           already, and a second copy freed intact is a second copy. */
+        wiped before anything else happens: the bytes are on the clipboard
+        already, and a second copy freed intact is a second copy. */
         let mut password = mint.password.clone();
         let Some(board) = &self.board else {
             password.zeroize();
@@ -2007,22 +2053,22 @@ impl App {
     }
 
     /* A vault that opened goes to the front of the library. Newest first and
-       deduplicated, so opening the same two vaults all week leaves two rows
-       rather than ten. */
+    deduplicated, so opening the same two vaults all week leaves two rows
+    rather than ten. */
     fn remember_recent(&mut self, path: &Path) {
         let before = self.recent.clone();
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(crate::config::RECENT_MAX);
         /* Reopening the vault you always open changes nothing, and rewriting
-           the config to say so is one more chance for two Sennels running at
-           once to overwrite each other's list. */
+        the config to say so is one more chance for two Sennels running at
+        once to overwrite each other's list. */
         if self.recent == before {
             return;
         }
         /* Silent on failure, unlike the `db` key beside it: that one is a
-           choice the user just made, this one is bookkeeping, and two
-           warnings about the same unwritable file is one too many. */
+        choice the user just made, this one is bookkeeping, and two
+        warnings about the same unwritable file is one too many. */
         let _ = self.write_recent();
     }
 
@@ -2031,8 +2077,8 @@ impl App {
     }
 
     /* Directories and vaults, nothing else: a picker that lists every file on
-       the disk makes the reader do the filtering. Dotfiles stay hidden until
-       the filter asks for them, the way a shell hides them. */
+    the disk makes the reader do the filtering. Dotfiles stay hidden until
+    the filter asks for them, the way a shell hides them. */
     fn read_dir(&mut self) {
         let Some(browse) = &mut self.browse else {
             return;
@@ -2055,10 +2101,14 @@ impl App {
                 }
             }
             /* Named rather than shown as an empty directory: "permission
-               denied" and "there is nothing here" are different answers. */
+            denied" and "there is nothing here" are different answers. */
             Err(e) => problem = Some(e.to_string()),
         }
-        rows.sort_by(|a, b| b.dir.cmp(&a.dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        rows.sort_by(|a, b| {
+            b.dir
+                .cmp(&a.dir)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         browse.rows = rows;
         browse.cursor = 0;
         browse.problem = problem;
@@ -2108,7 +2158,7 @@ impl App {
             browse.filter.push(c);
             browse.cursor = 0;
             /* A leading dot asks for the hidden entries, so the listing is
-               re-read rather than merely narrowed. */
+            re-read rather than merely narrowed. */
             if browse.filter == "." {
                 self.read_dir();
             }
@@ -2128,12 +2178,16 @@ impl App {
     }
 
     /* Enter on the picker: step into a directory, or take a vault and hand
-       the keys back to the password box, which is the next thing to fill. */
+    the keys back to the password box, which is the next thing to fill. */
     pub fn browse_choose(&mut self) {
         let Some(browse) = &self.browse else {
             return;
         };
-        let Some(row) = browse.shown().get(browse.cursor).map(|r| (r.name.clone(), r.dir)) else {
+        let Some(row) = browse
+            .shown()
+            .get(browse.cursor)
+            .map(|r| (r.name.clone(), r.dir))
+        else {
             self.say("nothing here to choose");
             return;
         };
@@ -2156,19 +2210,19 @@ impl App {
     }
 
     /* Enter on the file box: make the typed path the vault this session
-       unlocks. The path is display text, not a secret, and the flash names
-       what it was set to so a typo reads as a typo. */
+    unlocks. The path is display text, not a secret, and the flash names
+    what it was set to so a typo reads as a typo. */
     pub fn accept_file_box(&mut self) {
         /* Not taken literally: `~` means home the way it does in the config
-           file, so a typed `~/Downloads/x.kdbx` finds the vault instead of
-           opening a file literally named `~` and offering to create one. */
+        file, so a typed `~/Downloads/x.kdbx` finds the vault instead of
+        opening a file literally named `~` and offering to create one. */
         if self.unlock_file.trim().is_empty() {
             self.say("type a path first");
             return;
         }
         /* `~octo/vault.kdbx` cannot be resolved without the password
-           database, and taking it literally would offer to create a folder
-           named `~octo`. */
+        database, and taking it literally would offer to create a folder
+        named `~octo`. */
         if crate::config::is_other_home(self.unlock_file.trim()) {
             self.warn("another user's ~ cannot be resolved  ·  type the full path");
             return;
@@ -2179,7 +2233,11 @@ impl App {
         self.caret = 0;
         self.say(format!(
             "vault set{}  ·  enter the password",
-            if self.unlock_new { "  ·  new vault" } else { "" }
+            if self.unlock_new {
+                "  ·  new vault"
+            } else {
+                ""
+            }
         ));
     }
 
@@ -2254,8 +2312,8 @@ impl App {
     }
 
     /* The same word delete the search box will take in Wave 6: muscle memory
-       should not depend on which box has the keys. Deletes back to the word
-       start, keeping whatever follows the caret. */
+    should not depend on which box has the keys. Deletes back to the word
+    start, keeping whatever follows the caret. */
     pub fn unlock_kill_word(&mut self) {
         let at = self.caret_byte();
         let start = {
@@ -2264,7 +2322,7 @@ impl App {
             before.rfind(' ').map_or(0, |i| i + 1)
         };
         /* Both bounds sit on ASCII (` `, or 0) or on the caret's own char
-           boundary, so the drain cannot split a character. */
+        boundary, so the drain cannot split a character. */
         self.active_unlock_value().drain(start..at);
         self.caret = self.active_unlock_value()[..start].chars().count();
     }
@@ -2293,9 +2351,9 @@ impl App {
     }
 
     /* Pre-order walk of the whole tree as (id, depth) pairs. The groups pane
-       reads this, not the raw child lists: one flat list means one cursor and
-       one scroll, and collapse (Wave 5) prunes it without touching the vault.
-       Root is always first, so an empty tree still shows one row. */
+    reads this, not the raw child lists: one flat list means one cursor and
+    one scroll, and collapse (Wave 5) prunes it without touching the vault.
+    Root is always first, so an empty tree still shows one row. */
     pub fn group_tree(&self) -> Vec<(GroupId, usize)> {
         let Some(vault) = self.session.vault() else {
             return Vec::new();
@@ -2305,13 +2363,13 @@ impl App {
         while let Some((id, depth)) = stack.pop() {
             out.push((id, depth));
             /* A collapsed group hides its subtree but stays visible itself, so
-               the cursor on it keeps a row and Right re-opens it. Groups are
-               born expanded (KeePass defaults the flag true), so the tree
-               only shrinks after an explicit Left. */
+            the cursor on it keeps a row and Right re-opens it. Groups are
+            born expanded (KeePass defaults the flag true), so the tree
+            only shrinks after an explicit Left. */
             let collapsed = vault.get_group(&id).is_some_and(|g| !g.is_expanded);
             if !collapsed {
                 /* Reversed so the first child pops first and order matches the
-                   stored child list. */
+                stored child list. */
                 for child in vault.groups_in(&id).iter().rev() {
                     stack.push((child.id(), depth + 1));
                 }
@@ -2324,11 +2382,11 @@ impl App {
     /// group tree above: the cursor holds the id, the list is rebuilt per
     /// frame, and the two meet in `snap`.
     /* &mut self, not &self: the matcher scores with internal scratch state,
-       so the filter loop borrows it mutably while the vault stays shared. */
+    so the filter loop borrows it mutably while the vault stays shared. */
     /* The pane's rows, memoized. Three callers a frame (the header's count,
-       the pane itself, the status bar) each used to re-rank the whole vault,
-       and a keystroke in the band redraws — so the answer is kept until
-       something it depends on moves. */
+    the pane itself, the status bar) each used to re-rank the whole vault,
+    and a keystroke in the band redraws — so the answer is kept until
+    something it depends on moves. */
     pub fn entry_rows(&mut self) -> Vec<EntryId> {
         let key = self.rows_key();
         if let Some((cached, rows)) = &self.rows_cache
@@ -2353,17 +2411,20 @@ impl App {
 
     fn compute_rows(&mut self) -> Vec<EntryId> {
         /* A live needle widens the pane to the whole vault: search is the one
-           question whose answer is rarely "the folder I was already in", and
-           the count in the status bar already promised the matches existed. */
-        let global = self.search_global
-            && self
-                .search
-                .as_deref()
-                .is_some_and(|n| !n.is_empty());
+        question whose answer is rarely "the folder I was already in", and
+        the count in the status bar already promised the matches existed. */
+        let global = self.search_global && self.search.as_deref().is_some_and(|n| !n.is_empty());
         let Some(vault) = self.session.vault() else {
             return Vec::new();
         };
-        crate::search::rows(vault, global, self.group_cursor, self.search.as_deref(), self.order, &mut self.searcher)
+        crate::search::rows(
+            vault,
+            global,
+            self.group_cursor,
+            self.search.as_deref(),
+            self.order,
+            &mut self.searcher,
+        )
     }
 
     /// How many entries the vault holds in total, for the "N of M shown"
@@ -2396,20 +2457,20 @@ impl App {
     /// entries pane only shows the cursor group, but the count tells the
     /// truth about the filter: the needle still matches rows elsewhere.
     /* &mut self for the same reason as entry_rows: the searcher scores with
-       internal scratch state, and the draw path already holds &mut App. */
+    internal scratch state, and the draw path already holds &mut App. */
     /* Counted over whatever the needle is searching: with `^g` narrowing it
-       to one folder, a whole-vault count is an answer to a question nobody
-       asked. */
+    to one folder, a whole-vault count is an answer to a question nobody
+    asked. */
     pub fn entry_matches(&mut self) -> usize {
         /* The rows *are* the matches while the needle is live — a second
-           whole-vault pass to count what the first one just filtered was the
-           most expensive redundancy in the frame. */
+        whole-vault pass to count what the first one just filtered was the
+        most expensive redundancy in the frame. */
         self.entry_rows().len()
     }
 
     /* `o` cycles the entries-pane order. `snap` re-points the cursor because
-       the id it held may have moved rows — the selection follows the entry,
-       not the position, which is the whole reason cursors hold ids. */
+    the id it held may have moved rows — the selection follows the entry,
+    not the position, which is the whole reason cursors hold ids. */
     pub fn cycle_order(&mut self) {
         self.order = self.order.next();
         self.snap();
@@ -2417,8 +2478,8 @@ impl App {
     }
 
     /* Left on the groups pane folds the selected group. Only groups with
-       subgroups fold: a leaf collapsing to no visible change would read as
-       a dead key. An already-folded group reports rather than re-folding. */
+    subgroups fold: a leaf collapsing to no visible change would read as
+    a dead key. An already-folded group reports rather than re-folding. */
     pub fn collapse_group(&mut self) {
         let Some(id) = self.group_cursor else {
             return;
@@ -2434,7 +2495,8 @@ impl App {
             self.say("already folded");
             return;
         }
-        self.session.vault_mut()
+        self.session
+            .vault_mut()
             .expect("checked above")
             .set_expanded(&id, false);
     }
@@ -2449,25 +2511,30 @@ impl App {
     }
 
     /* A click lands on a row, not on an index: the pane knows where it drew,
-       and the scroll offset says which row that pixel belongs to. Clicking
-       the pane at all hands it the keys, which is what a click means
-       everywhere else. */
+    and the scroll offset says which row that pixel belongs to. Clicking
+    the pane at all hands it the keys, which is what a click means
+    everywhere else. */
     pub fn click(&mut self, column: u16, row: u16) {
         /* Before the panes, because a copy row can sit over the detail pane
-           and a click there means the field, not a list selection. */
+        and a click there means the field, not a list selection. */
         if let Some((_, what)) = self.copy_rows.iter().find(|(at, _)| *at == row).copied() {
             self.copy_row(what);
             return;
         }
         /* While the detail popup is up it is the only thing on screen that a
-           click means anything to: the panes behind it must not move under
-           it, or closing the popup reveals a different entry than the one it
-           was showing. */
+        click means anything to: the panes behind it must not move under
+        it, or closing the popup reveals a different entry than the one it
+        was showing. */
         if self.detail {
             return;
         }
         let at = Position::new(column, row);
-        if let Some((_, id)) = self.menu_bar.iter().find(|(label, _)| label.contains(at)).copied() {
+        if let Some((_, id)) = self
+            .menu_bar
+            .iter()
+            .find(|(label, _)| label.contains(at))
+            .copied()
+        {
             if !self.menus_blocked() {
                 self.toggle_menu(id);
             }
@@ -2527,8 +2594,8 @@ impl App {
     }
 
     /* Click-to-copy. The same four copies `y p U t` do, through the same
-       board and the same auto-clear — this is a second way to reach them,
-       never a second implementation of them. */
+    board and the same auto-clear — this is a second way to reach them,
+    never a second implementation of them. */
     pub fn copy_row(&mut self, what: CopyRow) {
         match what {
             CopyRow::Username => self.copy_username(),
@@ -2537,7 +2604,7 @@ impl App {
             CopyRow::Totp => self.copy_totp(),
         }
         /* Lit whether or not the copy worked: the flash says which, and a row
-           that stayed dark after a click reads as a click the app missed. */
+        that stayed dark after a click reads as a click the app missed. */
         self.copied = Some((what, Instant::now()));
     }
 
@@ -2649,7 +2716,11 @@ impl App {
         };
         let next = (if right { at + 1 } else { at + MENUS.len() - 1 }) % MENUS.len();
         // Under its label when there is one; a right-click menu with the labels hidden stays put.
-        let anchor = if self.menu_bar.is_empty() { self.menu_at } else { None };
+        let anchor = if self.menu_bar.is_empty() {
+            self.menu_at
+        } else {
+            None
+        };
         self.open_menu(MENUS[next].0, anchor);
     }
 
@@ -2666,18 +2737,32 @@ impl App {
     /// Where item `n` of the open menu was drawn: one row each, inside the box's border.
     pub fn menu_row(&self, n: usize) -> Option<Rect> {
         let box_ = self.menu_area;
-        (n < self.menu_shown).then(|| Rect::new(box_.x + 1, box_.y + 1 + n as u16, box_.width.saturating_sub(2), 1))
+        (n < self.menu_shown).then(|| {
+            Rect::new(
+                box_.x + 1,
+                box_.y + 1 + n as u16,
+                box_.width.saturating_sub(2),
+                1,
+            )
+        })
     }
 
     // An open menu takes every click: one that misses it closes it rather than landing behind it. The box
     // goes before the labels, because a menu lifted to fit a short screen can cover them.
     pub fn click_menu(&mut self, column: u16, row: u16) {
         let at = Position::new(column, row);
-        if let Some(n) = (0..self.menu_shown).find(|&n| self.menu_row(n).is_some_and(|r| r.contains(at))) {
+        if let Some(n) =
+            (0..self.menu_shown).find(|&n| self.menu_row(n).is_some_and(|r| r.contains(at)))
+        {
             self.menu_cursor = n;
             self.choose_menu();
         } else if !self.menu_area.contains(at) {
-            match self.menu_bar.iter().find(|(label, _)| label.contains(at)).copied() {
+            match self
+                .menu_bar
+                .iter()
+                .find(|(label, _)| label.contains(at))
+                .copied()
+            {
                 Some((_, id)) => self.toggle_menu(id),
                 None => self.close_menu(),
             }
@@ -2690,12 +2775,18 @@ impl App {
 
     /// The rows the query matches, best first, or every row in menu order while it is empty.
     pub fn command_rows(&mut self) -> Vec<(&'static str, MenuItem)> {
-        let query = self.commands.as_ref().map(|c| c.query.clone()).unwrap_or_default();
+        let query = self
+            .commands
+            .as_ref()
+            .map(|c| c.query.clone())
+            .unwrap_or_default();
         // Not the palette's own row: choosing it would only close the palette and open it again, empty.
         let all = MENUS
             .iter()
             .flat_map(|(_, menu, items)| items.iter().map(move |item| (*menu, *item)))
-            .filter(|(_, item)| !std::ptr::fn_addr_eq(item.run, App::open_commands as fn(&mut App)));
+            .filter(|(_, item)| {
+                !std::ptr::fn_addr_eq(item.run, App::open_commands as fn(&mut App))
+            });
         if query.is_empty() {
             return all.collect();
         }
@@ -2703,7 +2794,9 @@ impl App {
         let mut found: Vec<(u16, (&'static str, MenuItem))> = all
             .filter_map(|row| {
                 let hay = format!("{} {}", row.0, row.1.label);
-                self.searcher.score(&pattern, &hay).map(|score| (score, row))
+                self.searcher
+                    .score(&pattern, &hay)
+                    .map(|score| (score, row))
             })
             .collect();
         // Stable, so rows that score alike keep the menus' order.
@@ -2746,7 +2839,12 @@ impl App {
     // Closed first, like a menu, so the row runs on the browser and not under its own popup.
     pub fn run_command(&mut self) {
         let rows = self.command_rows();
-        let Some((_, item)) = self.commands.as_ref().and_then(|c| rows.get(c.cursor)).copied() else {
+        let Some((_, item)) = self
+            .commands
+            .as_ref()
+            .and_then(|c| rows.get(c.cursor))
+            .copied()
+        else {
             return;
         };
         self.commands = None;
@@ -2760,8 +2858,8 @@ impl App {
     }
 
     /* `/` opens the band over whatever was last searched, so refining a
-       filter does not mean retyping it. The caret lands at the end: you came
-       here to add characters. */
+    filter does not mean retyping it. The caret lands at the end: you came
+    here to add characters. */
     pub fn open_search(&mut self) {
         let prior = self.search.clone().unwrap_or_default();
         self.search_caret = prior.chars().count();
@@ -2770,8 +2868,8 @@ impl App {
     }
 
     /* `^g` in the band: swap between filtering the whole vault and filtering
-       the folder the cursor is in. Both are useful; the point is that the
-       screen says which one is happening. */
+    the folder the cursor is in. Both are useful; the point is that the
+    screen says which one is happening. */
     pub fn toggle_search_scope(&mut self) {
         self.search_global = !self.search_global;
         self.snap();
@@ -2790,8 +2888,8 @@ impl App {
         }
         self.band = false;
         /* The filter is about entries, so the keys go where the results are:
-           Enter used to hand them back to the groups pane, and `j` then moved
-           a tree the user had stopped looking at. */
+        Enter used to hand them back to the groups pane, and `j` then moved
+        a tree the user had stopped looking at. */
         if kept {
             self.active_pane = Pane::Entries;
         }
@@ -2799,8 +2897,8 @@ impl App {
     }
 
     /* Esc clears the filter — on the band itself or, once Enter has kept it,
-       from the browser. With nothing to clear it reports false so the caller
-       can fall through to its usual Esc report. */
+    from the browser. With nothing to clear it reports false so the caller
+    can fall through to its usual Esc report. */
     pub fn clear_search(&mut self) -> bool {
         let was_live = self.search.is_some();
         if was_live {
@@ -2813,8 +2911,8 @@ impl App {
     }
 
     /* The band owns its caret/word keys exactly like every other box. These
-       mirror the form variants but write to `search` — small duplication for
-       keeping each modal's logic readable in one place. */
+    mirror the form variants but write to `search` — small duplication for
+    keeping each modal's logic readable in one place. */
     pub fn search_insert(&mut self, ch: char) {
         let Some(query) = &mut self.search else {
             return;
@@ -2854,11 +2952,7 @@ impl App {
     }
 
     pub fn search_move(&mut self, right: bool) {
-        let len = self
-            .search
-            .as_ref()
-            .map(|q| q.chars().count())
-            .unwrap_or(0);
+        let len = self.search.as_ref().map(|q| q.chars().count()).unwrap_or(0);
         if right {
             self.search_caret = (self.search_caret + 1).min(len);
         } else {
@@ -2867,11 +2961,7 @@ impl App {
     }
 
     pub fn search_end(&mut self, end: bool) {
-        let len = self
-            .search
-            .as_ref()
-            .map(|q| q.chars().count())
-            .unwrap_or(0);
+        let len = self.search.as_ref().map(|q| q.chars().count()).unwrap_or(0);
         self.search_caret = if end { len } else { 0 };
     }
 
@@ -2888,10 +2978,11 @@ impl App {
             return;
         };
         /* Head is sliced out first so the drain below does not fight an
-           immutable borrow: the caret maths needs the pre-edit head length. */
+        immutable borrow: the caret maths needs the pre-edit head length. */
         let at = char_index_to_byte(query, self.search_caret);
         let head = query[..at].to_string();
-        let Some(cut) = head.rfind(|c: char| !c.is_whitespace())
+        let Some(cut) = head
+            .rfind(|c: char| !c.is_whitespace())
             .and_then(|end| head[..=end].rfind(char::is_whitespace))
         else {
             query.drain(..at);
@@ -2918,30 +3009,37 @@ impl App {
     /// The root id of the open vault. Only reached from browser paths that
     /// already know a vault is open.
     fn root_id(&self) -> GroupId {
-        self.session.vault().expect("browser keys need a vault").root_id()
+        self.session
+            .vault()
+            .expect("browser keys need a vault")
+            .root_id()
     }
 
     /* Filtered out means not selected: the entry cursor may name an entry of
-       another group after the group cursor moved, and acting on it would edit
-       a row that is not on screen. A live search relaxes the rule — the rows
-       list is global then, and a hit from another folder is exactly the row
-       the user asked to act on. */
+    another group after the group cursor moved, and acting on it would edit
+    a row that is not on screen. A live search relaxes the rule — the rows
+    list is global then, and a hit from another folder is exactly the row
+    the user asked to act on. */
     pub fn selected_entry(&self) -> Option<keepass::db::EntryRef<'_>> {
-        let (vault, group, id) = (self.session.vault()?, self.group_cursor?, self.entry_cursor?);
+        let (vault, group, id) = (
+            self.session.vault()?,
+            self.group_cursor?,
+            self.entry_cursor?,
+        );
         let searching = self.search.as_deref().is_some_and(|n| !n.is_empty());
-        vault.get_entry(&id).filter(|_| {
-            searching || vault.parent_group_of_entry(&id) == Some(group)
-        })
+        vault
+            .get_entry(&id)
+            .filter(|_| searching || vault.parent_group_of_entry(&id) == Some(group))
     }
 
     /* Puts both cursors back on rows that exist. Called after every mutation
-       and every cursor move across groups: a cursor on a deleted group or an
-       entry of another group is a selection nobody can see, and every command
-       reads as dead until the next keypress moves it. */
+    and every cursor move across groups: a cursor on a deleted group or an
+    entry of another group is a selection nobody can see, and every command
+    reads as dead until the next keypress moves it. */
     pub fn snap(&mut self) {
         /* Every mutation lands here to put the cursors back on real rows, and
-           it runs before the autosave — so this, not `persist`, is the first
-           moment the cached rows can be out of date. */
+        it runs before the autosave — so this, not `persist`, is the first
+        moment the cached rows can be out of date. */
         self.rows_cache = None;
         if !self.session.is_open() {
             self.group_cursor = None;
@@ -2950,7 +3048,7 @@ impl App {
         };
         let tree = self.group_tree();
         /* A cursor must rest on a *visible* row: a group that still exists
-           but is folded shut inside its parent is not one anyone can see. */
+        but is folded shut inside its parent is not one anyone can see. */
         if self
             .group_cursor
             .is_none_or(|id| !tree.iter().any(|(g, _)| *g == id))
@@ -2966,7 +3064,9 @@ impl App {
     /// Step the group cursor down (`true`) or up over the visible tree.
     pub fn step_group(&mut self, down: bool) {
         let tree = self.group_tree();
-        let Some(at) = self.group_cursor.and_then(|id| tree.iter().position(|(g, _)| *g == id))
+        let Some(at) = self
+            .group_cursor
+            .and_then(|id| tree.iter().position(|(g, _)| *g == id))
         else {
             self.snap();
             return;
@@ -2978,8 +3078,8 @@ impl App {
         };
         self.group_cursor = Some(tree[next].0);
         /* A new group brings its own entries: keeping the old entry cursor
-           would point at another group's row, which `selected_entry` hides
-           but which still reads as a stuck highlight. */
+        would point at another group's row, which `selected_entry` hides
+        but which still reads as a stuck highlight. */
         self.entry_cursor = None;
         self.entry_scroll = 0;
         self.snap();
@@ -3030,17 +3130,13 @@ impl App {
             self.entry_cursor = None;
             return;
         }
-        self.entry_cursor = Some(if last {
-            rows[rows.len() - 1]
-        } else {
-            rows[0]
-        });
+        self.entry_cursor = Some(if last { rows[rows.len() - 1] } else { rows[0] });
     }
 
     /* n/N walk the visible rows — which, while a needle is live, are the
-       matches. Clamps at the ends and says so: a jump that quietly wraps
-       reads as a key that did nothing. With no needle this is a plain
-       cursor step, so n stays honest on a browser with no search. */
+    matches. Clamps at the ends and says so: a jump that quietly wraps
+    reads as a key that did nothing. With no needle this is a plain
+    cursor step, so n stays honest on a browser with no search. */
     pub fn jump_match(&mut self, next: bool) {
         let rows = self.entry_rows();
         if rows.is_empty() {
@@ -3135,10 +3231,10 @@ impl App {
     }
 
     /* Autosave after every mutation. Dirty is set before the attempt and
-       cleared on success, so a failed save leaves the quit guard armed and
-       the flash names the problem instead of pretending nothing happened.
-       An in-memory vault (tests) has no path: it cannot save, so it stays
-       dirty rather than silently discarding. */
+    cleared on success, so a failed save leaves the quit guard armed and
+    the flash names the problem instead of pretending nothing happened.
+    An in-memory vault (tests) has no path: it cannot save, so it stays
+    dirty rather than silently discarding. */
     pub fn persist(&mut self) {
         self.rows_cache = None;
         let saved = self.session.persist(self.flushing);
@@ -3151,23 +3247,25 @@ impl App {
             Saved::Deferred(what) => self.defer_for_touch(what),
             Saved::Written if self.flushing => self.say("saved"),
             Saved::Written => {}
-            Saved::Conflict => {
-                self.error("vault changed on disk  ·  ^f merges  ·  ^s overwrites  ·  ^r reloads theirs")
-            }
+            Saved::Conflict => self.error(
+                "vault changed on disk  ·  ^f merges  ·  ^s overwrites  ·  ^r reloads theirs",
+            ),
             Saved::Failed(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
         }
     }
 
     /* `^s`: save now. Sennel autosaves, so this is mostly the key everyone
-       presses out of habit — but it is also the retry after a failed save and
-       the second press that overrides a file somebody else changed. */
+    presses out of habit — but it is also the retry after a failed save and
+    the second press that overrides a file somebody else changed. */
     pub fn save_now(&mut self) {
         match self.session.save_now(self.flushing) {
             SaveNow::Locked => self.say("no vault open to save"),
             SaveNow::NoFile => self.warn("this vault has no file yet  ·  nothing to save to"),
             SaveNow::Deferred(what) => self.defer_for_touch(what),
             SaveNow::Overwrote => self.warn("saved over the copy on disk"),
-            SaveNow::OverwriteFailed(e) => self.error(format!("save failed  ·  {e} · kept in memory")),
+            SaveNow::OverwriteFailed(e) => {
+                self.error(format!("save failed  ·  {e} · kept in memory"))
+            }
             SaveNow::Clean => self.say("nothing to save  ·  every change saves itself"),
             SaveNow::Saved(saved) => {
                 self.rows_cache = None;
@@ -3185,18 +3283,23 @@ impl App {
         match self.session.merge(self.flushing) {
             Ok(summary) => {
                 self.snap();
-                self.say(format!("merged with the file on disk  ·  {}", summary.describe()));
+                self.say(format!(
+                    "merged with the file on disk  ·  {}",
+                    summary.describe()
+                ));
             }
             Err(Resolve::NoConflict) => self.say("nothing to merge  ·  the file has not changed"),
             Err(Resolve::Locked) => {}
             Err(Resolve::Deferred) => self.defer_for_touch(Pending::Merge),
-            Err(Resolve::Failed(e)) => self.error(format!("{e}  ·  ^s overwrites  ·  ^r reloads theirs")),
+            Err(Resolve::Failed(e)) => {
+                self.error(format!("{e}  ·  ^s overwrites  ·  ^r reloads theirs"))
+            }
         }
     }
 
     /* `^r` on a conflict: take the copy on disk and lose the changes this
-       session could not write. Only offered while a save has actually been
-       refused, so it can never be a surprise reload of somebody's work. */
+    session could not write. Only offered while a save has actually been
+    refused, so it can never be a surprise reload of somebody's work. */
     pub fn reload_vault(&mut self) {
         match self.session.reload() {
             Ok(()) => {
@@ -3210,8 +3313,8 @@ impl App {
     }
 
     /* `a` on the browser: a blank form aimed at the cursor group. Requires a
-       group because an entry must live somewhere, and the root always exists
-       once a vault is open. */
+    group because an entry must live somewhere, and the root always exists
+    once a vault is open. */
     pub fn open_add_form(&mut self) {
         if !self.session.is_open() || self.group_cursor.is_none() {
             self.say("no vault open to add to");
@@ -3237,8 +3340,8 @@ impl App {
     }
 
     /* `e` on an entry: prefilled boxes. The password box starts empty and
-       untouched — the one case where "empty" means keep — so the secret is
-       not even in the form buffer until the user asks for it. */
+    untouched — the one case where "empty" means keep — so the secret is
+    not even in the form buffer until the user asks for it. */
     pub fn open_edit_form(&mut self) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to edit");
@@ -3253,12 +3356,12 @@ impl App {
             password: secret_box(),
             url: entry.url().to_string(),
             /* Prefilled, unlike the two secret boxes: a tag is a label, and
-               an edit that silently dropped them would be worse than one
-               that shows them. */
+            an edit that silently dropped them would be worse than one
+            that shows them. */
             tags: entry.tags.join(", "),
             /* Prefilled from the stored stamp, as a date: the time of day is
-               stored but nobody sets an expiry to the minute, and a box that
-               demands one is a box that gets retyped wrong. */
+            stored but nobody sets an expiry to the minute, and a box that
+            demands one is a box that gets retyped wrong. */
             expires: crate::vault::expires_at(&entry)
                 .map(|at| at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default(),
@@ -3266,8 +3369,8 @@ impl App {
             caret: entry.title().chars().count(),
             password_touched: false,
             /* The stored seed never prefills the box: it is a secret, and a
-               masked run of bullets forty characters long teaches nobody
-               anything. Empty-and-untouched keeps it, the password's rule. */
+            masked run of bullets forty characters long teaches nobody
+            anything. Empty-and-untouched keeps it, the password's rule. */
             otp: seed_box(),
             otp_touched: false,
             had_otp: crate::vault::raw_otp(&entry).is_some(),
@@ -3276,9 +3379,9 @@ impl App {
     }
 
     /* `D` on an entry: ask first. The confirm carries the title for the
-       prompt so the answer is about a row the user can see, not a blind id.
-       It also carries whether this is the recoverable delete or the real one,
-       because those are different questions and deserve different words. */
+    prompt so the answer is about a row the user can see, not a blind id.
+    It also carries whether this is the recoverable delete or the real one,
+    because those are different questions and deserve different words. */
     pub fn ask_delete_entry(&mut self) {
         let Some(entry) = self.selected_entry() else {
             self.say("no entry here to delete");
@@ -3342,7 +3445,10 @@ impl App {
     }
 
     fn form_caret_byte(&self) -> usize {
-        let form = self.form.as_ref().expect("form keys only reach an open form");
+        let form = self
+            .form
+            .as_ref()
+            .expect("form keys only reach an open form");
         let value = form_field_value_ref(form, form.field);
         value
             .char_indices()
@@ -3351,7 +3457,7 @@ impl App {
     }
 
     /* `^r` in the form, the same key the lock screen uses: a generated
-       password is worth reading once before it is stored. */
+    password is worth reading once before it is stored. */
     pub fn toggle_form_reveal(&mut self) {
         let Some(form) = self.form.as_mut() else {
             return;
@@ -3363,8 +3469,8 @@ impl App {
     }
 
     /* alt+enter (or ^j) in the notes box: Enter submits the form, so without
-       this a note could hold a line break but never gain one. Refused
-       elsewhere, where a newline is not a thing a field can hold. */
+    this a note could hold a line break but never gain one. Refused
+    elsewhere, where a newline is not a thing a field can hold. */
     pub fn form_newline(&mut self) {
         let Some(form) = self.form.as_ref() else {
             return;
@@ -3392,10 +3498,7 @@ impl App {
         };
         let at = self.form_caret_byte();
         let value = self.active_form_value();
-        let prev = value[..at]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(i, _)| i);
+        let prev = value[..at].char_indices().next_back().map_or(0, |(i, _)| i);
         value.remove(prev);
         let form = self.form.as_mut().expect("backspacing");
         form.caret = caret - 1;
@@ -3441,7 +3544,7 @@ impl App {
     }
 
     /* The same word delete the unlock box takes. Deletes back to the word
-       start, keeping whatever follows the caret. */
+    start, keeping whatever follows the caret. */
     pub fn form_kill_word(&mut self) {
         let at = self.form_caret_byte();
         let start = {
@@ -3451,14 +3554,16 @@ impl App {
         };
         self.active_form_value().drain(start..at);
         let form = self.form.as_mut().expect("killing a word");
-        form.caret = form_field_value_ref(form, form.field)[..start].chars().count();
+        form.caret = form_field_value_ref(form, form.field)[..start]
+            .chars()
+            .count();
         form.touch_secret();
     }
 
     /* Enter on the form: write through to the vault and autosave. The title
-       is the only must — a password manager row without a name is unreadable
-       in every list — and the flash names the box rather than failing
-       silently. */
+    is the only must — a password manager row without a name is unreadable
+    in every list — and the flash names the box rather than failing
+    silently. */
     pub fn submit_form(&mut self) {
         let Some(form) = self.form.take() else {
             return;
@@ -3537,7 +3642,7 @@ impl App {
     }
 
     /* `A`: a new group goes inside the selected one, the way KeePass does it
-       — the tree grows where the eye is, not always at the root. */
+    — the tree grows where the eye is, not always at the root. */
     pub fn open_group_prompt_new(&mut self) {
         if self.group_cursor.is_none() {
             self.say("no group selected");
@@ -3551,7 +3656,7 @@ impl App {
     }
 
     /* `E`: rename whatever group is selected, from either pane — `e` stays
-       the entry editor, so the case is what carries the target. */
+    the entry editor, so the case is what carries the target. */
     pub fn open_group_prompt_rename(&mut self) {
         let Some(group) = self.selected_group() else {
             self.say("no group here to rename");
@@ -3566,7 +3671,7 @@ impl App {
     }
 
     /* Enter on the group prompt: write through and autosave. Same single
-       must as the entry form — a nameless group is unreadable in the tree. */
+    must as the entry form — a nameless group is unreadable in the tree. */
     pub fn submit_group_prompt(&mut self) {
         let Some(prompt) = self.group_prompt.take() else {
             return;
@@ -3577,8 +3682,13 @@ impl App {
             return;
         }
         let result = match prompt.kind {
-            GroupPromptKind::New => self.session.add_group(self.group_cursor, &prompt.value).map(Some),
-            GroupPromptKind::Rename(id) => self.session.rename_group(id, &prompt.value).map(|()| None),
+            GroupPromptKind::New => self
+                .session
+                .add_group(self.group_cursor, &prompt.value)
+                .map(Some),
+            GroupPromptKind::Rename(id) => {
+                self.session.rename_group(id, &prompt.value).map(|()| None)
+            }
         };
         match result {
             Ok(new_id) => {
@@ -3607,8 +3717,8 @@ impl App {
     }
 
     /* `^p`: change the master password. Only on an open vault with a file
-       behind it — an unsaved vault has no password to change yet, and the
-       unlock screen is where that one is set. */
+    behind it — an unsaved vault has no password to change yet, and the
+    unlock screen is where that one is set. */
     pub fn open_rekey(&mut self) {
         let has_file = self.session.vault().is_some_and(|v| v.path().is_some());
         if !has_file {
@@ -3682,8 +3792,8 @@ impl App {
     }
 
     /* Enter on the prompt. Both boxes must agree, because the only check on a
-       new master password is that it was typed the same way twice: nothing
-       else in the app will ever be able to tell the user what it was. */
+    new master password is that it was typed the same way twice: nothing
+    else in the app will ever be able to tell the user what it was. */
     pub fn submit_rekey(&mut self) {
         let Some(rekey) = self.rekey.take() else {
             return;
@@ -3695,7 +3805,7 @@ impl App {
         }
         if rekey.password != rekey.confirm {
             /* The second box clears, not the first: the retype is what went
-               wrong, and making them type both again is a punishment. */
+            wrong, and making them type both again is a punishment. */
             let mut rekey = rekey;
             rekey.confirm.zeroize();
             rekey.field = RekeyField::Again;
@@ -3705,8 +3815,8 @@ impl App {
             return;
         }
         /* A key file is part of the key, so a rekey that forgets it writes a
-           vault the user cannot open. The path is the one the unlock screen
-           still holds; it names a file, not a secret. */
+        vault the user cannot open. The path is the one the unlock screen
+        still holds; it names a file, not a secret. */
         let key_path = self.unlock_keyfile.trim().to_string();
         let mut key_bytes: Option<Vec<u8>> = None;
         if !key_path.is_empty() {
@@ -3733,7 +3843,9 @@ impl App {
                 let removed = rekeyed.removed;
                 if removed > 0 {
                     let plural = if removed == 1 { "backup" } else { "backups" };
-                    said.push_str(&format!("  ·  {removed} {plural} under the old password deleted"));
+                    said.push_str(&format!(
+                        "  ·  {removed} {plural} under the old password deleted"
+                    ));
                 }
                 if let Some(why) = rekeyed.touch_id_off {
                     said.push_str(&format!("  ·  Touch ID off until a typed unlock  ·  {why}"));
@@ -3742,18 +3854,18 @@ impl App {
             }
             Err(e) => {
                 /* The vault still opens with the old password: `rekey` writes
-                   before it swaps. Say which one is live, because "failed" on
-                   a password change is the most frightening word in the app. */
+                before it swaps. Say which one is live, because "failed" on
+                a password change is the most frightening word in the app. */
                 self.error(format!("password unchanged  ·  {e}"));
             }
         }
     }
 
     /* `F`: everything on the entry the five fixed rows cannot show. Custom
-       fields and attachments were visible as a count ("2 more fields") and
-       nothing else, which is a dead end: people keep recovery codes and ssh
-       keys in attachments, and an entry you can see holds one but cannot open
-       is an entry you have to open another app for. */
+    fields and attachments were visible as a count ("2 more fields") and
+    nothing else, which is a dead end: people keep recovery codes and ssh
+    keys in attachments, and an entry you can see holds one but cannot open
+    is an entry you have to open another app for. */
     pub fn open_fields(&mut self) {
         let Some(id) = self.entry_cursor else {
             self.say("no entry here");
@@ -3772,7 +3884,8 @@ impl App {
     }
 
     fn extra_rows(&self, id: &EntryId) -> Vec<crate::vault::Extra> {
-        self.session.vault()
+        self.session
+            .vault()
             .and_then(|v| v.get_entry(id))
             .map(|e| crate::vault::extra_rows(&e))
             .unwrap_or_default()
@@ -3817,7 +3930,7 @@ impl App {
     }
 
     /* `y` on a field copies its value, through the same board and the same
-       auto-clear as a password: a recovery code is a secret too. */
+    auto-clear as a password: a recovery code is a secret too. */
     pub fn fields_copy(&mut self) {
         let what = match self.fields_selected() {
             Some(crate::vault::Extra::Field { name, value, .. }) => {
@@ -3834,8 +3947,8 @@ impl App {
     }
 
     /* `s` on an attachment writes it beside the vault, owner-only. The file
-       leaves the vault's protection the moment it lands, so the mode is set
-       from the first byte and the message says where it went. */
+    leaves the vault's protection the moment it lands, so the mode is set
+    from the first byte and the message says where it went. */
     // `g` on an attachment: hands it to ssh-agent with the entry's password as the passphrase. Explicit, so
     // it works without `ssh_agent = true`, and it is taken back out on lock.
     pub fn fields_to_agent(&mut self) {
@@ -3870,15 +3983,18 @@ impl App {
             )),
             Err(Extract::Gone) => self.error("the attachment is not there any more"),
             Err(Extract::NoFolder) => self.error("no vault file to write beside"),
-            Err(Extract::Exists(at)) => {
-                self.warn(format!("{} is already there  ·  move it first", at.display()))
+            Err(Extract::Exists(at)) => self.warn(format!(
+                "{} is already there  ·  move it first",
+                at.display()
+            )),
+            Err(Extract::Write(at, e)) => {
+                self.error(format!("cannot write {} · {e}", at.display()))
             }
-            Err(Extract::Write(at, e)) => self.error(format!("cannot write {} · {e}", at.display())),
         }
     }
 
     /* `a` adds a custom field, `f` attaches a file. Two boxes either way:
-       the name, then the value or the path it is read from. */
+    the name, then the value or the path it is read from. */
     pub fn fields_add(&mut self, from_file: bool) {
         if let Some(fields) = &mut self.fields {
             let mut add = AddField::default();
@@ -3892,8 +4008,15 @@ impl App {
             return;
         };
         let caret = add.caret;
-        let box_ = if add.on_value { &mut add.value } else { &mut add.name };
-        let at = box_.char_indices().nth(caret).map_or(box_.len(), |(at, _)| at);
+        let box_ = if add.on_value {
+            &mut add.value
+        } else {
+            &mut add.name
+        };
+        let at = box_
+            .char_indices()
+            .nth(caret)
+            .map_or(box_.len(), |(at, _)| at);
         box_.insert(at, c);
         add.caret += 1;
     }
@@ -3906,8 +4029,15 @@ impl App {
             return;
         }
         let caret = add.caret;
-        let box_ = if add.on_value { &mut add.value } else { &mut add.name };
-        let at = box_.char_indices().nth(caret - 1).map_or(box_.len(), |(at, _)| at);
+        let box_ = if add.on_value {
+            &mut add.value
+        } else {
+            &mut add.name
+        };
+        let at = box_
+            .char_indices()
+            .nth(caret - 1)
+            .map_or(box_.len(), |(at, _)| at);
         box_.remove(at);
         add.caret -= 1;
     }
@@ -3931,8 +4061,8 @@ impl App {
     }
 
     /* Enter on the add prompt. A field goes in protected, because a field
-       somebody added by hand to a password manager is more likely to be a
-       secret than not; a file is read from the path and goes in the same way. */
+    somebody added by hand to a password manager is more likely to be a
+    secret than not; a file is read from the path and goes in the same way. */
     pub fn fields_add_submit(&mut self) {
         let Some(fields) = &mut self.fields else {
             return;
@@ -3976,8 +4106,8 @@ impl App {
     }
 
     /* `D` removes the row under the cursor. No confirm and no undo slot: a
-       custom field is one `a` from being retyped, and an attachment is still
-       in whatever file it came from. The message says which it was. */
+    custom field is one `a` from being retyped, and an attachment is still
+    in whatever file it came from. The message says which it was. */
     pub fn fields_remove(&mut self) {
         let Some(row) = self.fields_selected().cloned() else {
             return;
@@ -4001,13 +4131,13 @@ impl App {
     }
 
     /* `>` and `<`: move a group one step in or out of the tree, the outliner
-       move. `X`/`V` can already do this in two keys plus a cursor trip, but
-       reorganising a vault is a dozen of those in a row, and the cursor trip
-       is the part that makes it a chore.
+    move. `X`/`V` can already do this in two keys plus a cursor trip, but
+    reorganising a vault is a dozen of those in a row, and the cursor trip
+    is the part that makes it a chore.
 
-       `>` makes the group a child of the sibling above it, which is the only
-       unambiguous reading of "indent" — there is exactly one group it could
-       mean. `<` makes it a sibling of its parent. */
+    `>` makes the group a child of the sibling above it, which is the only
+    unambiguous reading of "indent" — there is exactly one group it could
+    mean. `<` makes it a sibling of its parent. */
     pub fn reparent_group(&mut self, deeper: bool) {
         let Some(id) = self.group_cursor else {
             self.say("no group selected");
@@ -4031,10 +4161,10 @@ impl App {
     }
 
     /* `H`: the old versions an entry carries. Sennel writes none — its edits
-       leave no history record on purpose — but KeePassXC does, so an entry
-       imported from there arrives holding every password it ever had. The
-       docs used to say "use KeePassXC if you need to purge it", which is a
-       strange place for a password manager to leave somebody. */
+    leave no history record on purpose — but KeePassXC does, so an entry
+    imported from there arrives holding every password it ever had. The
+    docs used to say "use KeePassXC if you need to purge it", which is a
+    strange place for a password manager to leave somebody. */
     pub fn open_history(&mut self) {
         let Some(id) = self.entry_cursor else {
             self.say("no entry here");
@@ -4050,7 +4180,12 @@ impl App {
             self.say("no old versions  ·  Sennel's own edits keep none");
             return;
         }
-        self.history = Some(History { entry: id, rows, cursor: 0, reveal: false });
+        self.history = Some(History {
+            entry: id,
+            rows,
+            cursor: 0,
+            reveal: false,
+        });
     }
 
     pub fn close_history(&mut self) {
@@ -4075,9 +4210,9 @@ impl App {
     }
 
     /* `D` on the history screen: throw the lot away. All of it rather than
-       one version, because the reason to be here is "I do not want this vault
-       carrying my old passwords" and deleting them one at a time is a chore
-       that ends in the same place. */
+    one version, because the reason to be here is "I do not want this vault
+    carrying my old passwords" and deleting them one at a time is a chore
+    that ends in the same place. */
     pub fn clear_history(&mut self) {
         let Some(id) = self.history.as_ref().map(|h| h.entry) else {
             return;
@@ -4096,7 +4231,7 @@ impl App {
     }
 
     /* `!`: what is wrong with this vault's passwords. A list, not a score:
-       a number out of ten tells nobody which entry to open next. */
+    a number out of ten tells nobody which entry to open next. */
     pub fn open_audit(&mut self) {
         let Some(vault) = self.session.vault() else {
             self.say("no vault open");
@@ -4126,8 +4261,8 @@ impl App {
     }
 
     /* Enter on a row: close the audit and put the cursor on that entry, in
-       its own group. A list of problems nobody can act on from where they are
-       standing is a list nobody acts on. */
+    its own group. A list of problems nobody can act on from where they are
+    standing is a list nobody acts on. */
     pub fn audit_open_selected(&mut self) {
         let Some(audit) = &self.audit else {
             return;
@@ -4137,8 +4272,12 @@ impl App {
         };
         self.audit = None;
         /* Into the group that holds it, or the row would be filtered out of
-           a pane pointed somewhere else entirely. */
-        if let Some(parent) = self.session.vault().and_then(|v| v.parent_group_of_entry(&id)) {
+        a pane pointed somewhere else entirely. */
+        if let Some(parent) = self
+            .session
+            .vault()
+            .and_then(|v| v.parent_group_of_entry(&id))
+        {
             self.group_cursor = Some(parent);
         }
         self.search = None;
@@ -4224,7 +4363,7 @@ impl App {
     }
 
     /* The same word delete the other boxes take: back to the word start,
-       keeping whatever follows the caret. */
+    keeping whatever follows the caret. */
     pub fn group_prompt_kill_word(&mut self) {
         let Some(prompt) = &mut self.group_prompt else {
             return;
@@ -4234,15 +4373,18 @@ impl App {
             .char_indices()
             .nth(prompt.caret)
             .map_or(prompt.value.len(), |(at, _)| at);
-        let start = prompt.value[..at].trim_end().rfind(' ').map_or(0, |i| i + 1);
+        let start = prompt.value[..at]
+            .trim_end()
+            .rfind(' ')
+            .map_or(0, |i| i + 1);
         prompt.value.drain(start..at);
         prompt.caret = prompt.value[..start].chars().count();
     }
 
     /* `D` on the groups pane. A group goes to the bin with everything under
-       it, so the old "not empty, move its contents first" refusal is gone:
-       nothing is destroyed and `u` puts the whole subtree back. Inside the
-       bin the same key is the real delete, and it has no undo. */
+    it, so the old "not empty, move its contents first" refusal is gone:
+    nothing is destroyed and `u` puts the whole subtree back. Inside the
+    bin the same key is the real delete, and it has no undo. */
     pub fn ask_delete_group(&mut self) {
         let Some(group) = self.selected_group() else {
             self.say("no group here to delete");
@@ -4282,7 +4424,7 @@ impl App {
     }
 
     /* `X`: cut whatever the cursor is on. Groups pane cuts the group, entries
-       pane cuts the entry — one key, pane decides, the status bar says which. */
+    pane cuts the entry — one key, pane decides, the status bar says which. */
     pub fn cut_selected(&mut self) {
         match self.active_pane {
             Pane::Groups => self.cut_group(),
@@ -4329,8 +4471,8 @@ impl App {
     }
 
     /* `V`: paste the armed cut into the selected group, from either pane.
-       One-shot: the shelf empties on a successful paste, and a failed one
-       stays armed so a typo in the target costs nothing. */
+    One-shot: the shelf empties on a successful paste, and a failed one
+    stays armed so a typo in the target costs nothing. */
     pub fn paste_cut(&mut self) {
         match self.session.paste(self.group_cursor) {
             Ok(Cut::Entry(id)) => {
@@ -4353,7 +4495,7 @@ impl App {
     }
 
     /* Esc unwinds the shelf before its usual report: a mis-cut is one press
-       from undone, and the message says so rather than the key reading dead. */
+    from undone, and the message says so rather than the key reading dead. */
     pub fn drop_cut(&mut self) -> bool {
         if self.session.drop_cut().is_some() {
             self.say("cut dropped");
@@ -4366,12 +4508,8 @@ impl App {
     pub fn cut_note(&self) -> Option<String> {
         let vault = self.session.vault()?;
         match self.session.cut()? {
-            Cut::Entry(id) => vault
-                .get_entry(&id)
-                .map(|e| format!("cut: {}", e.title())),
-            Cut::Group(id) => vault
-                .get_group(&id)
-                .map(|g| format!("cut: {}", g.name)),
+            Cut::Entry(id) => vault.get_entry(&id).map(|e| format!("cut: {}", e.title())),
+            Cut::Group(id) => vault.get_group(&id).map(|g| format!("cut: {}", g.name)),
         }
     }
 
@@ -4426,13 +4564,13 @@ impl App {
     }
 
     /* ^s on the form: generate into the password box. Excludes ambiguous
-       glyphs so a password read off this screen can be typed elsewhere —
-       l1IO0 are the ones every font renders alike. Touching the box flips
-       the keep-latch, so submit writes what was generated. The shape follows
-       the session default: a passphrase there means a passphrase here. */
+    glyphs so a password read off this screen can be typed elsewhere —
+    l1IO0 are the ones every font renders alike. Touching the box flips
+    the keep-latch, so submit writes what was generated. The shape follows
+    the session default: a passphrase there means a passphrase here. */
     pub fn form_generate(&mut self) {
         /* Before the RNG: with no form open there is nowhere to put a fresh
-           secret, so drawing one burns randomness for nothing. */
+        secret, so drawing one burns randomness for nothing. */
         if self.form.is_none() {
             return;
         }
@@ -4488,8 +4626,8 @@ impl App {
 }
 
 /* Mutable access to one form box by field. Free function rather than a
-   method so the borrow of `form` stays local and the caret math above can
-   read another field's value without fighting the borrow checker. */
+method so the borrow of `form` stays local and the caret math above can
+read another field's value without fighting the borrow checker. */
 fn form_field_value(form: &mut Form, field: FormField) -> &mut String {
     match field {
         FormField::Title => &mut form.title,
@@ -4521,7 +4659,7 @@ pub mod tests {
     use super::*;
 
     /* Carried across frames, or ratatui recomputes the least scroll that
-       makes the selection visible and pins the cursor to the last row. */
+    makes the selection visible and pins the cursor to the last row. */
     #[test]
     fn scroll_holds_until_the_cursor_nears_an_edge() {
         // Fits: no scroll whatever the cursor does.
@@ -4538,14 +4676,16 @@ pub mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app
     }
 
     /* Copying with no entry under the cursor names the miss: the root group
-       holds no entries, so a fresh open has nothing to copy. */
+    holds no entries, so a fresh open has nothing to copy. */
     #[test]
     fn copying_with_no_entry_says_so() {
         let mut app = open_app();
@@ -4554,13 +4694,15 @@ pub mod tests {
     }
 
     /* An empty field is not copied: pushing an empty string would wipe
-       whatever the user is holding in the clipboard to protect nothing. */
+    whatever the user is holding in the clipboard to protect nothing. */
     #[test]
     fn copying_an_empty_field_names_the_field() {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "empty", "u", "", "", "").unwrap();
+        vault
+            .create_entry(&banks, "empty", "u", "", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.step_group(true);
@@ -4569,7 +4711,7 @@ pub mod tests {
     }
 
     /* Tests never touch the OS clipboard, so with no board wired the copy
-       reports the missing board instead of reaching for one. */
+    reports the missing board instead of reaching for one. */
     #[test]
     fn copying_without_a_board_says_so() {
         let mut app = open_app();
@@ -4579,7 +4721,7 @@ pub mod tests {
     }
 
     /* Tab moves the keys, never the cursors: leaving a pane must not lose
-       the row you were reading. */
+    the row you were reading. */
     #[test]
     fn tab_switches_panes_and_keeps_both_cursors() {
         let mut app = open_app();
@@ -4593,7 +4735,7 @@ pub mod tests {
     }
 
     /* g/G land on the ends of the live pane: the group tree for Groups,
-       the cursor group's entries for Entries. */
+    the cursor group's entries for Entries. */
     #[test]
     fn jumps_land_on_the_live_panes_ends() {
         let mut app = open_app();
@@ -4610,7 +4752,7 @@ pub mod tests {
     }
 
     /* A page moves by what the draw saw, which is what `viewport` carries:
-       stepping one row would make PgDn a slow `j`. */
+    stepping one row would make PgDn a slow `j`. */
     #[test]
     fn a_page_moves_by_the_drawn_rows() {
         let mut vault = Vault::new();
@@ -4632,7 +4774,7 @@ pub mod tests {
     }
 
     /* No timeout configured means no deadline at all: a fresh open must never
-       find itself locked on the next frame. */
+    find itself locked on the next frame. */
     #[test]
     fn without_a_timeout_the_vault_never_locks() {
         let mut app = open_app();
@@ -4643,8 +4785,8 @@ pub mod tests {
     }
 
     /* Idleness past the deadline drops the vault and returns behind the
-       password prompt. Dropping is the wipe; the assertion is that nothing
-       selectable survives. */
+    password prompt. Dropping is the wipe; the assertion is that nothing
+    selectable survives. */
     #[test]
     fn idleness_past_the_deadline_locks_and_wipes() {
         let mut app = open_app();
@@ -4658,9 +4800,13 @@ pub mod tests {
         assert!(app.group_cursor.is_none());
         assert!(app.entry_cursor.is_none());
         assert!(!app.session.is_dirty(), "a lock invented unsaved changes");
-        assert!(app.stage.contains("locked after 60 seconds idle"), "{}", app.stage);
+        assert!(
+            app.stage.contains("locked after 60 seconds idle"),
+            "{}",
+            app.stage
+        );
         /* And once the flash has been read the header says locked, not the
-           "ready" the open vault left behind. */
+        "ready" the open vault left behind. */
         app.expire_now();
         assert_eq!(app.stage, "locked");
     }
@@ -4671,16 +4817,17 @@ pub mod tests {
         let mut app = open_app();
         app.set_lock_timeout(60);
         /* What a six-hour suspend leaves behind: no monotonic time passed at
-           all, six hours of wall clock did. */
+        all, six hours of wall clock did. */
         app.session.last_activity = Instant::now();
-        app.session.last_activity_wall = std::time::SystemTime::now() - Duration::from_secs(6 * 3600);
+        app.session.last_activity_wall =
+            std::time::SystemTime::now() - Duration::from_secs(6 * 3600);
         app.check_idle();
         assert_eq!(app.view, View::Unlock, "the vault slept through the lock");
         assert!(!app.session.is_open(), "the secrets survived the suspend");
     }
 
     /* And the other way, so a clock set backwards cannot hold a vault open:
-       the monotonic reading alone is past the deadline. */
+    the monotonic reading alone is past the deadline. */
     #[test]
     fn a_backwards_wall_clock_does_not_defer_the_lock() {
         let mut app = open_app();
@@ -4688,12 +4835,16 @@ pub mod tests {
         app.session.last_activity = Instant::now() - Duration::from_secs(61);
         app.session.last_activity_wall = std::time::SystemTime::now() + Duration::from_secs(3600);
         app.check_idle();
-        assert_eq!(app.view, View::Unlock, "a clock change outlasted the deadline");
+        assert_eq!(
+            app.view,
+            View::Unlock,
+            "a clock change outlasted the deadline"
+        );
     }
 
     /* The typed vault file outlives an auto-lock: it names a file, not a
-       secret, and retyping a path to unlock the same or another vault after
-       an idle lock would be overhead for nothing. */
+    secret, and retyping a path to unlock the same or another vault after
+    an idle lock would be overhead for nothing. */
     #[test]
     fn the_file_box_survives_the_idle_lock() {
         let mut app = open_app();
@@ -4709,7 +4860,7 @@ pub mod tests {
     }
 
     /* Any keypress restarts the clock: activity just before the deadline is
-       what keeps a working session open. */
+    what keeps a working session open. */
     #[test]
     fn a_keypress_defers_the_lock() {
         let mut app = open_app();
@@ -4722,7 +4873,7 @@ pub mod tests {
     }
 
     /* Zero disables rather than arming a zero-second deadline, which would
-       lock on the very next frame and read as the unlock failing. */
+    lock on the very next frame and read as the unlock failing. */
     #[test]
     fn zero_timeout_is_off_not_instant() {
         let mut app = open_app();
@@ -4735,7 +4886,7 @@ pub mod tests {
     }
 
     /* Opening lands on the root with a valid selection, or the first keypress
-       acts on nothing and reads as broken. */
+    acts on nothing and reads as broken. */
     #[test]
     fn opening_a_vault_selects_root_and_snaps() {
         let app = open_app();
@@ -4746,7 +4897,7 @@ pub mod tests {
     }
 
     /* The tree is pre-order with depths: the groups pane draws straight from
-       this, indent included. */
+    this, indent included. */
     #[test]
     fn the_group_tree_walks_pre_order_with_depths() {
         let app = open_app();
@@ -4757,23 +4908,31 @@ pub mod tests {
             .iter()
             .map(|(id, d)| (vault.get_group(id).unwrap().name.clone(), *d))
             .collect();
-        assert_eq!(names, vec![
-            ("Root".to_string(), 0),
-            ("Banks".to_string(), 1)
-        ]);
+        assert_eq!(
+            names,
+            vec![("Root".to_string(), 0), ("Banks".to_string(), 1)]
+        );
         assert_eq!(app.group_cursor, Some(root));
     }
 
     /* Deleting the selected group must not strand the cursor: snap falls back
-       to the root, which always exists. */
+    to the root, which always exists. */
     #[test]
     fn snap_recovers_the_group_cursor_after_a_delete() {
         let mut app = open_app();
         let banks = app.group_tree()[1].0;
         app.group_cursor = Some(banks);
         // Straight to the bin, contents and all, which is what `D` now does.
-        app.session.vault_mut().unwrap().recycle_group(&banks).unwrap();
-        app.session.vault_mut().unwrap().delete_group_tree(&banks).unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .recycle_group(&banks)
+            .unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .delete_group_tree(&banks)
+            .unwrap();
         app.snap();
         let root = app.session.vault().unwrap().root_id();
         assert_eq!(app.group_cursor, Some(root));
@@ -4781,7 +4940,7 @@ pub mod tests {
     }
 
     /* Moving across groups drops the entry cursor onto the new group's first
-       entry: the old id names another group's row. */
+    entry: the old id names another group's row. */
     #[test]
     fn stepping_groups_reselects_entries_in_the_new_group() {
         let mut app = open_app();
@@ -4802,7 +4961,7 @@ pub mod tests {
     }
 
     /* An entry cursor from another group selects nothing: otherwise `e` would
-       edit a row that is not on screen. */
+    edit a row that is not on screen. */
     #[test]
     fn an_entry_of_another_group_is_not_selected() {
         let mut app = open_app();
@@ -4816,14 +4975,13 @@ pub mod tests {
     }
 
     /* Unique per call, not just per process: the harness runs tests in
-       parallel, and two sharing a path would delete each other's file. */
+    parallel, and two sharing a path would delete each other's file. */
     pub(crate) fn temp_path(tag: &str) -> TempPath {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TempPath(std::env::temp_dir().join(format!(
-            "sennel-test-{tag}-{}-{n}.kdbx",
-            std::process::id()
-        )))
+        TempPath(
+            std::env::temp_dir().join(format!("sennel-test-{tag}-{}-{n}.kdbx", std::process::id())),
+        )
     }
 
     pub(crate) struct TempPath(pub std::path::PathBuf);
@@ -4845,8 +5003,8 @@ pub mod tests {
     }
 
     /* The happy path: the browser opens, and the typed bytes are gone from
-       every buffer the UI held. The retained key inside the vault is the only
-       copy, and it zeroizes on drop. */
+    every buffer the UI held. The retained key inside the vault is the only
+    copy, and it zeroizes on drop. */
     #[test]
     fn right_password_unlocks_and_wipes_the_buffers() {
         let (mut app, _tmp) = locked_app_with_db("correct horse");
@@ -4855,15 +5013,18 @@ pub mod tests {
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
         assert!(app.session.is_open());
-        assert!(pw.iter().all(|b| *b == 0), "password buffer survived unlock");
+        assert!(
+            pw.iter().all(|b| *b == 0),
+            "password buffer survived unlock"
+        );
         assert!(app.unlock_password.is_empty());
         assert!(app.unlock_confirm.is_empty());
         assert_eq!(app.stage, "unlocked 0 entries");
     }
 
     /* A reveal stops at the door: unlocking (or failing to) puts the next
-       lock screen back on bullets, so a plain-text peek never becomes the
-       default view of the password that follows. */
+    lock screen back on bullets, so a plain-text peek never becomes the
+    default view of the password that follows. */
     #[test]
     fn reveal_resets_after_unlock_attempts() {
         let (mut app, _tmp) = locked_app_with_db("correct horse");
@@ -4884,7 +5045,7 @@ pub mod tests {
     }
 
     /* A wrong password keeps the lock and says the next step, and still wipes
-       the typed bytes: a failed guess is exactly what must not linger. */
+    the typed bytes: a failed guess is exactly what must not linger. */
     #[test]
     fn wrong_password_stays_locked_and_says_so() {
         let (mut app, _tmp) = locked_app_with_db("correct horse");
@@ -4897,7 +5058,7 @@ pub mod tests {
     }
 
     /* A missing file is a create, not an error: a matching confirm writes the
-       database and opens it. */
+    database and opens it. */
     #[test]
     fn missing_file_creates_when_the_confirm_matches() {
         let tmp = temp_path("create");
@@ -4914,7 +5075,7 @@ pub mod tests {
     }
 
     /* A mismatched confirm writes nothing: one stray keystroke must not mint
-       a database the user can never open again. */
+    a database the user can never open again. */
     #[test]
     fn missing_file_refuses_a_mismatched_confirm() {
         let tmp = temp_path("mismatch");
@@ -4929,7 +5090,7 @@ pub mod tests {
     }
 
     /* No --db and no config: the screen says where the answer lives instead
-       of failing on an empty path. */
+    of failing on an empty path. */
     #[test]
     fn no_database_configured_says_what_to_do() {
         let mut app = App::new();
@@ -4940,7 +5101,7 @@ pub mod tests {
     }
 
     /* Typing lands behind a char-indexed caret: a byte index splits an
-       accented password and `String::insert` panics on it. */
+    accented password and `String::insert` panics on it. */
     #[test]
     fn unlock_typing_moves_a_char_caret() {
         let mut app = App::new();
@@ -4969,8 +5130,8 @@ pub mod tests {
     }
 
     /* Tab walks three boxes, four in create mode, and lands behind the text:
-       an edit to a prefilled key-file path starts at its end. The file box
-       joins the cycle, so switching vaults is a Tab from the password. */
+    an edit to a prefilled key-file path starts at its end. The file box
+    joins the cycle, so switching vaults is a Tab from the password. */
     #[test]
     fn tab_walks_three_boxes_four_when_creating() {
         let mut app = App::new();
@@ -4988,7 +5149,11 @@ pub mod tests {
         app.next_unlock_field(true);
         assert_eq!(app.unlock_field, UnlockField::KeyFile);
         app.next_unlock_field(true);
-        assert_eq!(app.unlock_field, UnlockField::Confirm, "create joins confirm");
+        assert_eq!(
+            app.unlock_field,
+            UnlockField::Confirm,
+            "create joins confirm"
+        );
         app.unlock_keyfile = "/keys/k".into();
         app.unlock_field = UnlockField::Password;
         app.next_unlock_field(true);
@@ -4997,8 +5162,8 @@ pub mod tests {
     }
 
     /* Enter on the file box re-points the session: a second vault is a Tab
-       and a path away, no restart needed. The typed file box is preserved
-       across auto-locks, which is what makes the switch stick. */
+    and a path away, no restart needed. The typed file box is preserved
+    across auto-locks, which is what makes the switch stick. */
     #[test]
     fn the_file_box_points_the_session_at_another_vault() {
         let (mut app, tmp) = locked_app_with_db("pw");
@@ -5023,8 +5188,8 @@ pub mod tests {
     }
 
     /* A `~` path types like it reads: the file box expands it against HOME
-       the way the config file does, so an existing vault is found rather
-       than read as a new file literally named `~`. */
+    the way the config file does, so an existing vault is found rather
+    than read as a new file literally named `~`. */
     #[test]
     fn the_file_box_expands_a_home_path() {
         let (mut app, _tmp) = locked_app_with_db("pw");
@@ -5042,13 +5207,13 @@ pub mod tests {
             "tilda stayed literal"
         );
         /* Whatever is_file says locally, it must not read as create-only
-           when HOME-side path exists; here it is simply expanded. */
+        when HOME-side path exists; here it is simply expanded. */
         assert_eq!(app.unlock_field, UnlockField::Password, "focus went home");
     }
 
     /* The reported bug: a path typed into the file box but Tab-passed (never
-       Enter-committed) still names the vault. Unlock applies it off the box
-       instead of answering "no database configured". */
+    Enter-committed) still names the vault. Unlock applies it off the box
+    instead of answering "no database configured". */
     #[test]
     fn a_path_typed_but_unconfirmed_still_unlocks() {
         let (mut app, tmp) = locked_app_with_db("pw");
@@ -5089,11 +5254,14 @@ pub mod tests {
         app.unlock_file = missing.0.display().to_string();
         app.unlock_field = UnlockField::File;
         app.next_unlock_field(true);
-        assert!(app.unlock_new, "a missing file still read as an existing vault");
+        assert!(
+            app.unlock_new,
+            "a missing file still read as an existing vault"
+        );
     }
 
     /* Enter on the password box skips the file box's own check, so unlock
-       must refuse `~user` itself instead of opening the previous vault. */
+    must refuse `~user` itself instead of opening the previous vault. */
     #[test]
     fn another_users_home_refuses_the_unlock() {
         let (mut app, _tmp) = locked_app_with_db("pw");
@@ -5107,8 +5275,8 @@ pub mod tests {
     }
 
     /* With no configured vault the file box is focused first: the natural
-       first action is to point Sennel at a database, and typing into the
-       password box by mistake is what made an existing vault unreadable. */
+    first action is to point Sennel at a database, and typing into the
+    password box by mistake is what made an existing vault unreadable. */
     #[test]
     fn no_configured_vault_starts_on_the_file_box() {
         let mut app = App::new();
@@ -5123,7 +5291,7 @@ pub mod tests {
     }
 
     /* The file box prefill survives a lock–unlock round trip, so the second
-       unlock does not have to retype the path. */
+    unlock does not have to retype the path. */
     #[test]
     fn the_file_box_prefills_from_the_config_once() {
         let mut app = App::new();
@@ -5155,7 +5323,7 @@ pub mod tests {
     }
 
     /* Hidden by default: the detail pane is what the eye lands on. Showing
-       says so, so the key never reads as dead. */
+    says so, so the key never reads as dead. */
     #[test]
     fn the_password_starts_hidden_and_showing_says_so() {
         use crate::vault::Vault;
@@ -5178,8 +5346,8 @@ pub mod tests {
     }
 
     /* Below the detail pane's width there is nowhere for a revealed password
-       to appear, so `*` refuses and names the way to one instead of claiming
-       a reveal the screen cannot show. */
+    to appear, so `*` refuses and names the way to one instead of claiming
+    a reveal the screen cannot show. */
     #[test]
     fn star_refuses_where_no_detail_fits() {
         let mut app = open_app();
@@ -5196,13 +5364,17 @@ pub mod tests {
     }
 
     /* Enter opens what the cursor is on: a group hands over its entries, an
-       entry opens the popup that is the only detail below 100 columns. */
+    entry opens the popup that is the only detail below 100 columns. */
     #[test]
     fn enter_opens_the_group_then_the_entry() {
         let mut app = open_app();
         app.step_group(true); // onto Banks
         app.open_selection();
-        assert_eq!(app.active_pane, Pane::Entries, "enter did not open the group");
+        assert_eq!(
+            app.active_pane,
+            Pane::Entries,
+            "enter did not open the group"
+        );
         assert!(!app.detail, "enter opened a popup from the groups pane");
         app.open_selection();
         assert!(app.detail, "enter did not open the entry");
@@ -5213,8 +5385,8 @@ pub mod tests {
     }
 
     /* An unlocked session says which vault it is in — the header's resting
-       stage and the window title both name the file, since pointing one
-       session at any vault is the whole feature. */
+    stage and the window title both name the file, since pointing one
+    session at any vault is the whole feature. */
     #[test]
     fn an_open_vault_names_itself() {
         let (mut app, tmp) = locked_app_with_db("pw");
@@ -5235,7 +5407,7 @@ pub mod tests {
     }
 
     /* A failure must not render as a success: the flash carries a level, and
-       it goes back to Info once the message has been read. */
+    it goes back to Info once the message has been read. */
     #[test]
     fn failures_flash_at_their_own_level() {
         let mut app = App::new();
@@ -5249,7 +5421,7 @@ pub mod tests {
     }
 
     /* `^l` is the idle lock on purpose: the same wipe, and nothing about the
-       open vault — a form, a kept filter, an armed cut — survives it. */
+    open vault — a form, a kept filter, an armed cut — survives it. */
     #[test]
     fn lock_now_wipes_what_the_idle_lock_wipes() {
         let mut app = open_app();
@@ -5265,7 +5437,7 @@ pub mod tests {
         assert!(app.session.cut().is_none(), "the cut outlived the vault");
         assert!(app.search.is_none(), "the filter outlived the vault");
         /* Earlier flashes are still queued, so drain them: the header lands
-           on the resting stage, which the lock has taken back to "locked". */
+        on the resting stage, which the lock has taken back to "locked". */
         for _ in 0..QUEUE + 2 {
             app.expire_now();
         }
@@ -5276,8 +5448,8 @@ pub mod tests {
     }
 
     /* The app side of the same race: an autosave that is refused leaves the
-       work in memory, says so in RED, and arms `^s` as the deliberate
-       override. Nothing is lost without somebody choosing to lose it. */
+    work in memory, says so in RED, and arms `^s` as the deliberate
+    override. Nothing is lost without somebody choosing to lose it. */
     #[test]
     fn a_changed_file_arms_the_override_instead_of_overwriting() {
         let (mut app, tmp) = locked_app_with_db("pw");
@@ -5288,7 +5460,9 @@ pub mod tests {
         // Somebody else writes the file while this session holds it.
         let mut theirs = Vault::open(&tmp.0, "pw", None).unwrap();
         let root = theirs.root_id();
-        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "added elsewhere", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
 
         app.open_add_form();
@@ -5318,9 +5492,12 @@ pub mod tests {
     #[test]
     fn a_save_to_a_hardware_keyed_vault_waits_for_the_frame_that_asks_for_the_touch() {
         let tmp = temp_path("keyed");
-        Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
+        Vault::new()
+            .save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0))
+            .unwrap();
         let mut app = open_app();
-        app.session.open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        app.session
+            .open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
         let root = app.session.vault().unwrap().root_id();
         let vault = app.session.vault_mut().unwrap();
         vault.create_entry(&root, "one", "", "", "", "").unwrap();
@@ -5330,7 +5507,11 @@ pub mod tests {
         app.persist();
         assert!(app.has_pending());
         assert!(app.stage.contains("touch your key"), "{}", app.stage);
-        let on_disk = || Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap().entry_count();
+        let on_disk = || {
+            Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0))
+                .unwrap()
+                .entry_count()
+        };
         assert_eq!(on_disk(), 0, "written before the touch was asked for");
 
         app.flush_pending();
@@ -5346,7 +5527,10 @@ pub mod tests {
         app.say("copied username");
         app.defer_for_touch(Pending::Save);
         assert_eq!(app.stage, "touch your key to save…");
-        assert_eq!(app.waiting.front().map(|(m, _)| m.as_str()), Some("copied username"));
+        assert_eq!(
+            app.waiting.front().map(|(m, _)| m.as_str()),
+            Some("copied username")
+        );
 
         app.defer_for_touch(Pending::Merge);
         assert!(app.stage.contains("twice"), "{}", app.stage);
@@ -5385,9 +5569,12 @@ pub mod tests {
     #[test]
     fn locking_drops_a_save_that_was_waiting_for_the_key() {
         let tmp = temp_path("keyed-lock");
-        Vault::new().save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap();
+        Vault::new()
+            .save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0))
+            .unwrap();
         let mut app = open_app();
-        app.session.open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+        app.session
+            .open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
         app.persist();
         assert!(app.has_pending());
         app.lock_now();
@@ -5407,7 +5594,9 @@ pub mod tests {
 
         let mut theirs = Vault::open(&tmp.0, "pw", None).unwrap();
         let root = theirs.root_id();
-        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "added elsewhere", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
         app.expire_now();
         app.open_add_form();
@@ -5421,14 +5610,18 @@ pub mod tests {
             app.expire_now();
         }
         app.merge_vault();
-        assert!(!app.session.in_conflict() && !app.working(), "{}", app.stage);
+        assert!(
+            !app.session.in_conflict() && !app.working(),
+            "{}",
+            app.stage
+        );
         assert!(app.stage.contains("merged"), "{}", app.stage);
         assert_eq!(Vault::open(&tmp.0, "pw", None).unwrap().entry_count(), 2);
         assert_eq!(app.session.vault().unwrap().entry_count(), 2);
     }
 
     /* `^s` with nothing to do says so rather than going quiet — it is the key
-       every hand presses, so it must always answer. */
+    every hand presses, so it must always answer. */
     #[test]
     fn save_now_answers_even_when_there_is_nothing_to_save() {
         let (mut app, _tmp) = locked_app_with_db("pw");
@@ -5444,7 +5637,7 @@ pub mod tests {
     }
 
     /* A click is a selection and a focus change, the way it is everywhere
-       else; the wheel moves whichever pane it is over. */
+    else; the wheel moves whichever pane it is over. */
     #[test]
     fn a_click_selects_the_row_it_landed_on() {
         let mut app = open_app();
@@ -5480,11 +5673,15 @@ pub mod tests {
             "narrowing widened the list"
         );
         app.toggle_search_scope();
-        assert_eq!(app.entry_rows().len(), global, "the scope did not come back");
+        assert_eq!(
+            app.entry_rows().len(),
+            global,
+            "the scope did not come back"
+        );
     }
 
     /* The whole loop through the form: a printed secret typed into the otp
-       box becomes a working code on the entry, and the flash says so. */
+    box becomes a working code on the entry, and the flash says so. */
     #[test]
     fn the_form_gives_an_entry_a_working_one_time_code() {
         let mut app = open_app();
@@ -5510,7 +5707,7 @@ pub mod tests {
     }
 
     /* A seed that cannot mint a code never reaches the vault: the form stays
-       open on the box that is wrong, with what was typed still in it. */
+    open on the box that is wrong, with what was typed still in it. */
     #[test]
     fn a_bad_seed_keeps_the_form_open() {
         let mut app = open_app();
@@ -5527,11 +5724,14 @@ pub mod tests {
         assert_eq!(form.otp, "nope!!", "the typed text was thrown away");
         assert_eq!(app.level, Level::Warn);
         let entry = app.selected_entry().unwrap();
-        assert!(crate::vault::raw_otp(&entry).is_none(), "a bad seed was stored");
+        assert!(
+            crate::vault::raw_otp(&entry).is_none(),
+            "a bad seed was stored"
+        );
     }
 
     /* Untouched keeps the stored seed; cleared on purpose removes it — the
-       password box's latch, applied to the other secret in the form. */
+    password box's latch, applied to the other secret in the form. */
     #[test]
     fn an_untouched_otp_box_keeps_the_code_and_a_cleared_one_drops_it() {
         let mut app = open_app();
@@ -5539,15 +5739,25 @@ pub mod tests {
         app.switch_pane();
         let id = app.entry_cursor.unwrap();
         let url = crate::vault::totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
-        app.session.vault_mut().unwrap().set_otp(&id, Some(&url)).unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .set_otp(&id, Some(&url))
+            .unwrap();
 
         // An edit that never looks at the box keeps it.
         app.open_edit_form();
-        assert!(app.form.as_ref().unwrap().had_otp, "the form did not see the code");
+        assert!(
+            app.form.as_ref().unwrap().had_otp,
+            "the form did not see the code"
+        );
         app.form_insert('x'); // types into the title
         app.submit_form();
         let entry = app.selected_entry().unwrap();
-        assert!(crate::vault::raw_otp(&entry).is_some(), "the code was dropped");
+        assert!(
+            crate::vault::raw_otp(&entry).is_some(),
+            "the code was dropped"
+        );
 
         // Touching it and leaving it empty removes it.
         app.open_edit_form();
@@ -5563,8 +5773,8 @@ pub mod tests {
     }
 
     /* Pointing the session at a vault used to last exactly as long as the
-       session. A vault that opens is written into the config, once, and the
-       flash says so rather than editing a dotfile in silence. */
+    session. A vault that opens is written into the config, once, and the
+    flash says so rather than editing a dotfile in silence. */
     #[test]
     fn an_opened_vault_becomes_the_default_for_next_time() {
         let (mut app, tmp) = locked_app_with_db("pw");
@@ -5579,12 +5789,15 @@ pub mod tests {
 
         let text = std::fs::read_to_string(&config.0).unwrap();
         assert!(text.contains(&tmp.0.display().to_string()), "{text}");
-        assert!(text.contains("lock_timeout = 90"), "the file was rewritten: {text}");
+        assert!(
+            text.contains("lock_timeout = 90"),
+            "the file was rewritten: {text}"
+        );
         app.expire_now();
         assert!(app.stage.contains("remembered"), "{}", app.stage);
 
         /* Already the configured vault: nothing is written and nothing is
-           said, or every unlock would narrate a file that did not change. */
+        said, or every unlock would narrate a file that did not change. */
         let before = std::fs::metadata(&config.0).unwrap().len();
         app.lock_now();
         let mut password = b"pw".to_vec();
@@ -5593,7 +5806,7 @@ pub mod tests {
     }
 
     /* The picker walks a real directory: folders step in, vaults are chosen,
-       and choosing one points the session at it and moves to the password. */
+    and choosing one points the session at it and moves to the password. */
     #[test]
     fn the_picker_walks_folders_and_chooses_a_vault() {
         let dir = std::env::temp_dir().join(format!("sennel-pick-{}", std::process::id()));
@@ -5625,7 +5838,11 @@ pub mod tests {
         app.browse_choose();
         assert!(app.browse.is_none(), "choosing left the picker open");
         assert_eq!(app.db_path, Some(dir.join("Vaults").join("personal.kdbx")));
-        assert!(app.unlock_file.ends_with("personal.kdbx"), "{}", app.unlock_file);
+        assert!(
+            app.unlock_file.ends_with("personal.kdbx"),
+            "{}",
+            app.unlock_file
+        );
         assert_eq!(app.unlock_field, UnlockField::Password);
 
         // And ← climbs back out of a folder.
@@ -5637,26 +5854,37 @@ pub mod tests {
     }
 
     /* The claim in the README, pinned: a lock leaves no typed secret behind,
-       and `String::clear` — which only moves the length — is not enough.
+    and `String::clear` — which only moves the length — is not enough.
 
-       `App` still owns these two after the lock, so this reads a live
-       buffer rather than a freed one. That is why this test has always
-       worked where the form's did not: zeroize empties the String but keeps
-       the capacity, and nothing else is writing to it. */
+    `App` still owns these two after the lock, so this reads a live
+    buffer rather than a freed one. That is why this test has always
+    worked where the form's did not: zeroize empties the String but keeps
+    the capacity, and nothing else is writing to it. */
     #[test]
     fn locking_zeroizes_the_typed_secrets() {
         let mut app = open_app();
         app.unlock_password = "master-secret".repeat(4);
         app.unlock_confirm = "master-secret".repeat(4);
         let boxes = [
-            (app.unlock_password.as_ptr(), app.unlock_password.capacity(), "password"),
-            (app.unlock_confirm.as_ptr(), app.unlock_confirm.capacity(), "confirm"),
+            (
+                app.unlock_password.as_ptr(),
+                app.unlock_password.capacity(),
+                "password",
+            ),
+            (
+                app.unlock_confirm.as_ptr(),
+                app.unlock_confirm.capacity(),
+                "confirm",
+            ),
         ];
         app.lock_now();
         for (ptr, cap, which) in boxes {
             // SAFETY: still owned by `app`, and the capacity outlives zeroize.
             let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
-            assert!(bytes.iter().all(|b| *b == 0), "the {which} box survived the lock");
+            assert!(
+                bytes.iter().all(|b| *b == 0),
+                "the {which} box survived the lock"
+            );
         }
         assert!(app.unlock_password.is_empty());
         assert!(app.unlock_confirm.is_empty());
@@ -5683,23 +5911,25 @@ pub mod tests {
     }
 
     /* Same promise for the three modal boxes that hold typed secrets: the
-       entry form, the change-password prompt and the add-a-field prompt.
+    entry form, the change-password prompt and the add-a-field prompt.
 
-       Checked on a live value through `wipe`, which is what each `Drop`
-       calls. This test used to drop the form and read the freed allocation,
-       and passed with `zeroize` swapped for `clear` — the allocator writes
-       its own bookkeeping into a freed block, so the secret is usually gone
-       from it whether or not anybody wiped it. The lock test above reads a
-       buffer `App` still owns, which is why that one has always worked. */
+    Checked on a live value through `wipe`, which is what each `Drop`
+    calls. This test used to drop the form and read the freed allocation,
+    and passed with `zeroize` swapped for `clear` — the allocator writes
+    its own bookkeeping into a freed block, so the secret is usually gone
+    from it whether or not anybody wiped it. The lock test above reads a
+    buffer `App` still owns, which is why that one has always worked. */
     #[test]
     fn the_modal_boxes_zeroize_what_was_typed_in_them() {
         /* Every byte of the capacity, not a substring search: on a live
-           buffer there is nothing else writing to it, so the strict check is
-           available and says more. */
+        buffer there is nothing else writing to it, so the strict check is
+        available and says more. */
         fn wiped(ptr: *const u8, cap: usize) -> bool {
             // SAFETY: the value is still owned and still allocated; `wipe`
             // empties the String but keeps its capacity.
-            unsafe { std::slice::from_raw_parts(ptr, cap) }.iter().all(|b| *b == 0)
+            unsafe { std::slice::from_raw_parts(ptr, cap) }
+                .iter()
+                .all(|b| *b == 0)
         }
 
         let mut app = open_app();
@@ -5722,7 +5952,7 @@ pub mod tests {
         assert!(app.form.as_ref().unwrap().title.is_empty());
 
         /* The change-password prompt holds the only plaintext copy of what is
-           about to become the key to everything. */
+        about to become the key to everything. */
         let mut rekey = Rekey::default();
         rekey.password = "new-master-secret".repeat(4);
         rekey.confirm = "new-master-secret".repeat(4);
@@ -5745,7 +5975,7 @@ pub mod tests {
     }
 
     /* `^t` walks the shipped palettes and writes the landing spot back, so a
-       theme picked by looking at it survives the session that picked it. */
+    theme picked by looking at it survives the session that picked it. */
     #[test]
     fn cycling_the_theme_remembers_where_it_landed() {
         let mut app = open_app();
@@ -5761,10 +5991,13 @@ pub mod tests {
 
         let text = std::fs::read_to_string(&config.0).unwrap();
         assert!(text.contains(&format!("theme = \"{landed}\"")), "{text}");
-        assert!(text.contains("lock_timeout = 90"), "the file was rewritten: {text}");
+        assert!(
+            text.contains("lock_timeout = 90"),
+            "the file was rewritten: {text}"
+        );
 
         /* Round the houses and back: the walk covers every shipped palette
-           and returns, so no theme is reachable only by editing a file. */
+        and returns, so no theme is reachable only by editing a file. */
         let mut seen = vec![app.theme.name()];
         // One press per remaining palette lands back where it started.
         for _ in 1..crate::theme::BUILT_INS.len() {
@@ -5780,8 +6013,8 @@ pub mod tests {
     }
 
     /* A `[colors]` table outlives the walk: `^t` writes the base palette down
-       and the overrides go on repainting it, so the screen the user stopped
-       on is not the screen the next launch draws unless they are told. */
+    and the overrides go on repainting it, so the screen the user stopped
+    on is not the screen the next launch draws unless they are told. */
     #[test]
     fn cycling_a_repainted_theme_says_what_is_still_repainting_it() {
         let mut app = open_app();
@@ -5798,7 +6031,7 @@ pub mod tests {
     }
 
     /* --no-config asked for the file to be left out of the run, so the theme
-       still switches and nothing is written. */
+    still switches and nothing is written. */
     #[test]
     fn cycling_without_a_config_switches_and_says_nothing_about_saving() {
         let mut app = open_app();
@@ -5811,8 +6044,8 @@ pub mod tests {
     /* ---- Entry expiry ---- */
 
     /* One spelling, checked before anything is written — the same rule the
-       seed follows, because a date that cannot be read must not leave half an
-       entry behind. */
+    seed follows, because a date that cannot be read must not leave half an
+    entry behind. */
     #[test]
     fn the_expires_box_takes_a_date_and_refuses_anything_else() {
         let mut app = open_app();
@@ -5820,15 +6053,22 @@ pub mod tests {
         let id = app.entry_cursor.unwrap();
 
         app.open_edit_form();
-        assert_eq!(app.form.as_ref().unwrap().expires, "", "a fresh entry had one");
+        assert_eq!(
+            app.form.as_ref().unwrap().expires,
+            "",
+            "a fresh entry had one"
+        );
         app.form.as_mut().unwrap().expires = "2030-06-01".into();
         app.submit_form();
         assert!(app.form.is_none(), "the form stayed open: {}", app.stage);
 
         /* End of the named day, not its start: an expiry of the 1st should
-           not go off at midnight that morning. */
+        not go off at midnight that morning. */
         let at = crate::vault::expires_at(&app.session.vault().unwrap().get_entry(&id).unwrap());
-        assert_eq!(at.map(|a| a.to_string()), Some("2030-06-01 23:59:59".to_string()));
+        assert_eq!(
+            at.map(|a| a.to_string()),
+            Some("2030-06-01 23:59:59".to_string())
+        );
 
         // It prefills as a date, so a second save does not move it.
         app.open_edit_form();
@@ -5851,13 +6091,20 @@ pub mod tests {
         );
 
         /* Anything else keeps the form open on the box that is wrong, rather
-           than guessing between 03/04 and 04/03. */
+        than guessing between 03/04 and 04/03. */
         for bad in ["01/06/2030", "June 2030", "2030-13-01", "tomorrow"] {
             app.open_edit_form();
             app.form.as_mut().unwrap().expires = bad.into();
             app.submit_form();
-            let form = app.form.as_ref().unwrap_or_else(|| panic!("{bad} was accepted"));
-            assert_eq!(form.field, FormField::Expires, "{bad} left the wrong box focused");
+            let form = app
+                .form
+                .as_ref()
+                .unwrap_or_else(|| panic!("{bad} was accepted"));
+            assert_eq!(
+                form.field,
+                FormField::Expires,
+                "{bad} left the wrong box focused"
+            );
             app.cancel_form();
         }
         assert_eq!(
@@ -5868,7 +6115,7 @@ pub mod tests {
     }
 
     /* An expired credential is a decision its owner already made, so it sits
-       above `weak`, which is only an estimate disagreeing with them. */
+    above `weak`, which is only an estimate disagreeing with them. */
     #[test]
     fn the_audit_names_expired_entries() {
         use chrono::{Duration, Utc};
@@ -5876,10 +6123,18 @@ pub mod tests {
         let root = app.root_id();
         let vault = app.session.vault_mut().unwrap();
         let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
-        let stale = vault.create_entry(&root, "cert", "u", strong, "", "").unwrap();
-        let live = vault.create_entry(&root, "other", "u", "Zt4&pLr9Wd6*Ks1Xq7!vm2", "", "").unwrap();
-        vault.set_expiry(&stale, Some((Utc::now() - Duration::days(1)).naive_utc())).unwrap();
-        vault.set_expiry(&live, Some((Utc::now() + Duration::days(1)).naive_utc())).unwrap();
+        let stale = vault
+            .create_entry(&root, "cert", "u", strong, "", "")
+            .unwrap();
+        let live = vault
+            .create_entry(&root, "other", "u", "Zt4&pLr9Wd6*Ks1Xq7!vm2", "", "")
+            .unwrap();
+        vault
+            .set_expiry(&stale, Some((Utc::now() - Duration::days(1)).naive_utc()))
+            .unwrap();
+        vault
+            .set_expiry(&live, Some((Utc::now() + Duration::days(1)).naive_utc()))
+            .unwrap();
         app.snap();
 
         let found = crate::vault::audit(app.session.vault().unwrap());
@@ -5897,15 +6152,15 @@ pub mod tests {
     /* ---- Reorganising the tree, and tags ---- */
 
     /* `X`/`V` can already move a group, in two keys plus a cursor trip.
-       Reorganising a vault is a dozen of those in a row, and the trip is the
-       part that makes it a chore. */
+    Reorganising a vault is a dozen of those in a row, and the trip is the
+    part that makes it a chore. */
     #[test]
     fn angle_brackets_move_a_group_in_and_out_of_the_tree() {
         let mut app = open_app();
         let root = app.root_id();
         let vault = app.session.vault_mut().unwrap();
         /* Under a parent of their own: the fixture already has groups at the
-           root, and "the sibling above" has to mean one this test controls. */
+        root, and "the sibling above" has to mean one this test controls. */
         let home = vault.create_group(&root, "Home").unwrap();
         let first = vault.create_group(&home, "Aaa").unwrap();
         let second = vault.create_group(&home, "Bbb").unwrap();
@@ -5915,7 +6170,10 @@ pub mod tests {
         app.group_cursor = Some(second);
         app.reparent_group(true);
         let vault = app.session.vault().unwrap();
-        assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Aaa", "Bbb"]);
+        assert_eq!(
+            vault.group_path(&second),
+            vec!["Root", "Home", "Aaa", "Bbb"]
+        );
         // The cursor stays on the group it moved, wherever that landed.
         assert_eq!(app.group_cursor, Some(second));
 
@@ -5925,7 +6183,7 @@ pub mod tests {
         assert_eq!(vault.group_path(&second), vec!["Root", "Home", "Bbb"]);
 
         /* The edges say so rather than doing nothing: the first sibling has
-           nothing above it, and a top-level group has nowhere further out. */
+        nothing above it, and a top-level group has nowhere further out. */
         // Drain the two move flashes, or these read somebody else's sentence.
         for _ in 0..6 {
             app.expire_now();
@@ -5934,7 +6192,7 @@ pub mod tests {
         app.reparent_group(true);
         assert!(app.stage.contains("nothing above"), "{}", app.stage);
         /* `<` from one level down lands at the root, which is as far out as
-           the tree goes; a second `<` there says so. */
+        the tree goes; a second `<` there says so. */
         app.expire_now();
         app.reparent_group(false);
         app.expire_now();
@@ -5948,15 +6206,19 @@ pub mod tests {
     }
 
     /* A tag is an exact label somebody chose, so `#work` answers yes or no.
-       Fuzzing it alongside titles would make `#work` match "homework". */
+    Fuzzing it alongside titles would make `#work` match "homework". */
     #[test]
     fn a_hash_needle_filters_by_tag_instead_of_ranking() {
         let mut app = open_app();
         let root = app.root_id();
         let vault = app.session.vault_mut().unwrap();
         let work = vault.create_entry(&root, "jira", "u", "p", "", "").unwrap();
-        let home = vault.create_entry(&root, "homework-club", "u", "p", "", "").unwrap();
-        vault.set_tags(&work, &["work".into(), "urgent".into()]).unwrap();
+        let home = vault
+            .create_entry(&root, "homework-club", "u", "p", "", "")
+            .unwrap();
+        vault
+            .set_tags(&work, &["work".into(), "urgent".into()])
+            .unwrap();
         vault.set_tags(&home, &["personal".into()]).unwrap();
         app.snap();
 
@@ -5981,7 +6243,7 @@ pub mod tests {
         assert_eq!(tagged.len(), 2, "# alone did not show every tagged entry");
 
         /* Tags come out of the form as a comma list, which is how a person
-           writes a short one. */
+        writes a short one. */
         app.clear_search();
         app.entry_cursor = Some(home);
         app.open_edit_form();
@@ -5998,8 +6260,8 @@ pub mod tests {
         assert_eq!(app.form.as_ref().unwrap().tags, "work, urgent");
 
         /* And the vault's tags are readable and deduplicated, which is what
-           the band shows under a `#` so nobody has to remember a label. The
-           edit above moved `home` off "personal", so it is gone. */
+        the band shows under a `#` so nobody has to remember a label. The
+        edit above moved `home` off "personal", so it is gone. */
         assert_eq!(
             crate::vault::all_tags(app.session.vault().unwrap()),
             vec!["urgent", "work"]
@@ -6009,13 +6271,20 @@ pub mod tests {
     /* ---- Undo depth ---- */
 
     /* The case one slot could not cover: a mistake noticed a few keystrokes
-       too late. `u` walks back through the session, newest first. */
+    too late. `u` walks back through the session, newest first. */
     #[test]
     fn u_walks_back_through_several_changes() {
         let mut app = open_app();
         app.step_group(true);
         let id = app.entry_cursor.unwrap();
-        let before = app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string();
+        let before = app
+            .session
+            .vault()
+            .unwrap()
+            .get_entry(&id)
+            .unwrap()
+            .title()
+            .to_string();
 
         // Three changes, then three undos.
         app.open_edit_form();
@@ -6030,7 +6299,13 @@ pub mod tests {
         assert_eq!(app.session.undo_steps().len(), 3, "the stack did not grow");
 
         let title = |app: &App| {
-            app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string()
+            app.session
+                .vault()
+                .unwrap()
+                .get_entry(&id)
+                .unwrap()
+                .title()
+                .to_string()
         };
         app.undo_last(); // out of the bin
         assert!(!app.session.vault().unwrap().is_recycled(&id));
@@ -6041,8 +6316,8 @@ pub mod tests {
         assert!(app.session.undo_steps().is_empty());
 
         /* Drain first: the flash queue is bounded, so a message sent while
-           six others are waiting is dropped rather than queued, and the
-           assertion below would be reading somebody else's sentence. */
+        six others are waiting is dropped rather than queued, and the
+        assertion below would be reading somebody else's sentence. */
         for _ in 0..12 {
             app.expire_now();
         }
@@ -6053,7 +6328,7 @@ pub mod tests {
     }
 
     /* Each Delete snapshot holds a whole entry, secrets included, so the
-       stack is bounded — and dropping the oldest is what zeroizes it. */
+    stack is bounded — and dropping the oldest is what zeroizes it. */
     #[test]
     fn the_undo_stack_stops_growing() {
         let mut app = open_app();
@@ -6064,18 +6339,29 @@ pub mod tests {
             app.form.as_mut().unwrap().title = format!("edit-{n}");
             app.submit_form();
         }
-        assert_eq!(app.session.undo_steps().len(), sennel_core::session::UNDO_DEPTH, "the stack is unbounded");
+        assert_eq!(
+            app.session.undo_steps().len(),
+            sennel_core::session::UNDO_DEPTH,
+            "the stack is unbounded"
+        );
         /* The oldest steps fell off, so the walk back stops at the oldest
-           one kept rather than at the original title. */
+        one kept rather than at the original title. */
         for _ in 0..sennel_core::session::UNDO_DEPTH {
             app.undo_last();
         }
-        let title = app.session.vault().unwrap().get_entry(&id).unwrap().title().to_string();
+        let title = app
+            .session
+            .vault()
+            .unwrap()
+            .get_entry(&id)
+            .unwrap()
+            .title()
+            .to_string();
         assert_eq!(title, "edit-4", "{title}");
     }
 
     /* A stack of snapshots is a pile of plaintext passwords, so it cannot
-       outlive the screen that was locked. */
+    outlive the screen that was locked. */
     #[test]
     fn locking_empties_the_undo_stack() {
         let mut app = open_app();
@@ -6085,11 +6371,14 @@ pub mod tests {
         app.submit_form();
         assert!(!app.session.undo_steps().is_empty());
         app.lock();
-        assert!(app.session.undo_steps().is_empty(), "snapshots survived the lock");
+        assert!(
+            app.session.undo_steps().is_empty(),
+            "snapshots survived the lock"
+        );
     }
 
     /* The bar names the next step and how many are behind it, so `u` never
-       surprises. */
+    surprises. */
     #[test]
     fn the_bar_counts_what_is_left_to_undo() {
         let mut app = open_app();
@@ -6105,14 +6394,18 @@ pub mod tests {
         app.open_edit_form();
         app.form.as_mut().unwrap().title = "twice".into();
         app.submit_form();
-        assert!(app.undo_note().unwrap().ends_with(" +1"), "{:?}", app.undo_note());
+        assert!(
+            app.undo_note().unwrap().ends_with(" +1"),
+            "{:?}",
+            app.undo_note()
+        );
     }
 
     /* ---- Change the master password ---- */
 
     /* The whole point: after a rekey the file opens with the new password and
-       refuses the old one. Through a real file, because an in-memory swap
-       that never reaches disk is the failure this feature would have. */
+    refuses the old one. Through a real file, because an in-memory swap
+    that never reaches disk is the failure this feature would have. */
     #[test]
     fn changing_the_master_password_rewrites_the_file_under_it() {
         let tmp = temp_path("rekey");
@@ -6122,13 +6415,25 @@ pub mod tests {
         app.unlock_confirm = "first-pw".into();
         let mut typed = b"first-pw".to_vec();
         app.try_unlock(&mut typed, None);
-        assert!(app.session.is_open(), "the vault did not open: {}", app.stage);
+        assert!(
+            app.session.is_open(),
+            "the vault did not open: {}",
+            app.stage
+        );
         let root = app.session.vault().unwrap().root_id();
-        app.session.vault_mut().unwrap().create_entry(&root, "mail", "u", "p", "", "").unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .create_entry(&root, "mail", "u", "p", "", "")
+            .unwrap();
         app.persist();
 
         app.open_rekey();
-        assert!(app.rekey.is_some(), "the prompt did not open: {}", app.stage);
+        assert!(
+            app.rekey.is_some(),
+            "the prompt did not open: {}",
+            app.stage
+        );
         for c in "second-pw".chars() {
             app.rekey_insert(c);
         }
@@ -6149,13 +6454,17 @@ pub mod tests {
         );
         // And the session kept working against the file it just rewrote.
         let entry = app.entry_rows()[0];
-        app.session.vault_mut().unwrap().update_entry(&entry, "mail2", "u", None, "", "").unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .update_entry(&entry, "mail2", "u", None, "", "")
+            .unwrap();
         app.persist();
         assert!(!app.stage.contains("cannot"), "{}", app.stage);
     }
 
     /* Typed twice, and the prompt says so rather than setting a password
-       nobody meant: the retype is the only check there will ever be. */
+    nobody meant: the retype is the only check there will ever be. */
     #[test]
     fn a_mistyped_retype_keeps_the_prompt_and_the_old_password() {
         let tmp = temp_path("rekey-differ");
@@ -6178,7 +6487,11 @@ pub mod tests {
         let rekey = app.rekey.as_ref().expect("the prompt closed on a mismatch");
         assert_eq!(rekey.password, "second-pw", "the first box was cleared too");
         assert!(rekey.confirm.is_empty(), "the retype box kept the typo");
-        assert_eq!(rekey.field, crate::app::RekeyField::Again, "focus did not go back");
+        assert_eq!(
+            rekey.field,
+            crate::app::RekeyField::Again,
+            "focus did not go back"
+        );
         app.expire_now();
         assert!(app.stage.contains("differ"), "{}", app.stage);
         // Nothing was written: the old password still opens the file.
@@ -6208,7 +6521,7 @@ pub mod tests {
     }
 
     /* The prompt holds the only plaintext copy of what is about to become the
-       key to everything, so locking has to take it with everything else. */
+    key to everything, so locking has to take it with everything else. */
     #[test]
     fn locking_takes_a_half_typed_master_password_with_it() {
         let mut app = open_app();
@@ -6223,8 +6536,8 @@ pub mod tests {
     /* ---- Wave 5.1: entry form ---- */
 
     /* `a` on an open vault opens the form; Enter writes the entry into the
-       cursor group, moves the entry cursor onto it, and the autosave marks
-       an in-memory vault dirty (it has no path to save to). */
+    cursor group, moves the entry cursor onto it, and the autosave marks
+    an in-memory vault dirty (it has no path to save to). */
     #[test]
     fn add_form_creates_the_entry_on_enter() {
         let mut app = open_app();
@@ -6251,14 +6564,18 @@ pub mod tests {
         assert_eq!(made.title(), "savings");
         assert_eq!(made.username(), "me");
         assert_eq!(made.password(), "pw");
-        assert_eq!(app.entry_cursor, Some(rows[1]), "cursor stayed off the new row");
+        assert_eq!(
+            app.entry_cursor,
+            Some(rows[1]),
+            "cursor stayed off the new row"
+        );
         assert!(app.working(), "in-memory add left no dirty flag");
         assert_eq!(app.stage, "entry added");
         let _ = bank;
     }
 
     /* An edit that never touched the password box keeps the stored secret:
-       the box starts empty so the secret is not even copied into the form. */
+    the box starts empty so the secret is not even copied into the form. */
     #[test]
     fn edit_with_untouched_password_keeps_the_secret() {
         let mut app = open_app();
@@ -6282,7 +6599,7 @@ pub mod tests {
     }
 
     /* Typing in the password box latches: backspacing back to empty writes
-       empty, because a user who cleared the box meant to clear it. */
+    empty, because a user who cleared the box meant to clear it. */
     #[test]
     fn edit_with_touched_password_writes_what_the_box_holds() {
         let mut app = open_app();
@@ -6311,11 +6628,19 @@ pub mod tests {
         assert!(app.form.is_none());
         assert!(!app.working(), "a cancelled form dirtied the vault");
         let rows = app.entry_rows();
-        assert_eq!(app.session.vault().unwrap().get_entry(&rows[0]).unwrap().title(), "checking");
+        assert_eq!(
+            app.session
+                .vault()
+                .unwrap()
+                .get_entry(&rows[0])
+                .unwrap()
+                .title(),
+            "checking"
+        );
     }
 
     /* A title is the only must: submit without one reopens the form on the
-       title box instead of writing an unreadable row. */
+    title box instead of writing an unreadable row. */
     #[test]
     fn a_titleless_form_stays_open() {
         let mut app = open_app();
@@ -6328,7 +6653,7 @@ pub mod tests {
     }
 
     /* D asks first; y deletes, snaps the cursor somewhere real, and the
-       autosave flags an in-memory vault dirty. */
+    autosave flags an in-memory vault dirty. */
     #[test]
     fn delete_asks_then_y_deletes() {
         let mut app = open_app();
@@ -6358,7 +6683,7 @@ pub mod tests {
     }
 
     /* Autosave against a real file: submit writes through, so a reopen sees
-       the new entry without a manual save step. */
+    the new entry without a manual save step. */
     #[test]
     fn submit_autosaves_to_disk() {
         let tmp = temp_path("autosave");
@@ -6381,7 +6706,7 @@ pub mod tests {
     }
 
     /* `A` grows the tree where the eye is: inside the selected group, and
-       the cursor lands on the row it just made. */
+    the cursor lands on the row it just made. */
     #[test]
     fn a_adds_a_group_under_the_selection() {
         let mut app = open_app();
@@ -6397,13 +6722,18 @@ pub mod tests {
         }));
         let cursor = app.group_cursor.unwrap();
         assert_eq!(
-            app.session.vault().unwrap().get_group(&cursor).unwrap().name,
+            app.session
+                .vault()
+                .unwrap()
+                .get_group(&cursor)
+                .unwrap()
+                .name,
             "Cards"
         );
     }
 
     /* `E` renames from the prompt prefilled with the current name; the path
-       read afterwards must show the new name, not the old one. */
+    read afterwards must show the new name, not the old one. */
     #[test]
     fn e_renames_the_selected_group() {
         let mut app = open_app();
@@ -6433,7 +6763,7 @@ pub mod tests {
     }
 
     /* A group with entries in it used to be refused. It now goes to the bin
-       whole and comes back whole, which is why the refusal could go. */
+    whole and comes back whole, which is why the refusal could go. */
     #[test]
     fn d_on_a_full_group_bins_the_subtree_and_u_brings_it_back() {
         let mut app = open_app();
@@ -6460,7 +6790,7 @@ pub mod tests {
     }
 
     /* Inside the bin `D` is the real delete, and it says so rather than
-       promising an undo it does not have. */
+    promising an undo it does not have. */
     #[test]
     fn d_inside_the_bin_asks_the_permanent_question() {
         let mut app = open_app();
@@ -6480,7 +6810,10 @@ pub mod tests {
         assert!(forever, "the bin asked the recoverable question");
         app.confirm = None;
         app.confirm_delete_entry(id);
-        assert!(app.session.vault().unwrap().get_entry(&id).is_none(), "it survived");
+        assert!(
+            app.session.vault().unwrap().get_entry(&id).is_none(),
+            "it survived"
+        );
         // The first delete's flash is still showing; this is the next one.
         app.expire_now();
         assert!(app.stage.contains("for good"), "{}", app.stage);
@@ -6503,7 +6836,7 @@ pub mod tests {
         app.confirm = None; // what the handler leaves behind before acting
         app.confirm_delete_group(id);
         /* Still in the tree, because the bin is a group like any other — but
-           under the bin, which is what the pane and KeePassXC both show. */
+        under the bin, which is what the pane and KeePassXC both show. */
         assert!(app.session.vault().unwrap().in_recycle_bin(&id));
         let under_banks: Vec<String> = app
             .session
@@ -6513,11 +6846,14 @@ pub mod tests {
             .iter()
             .map(|g| g.name.clone())
             .collect();
-        assert!(!under_banks.contains(&"Empty".to_string()), "{under_banks:?}");
+        assert!(
+            !under_banks.contains(&"Empty".to_string()),
+            "{under_banks:?}"
+        );
     }
 
     /* X on an entry arms the shelf; V moves it into the selected group. The
-       full trip ends with the row living under Root and the shelf empty. */
+    full trip ends with the row living under Root and the shelf empty. */
     #[test]
     fn x_cuts_an_entry_and_v_moves_it() {
         let mut app = open_app();
@@ -6534,14 +6870,16 @@ pub mod tests {
     }
 
     /* A group cut pastes under the selected group; moving Banks under Work
-       leaves it out of the root's child list. */
+    leaves it out of the root's child list. */
     #[test]
     fn x_cuts_a_group_and_v_moves_it_under_another() {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
         vault.create_group(&root, "Work").unwrap();
-        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.step_group(true); // onto Banks
@@ -6562,16 +6900,19 @@ pub mod tests {
     }
 
     /* The cycle guard: pasting a group under itself would vanish it from
-       every path, so the vault refuses and the shelf stays armed. The flash
-       queue holds the message behind the cut notice, so the assertions read
-       state, not the stage text. */
+    every path, so the vault refuses and the shelf stays armed. The flash
+    queue holds the message behind the cut notice, so the assertions read
+    state, not the stage text. */
     #[test]
     fn pasting_a_group_under_itself_names_the_cycle() {
         let mut app = open_app();
         app.step_group(true); // onto Banks
         app.cut_selected();
         app.paste_cut(); // target is still Banks
-        assert!(app.session.cut().is_some(), "a failed paste disarmed the shelf");
+        assert!(
+            app.session.cut().is_some(),
+            "a failed paste disarmed the shelf"
+        );
         let banks = app.group_cursor.unwrap();
         assert_eq!(
             app.session.vault().unwrap().parent_group(&banks),
@@ -6581,8 +6922,8 @@ pub mod tests {
     }
 
     /* Esc unwinds the shelf before its usual report, so a mis-cut is one
-       press from undone. The return value carries the answer; the flash
-       queue holds the wording behind the cut notice. */
+    press from undone. The return value carries the answer; the flash
+    queue holds the wording behind the cut notice. */
     #[test]
     fn esc_drops_an_armed_cut_before_its_usual_report() {
         let mut app = open_app();
@@ -6594,15 +6935,21 @@ pub mod tests {
     }
 
     /* Three entries whose stored order is neither alphabetical nor by time:
-       sorting views have to visibly rearrange them, and cycling back to
-       Stored has to restore the file's own order exactly. */
+    sorting views have to visibly rearrange them, and cycling back to
+    Stored has to restore the file's own order exactly. */
     fn sorted_app() -> App {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "zebra", "u", "p", "", "").unwrap();
-        vault.create_entry(&banks, "apple", "u", "p", "", "").unwrap();
-        vault.create_entry(&banks, "mango", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "zebra", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "apple", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "mango", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.step_group(true); // onto Banks
@@ -6613,7 +6960,8 @@ pub mod tests {
         app.entry_rows()
             .iter()
             .map(|id| {
-                app.session.vault()
+                app.session
+                    .vault()
                     .unwrap()
                     .get_entry(id)
                     .unwrap()
@@ -6641,7 +6989,7 @@ pub mod tests {
     fn updated_order_puts_the_newest_first() {
         let mut app = sorted_app();
         /* Stamp every entry but 'apple' oldest directly: the editor is the
-           only mutator in prod, and a test should not depend on clock ticks. */
+        only mutator in prod, and a test should not depend on clock ticks. */
         let other: Vec<_> = app
             .entry_rows()
             .iter()
@@ -6664,14 +7012,18 @@ pub mod tests {
     }
 
     /* A collapsed group hides its subtree but keeps its own row, so the
-       cursor on it stays put and Right re-opens it. */
+    cursor on it stays put and Right re-opens it. */
     #[test]
     fn left_folds_a_group_and_right_reopens_it() {
         let mut app = open_app();
         app.step_group(true); // onto Banks
         let banks = app.group_cursor.unwrap();
         /* Banks needs a subtree to fold: a leaf correctly refuses. */
-        app.session.vault_mut().unwrap().create_group(&banks, "Work").unwrap();
+        app.session
+            .vault_mut()
+            .unwrap()
+            .create_group(&banks, "Work")
+            .unwrap();
         app.collapse_group();
         let tree = app.group_tree();
         /* A folded group keeps its own row: only its subtree hides. */
@@ -6686,14 +7038,16 @@ pub mod tests {
     }
 
     /* Snap must fall back from a group a fold just hid: a cursor pointing at
-       an invisible row is a selection nobody can see. */
+    an invisible row is a selection nobody can see. */
     #[test]
     fn snapping_never_rests_on_a_hidden_group() {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let outer = vault.create_group(&root, "Outer").unwrap();
         let inner = vault.create_group(&outer, "Inner").unwrap();
-        vault.create_entry(&inner, "deep", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&inner, "deep", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.step_group(true); // Outer
@@ -6709,7 +7063,7 @@ pub mod tests {
     }
 
     /* A leaf has nothing to fold, and a fold repeated twice is a no-op: both
-       report instead of reading as dead keys. */
+    report instead of reading as dead keys. */
     #[test]
     fn folding_a_leaf_or_twice_says_so() {
         let mut app = open_app();
@@ -6720,15 +7074,19 @@ pub mod tests {
     }
 
     /* A live needle widens the entries pane to the whole vault: a hit in a
-       folder the cursor is not in still shows, and acts on. */
+    folder the cursor is not in still shows, and acts on. */
     #[test]
     fn a_needle_searches_the_whole_vault() {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "checking", "octo", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "octo", "p", "", "")
+            .unwrap();
         let work = vault.create_group(&root, "Work").unwrap();
-        vault.create_entry(&work, "github token", "robot", "p", "", "").unwrap();
+        vault
+            .create_entry(&work, "github token", "robot", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.open_search();
@@ -6739,16 +7097,21 @@ pub mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         let hit = rows[0];
         assert_eq!(
-            app.session.vault().unwrap().get_entry(&hit).unwrap().title(),
+            app.session
+                .vault()
+                .unwrap()
+                .get_entry(&hit)
+                .unwrap()
+                .title(),
             "github token"
         );
         /* The relaxed selection rule: a global hit from another folder is
-           actable — the user searched for it. */
+        actable — the user searched for it. */
         assert!(app.selected_entry().is_some());
     }
 
     /* An empty state must name the way out: the pane going blank under a
-       bad needle is a filter, not an empty vault. */
+    bad needle is a filter, not an empty vault. */
     #[test]
     fn an_empty_search_state_is_a_filter_message() {
         let mut app = open_app();
@@ -6759,22 +7122,26 @@ pub mod tests {
         }
         assert!(app.entry_rows().is_empty());
         /* The draw path renders the words; here we pin the predicate that
-           drives them: needle live, rows gone, band still open. */
+        drives them: needle live, rows gone, band still open. */
         assert!(app.search.is_some());
         assert!(app.clear_search());
         assert!(!app.entry_rows().is_empty(), "esc restored the rows");
     }
 
     /* n/N walk the matches with no wrap: the ends say so. Relevance order
-       can tie, so the walk is asserted relative to the rows list, not to a
-       guessed starting row. */
+    can tie, so the walk is asserted relative to the rows list, not to a
+    guessed starting row. */
     #[test]
     fn n_and_n_walk_matches_without_wrapping() {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "one mail", "u", "p", "", "").unwrap();
-        vault.create_entry(&banks, "two mail", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "one mail", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "two mail", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.step_group(true);
@@ -6798,14 +7165,15 @@ pub mod tests {
         app.jump_match(false); // N back
         assert_ne!(app.entry_cursor, Some(second), "N walked back");
         app.jump_match(false); // already first
+
         /* 'first match' queued behind the still-live 'last match' flash:
-           force the expiry the frame loop would perform, then read. */
+        force the expiry the frame loop would perform, then read. */
         app.expire_now();
         assert!(app.stage.contains("first match"), "{}", app.stage);
     }
 
     /* ^s fills the box and flips the keep-latch: submit writes what was
-       generated, not the kept secret. */
+    generated, not the kept secret. */
     #[test]
     fn ctrl_s_generates_into_the_password_box() {
         let mut app = open_app();
@@ -6830,13 +7198,22 @@ pub mod tests {
         let changed = open_password(&app);
         assert_ne!(changed, "p", "the generated password did not write");
         app.undo_last();
-        assert_eq!(open_password(&app), "p", "u did not put the old secret back");
+        assert_eq!(
+            open_password(&app),
+            "p",
+            "u did not put the old secret back"
+        );
     }
 
     fn open_password(app: &App) -> String {
         let id = app.entry_cursor.unwrap();
-        app.session.vault().unwrap().get_entry(&id).unwrap()
-            .password().to_string()
+        app.session
+            .vault()
+            .unwrap()
+            .get_entry(&id)
+            .unwrap()
+            .password()
+            .to_string()
     }
 
     /* u brings a deleted entry back, under the group it came from. */
@@ -6883,9 +7260,20 @@ pub mod tests {
         let titles: Vec<String> = app
             .entry_rows()
             .iter()
-            .map(|id| app.session.vault().unwrap().get_entry(id).unwrap().title().to_string())
+            .map(|id| {
+                app.session
+                    .vault()
+                    .unwrap()
+                    .get_entry(id)
+                    .unwrap()
+                    .title()
+                    .to_string()
+            })
             .collect();
-        assert!(!titles.contains(&"fresh".to_string()), "u did not remove the add");
+        assert!(
+            !titles.contains(&"fresh".to_string()),
+            "u did not remove the add"
+        );
     }
 
     #[test]
@@ -6899,7 +7287,10 @@ pub mod tests {
             prompt.caret = 7;
         }
         app.submit_group_prompt();
-        assert_eq!(app.session.vault().unwrap().get_group(&banks).unwrap().name, "Savings");
+        assert_eq!(
+            app.session.vault().unwrap().get_group(&banks).unwrap().name,
+            "Savings"
+        );
         app.undo_last();
         assert_eq!(
             app.session.vault().unwrap().get_group(&banks).unwrap().name,
@@ -6922,11 +7313,7 @@ pub mod tests {
         app.expire_now(); // promotes the queued 'undid edit of …' flash
         app.undo_last();
         app.expire_now(); // promotes 'nothing to undo'
-        assert!(
-            app.stage.contains("nothing to undo"),
-            "{}",
-            app.stage
-        );
+        assert!(app.stage.contains("nothing to undo"), "{}", app.stage);
     }
 
     #[test]
@@ -6941,15 +7328,14 @@ pub mod tests {
     fn temp_config(tag: &str) -> TempPath {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TempPath(std::env::temp_dir().join(format!(
-            "sennel-test-{tag}-{}-{n}.toml",
-            std::process::id()
-        )))
+        TempPath(
+            std::env::temp_dir().join(format!("sennel-test-{tag}-{}-{n}.toml", std::process::id())),
+        )
     }
 
     /* A vault that opened goes to the front of the library, and it goes into
-       the config file: a list that lasted exactly as long as the session
-       would be no better than retyping the path. */
+    the config file: a list that lasted exactly as long as the session
+    would be no better than retyping the path. */
     #[test]
     fn an_opened_vault_joins_the_library() {
         let cfg = temp_config("library");
@@ -6958,7 +7344,7 @@ pub mod tests {
         let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         /* The settled spelling, not the one it was handed: a library row has
-           to name the same file from any directory. */
+        to name the same file from any directory. */
         let settled = crate::config::absolute(&tmp.0);
         assert_eq!(app.recent, vec![settled.clone()]);
 
@@ -6980,8 +7366,8 @@ pub mod tests {
     }
 
     /* Reopening the vault you always open changes nothing, so it writes
-       nothing: every rewrite is another chance for two Sennels running at
-       once to overwrite each other's list. */
+    nothing: every rewrite is another chance for two Sennels running at
+    once to overwrite each other's list. */
     #[test]
     fn reopening_the_same_vault_rewrites_nothing() {
         let cfg = temp_config("idempotent");
@@ -6992,7 +7378,7 @@ pub mod tests {
         assert!(cfg.0.is_file(), "the first open wrote nothing");
 
         /* Removed rather than timestamped: `write_atomic` creates the file,
-           so its absence afterwards is proof nobody wrote. */
+        so its absence afterwards is proof nobody wrote. */
         std::fs::remove_file(&cfg.0).unwrap();
         let settled = app.recent[0].clone();
         app.remember_recent(&settled);
@@ -7004,15 +7390,23 @@ pub mod tests {
     }
 
     /* Newest first, deduplicated and capped: opening the same two vaults all
-       week must leave two rows, not ten. */
+    week must leave two rows, not ten. */
     #[test]
     fn the_library_is_newest_first_and_never_repeats_itself() {
         let mut app = App::new();
         for n in 0..crate::config::RECENT_MAX + 3 {
             app.remember_recent(Path::new(&format!("/vaults/{n}.kdbx")));
         }
-        assert_eq!(app.recent.len(), crate::config::RECENT_MAX, "the cap slipped");
-        assert_eq!(app.recent[0], PathBuf::from("/vaults/12.kdbx"), "newest first");
+        assert_eq!(
+            app.recent.len(),
+            crate::config::RECENT_MAX,
+            "the cap slipped"
+        );
+        assert_eq!(
+            app.recent[0],
+            PathBuf::from("/vaults/12.kdbx"),
+            "newest first"
+        );
         assert!(
             !app.recent.contains(&PathBuf::from("/vaults/0.kdbx")),
             "the oldest survived the cap"
@@ -7033,7 +7427,7 @@ pub mod tests {
     }
 
     /* Enter on the library points the session at that vault and hands the
-       keys to the password box, which is the next thing to fill. */
+    keys to the password box, which is the next thing to fill. */
     #[test]
     fn choosing_from_the_library_points_the_session_at_it() {
         let (mut app, tmp) = locked_app_with_db("correct horse");
@@ -7051,9 +7445,9 @@ pub mod tests {
     }
 
     /* A remembered path whose file is gone is still selectable — the unlock
-       screen then offers to create it — but it says so first, because
-       "enter" meaning "make a new empty vault" is not something to discover
-       after the fact. */
+    screen then offers to create it — but it says so first, because
+    "enter" meaning "make a new empty vault" is not something to discover
+    after the fact. */
     #[test]
     fn a_vault_that_moved_is_marked_and_warned_about() {
         let mut app = App::new();
@@ -7069,8 +7463,8 @@ pub mod tests {
     }
 
     /* `^d` forgets a vault. The file is never touched: this is a list of
-       paths, and a password manager that deletes a vault off a keypress is
-       not one anybody should run. */
+    paths, and a password manager that deletes a vault off a keypress is
+    not one anybody should run. */
     #[test]
     fn forgetting_a_vault_leaves_the_file_alone() {
         let cfg = temp_config("forget");
@@ -7093,7 +7487,7 @@ pub mod tests {
     }
 
     /* A key that opens an empty popup is a key that does nothing the first
-       time anybody presses it, so it says where vaults come from instead. */
+    time anybody presses it, so it says where vaults come from instead. */
     #[test]
     fn the_library_says_so_when_it_is_empty() {
         let mut app = App::new();
@@ -7103,7 +7497,7 @@ pub mod tests {
     }
 
     /* Typing narrows the list over the whole path, so a folder name finds a
-       vault as well as its own name does. */
+    vault as well as its own name does. */
     #[test]
     fn typing_narrows_the_library() {
         let mut app = App::new();
@@ -7117,7 +7511,10 @@ pub mod tests {
         }
         let library = app.library.as_ref().unwrap();
         assert_eq!(library.shown().len(), 1);
-        assert_eq!(library.shown()[0].path, PathBuf::from("/vaults/work/main.kdbx"));
+        assert_eq!(
+            library.shown()[0].path,
+            PathBuf::from("/vaults/work/main.kdbx")
+        );
         for _ in 0..4 {
             app.library_backspace();
         }
@@ -7125,8 +7522,8 @@ pub mod tests {
     }
 
     /* `--db vault.kdbx` names a different file from every other directory, so
-       the library resolves it once, at the unlock, and everything downstream
-       agrees on what the vault is called. */
+    the library resolves it once, at the unlock, and everything downstream
+    agrees on what the vault is called. */
     #[test]
     fn a_relative_vault_is_remembered_absolutely() {
         let tmp = temp_path("relative");
@@ -7135,7 +7532,7 @@ pub mod tests {
         let settled = crate::config::absolute(&tmp.0);
 
         /* The path a shell would hand over: relative to the directory the
-           command was typed in, and meaningless from anywhere else. */
+        command was typed in, and meaningless from anywhere else. */
         let here = std::env::current_dir().unwrap();
         let mut relative = PathBuf::new();
         for _ in here.components().skip(1) {
@@ -7150,12 +7547,16 @@ pub mod tests {
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser, "{}", app.stage);
         assert_eq!(app.db_path, Some(settled.clone()));
-        assert_eq!(app.recent, vec![settled], "a relative row went into the library");
+        assert_eq!(
+            app.recent,
+            vec![settled],
+            "a relative row went into the library"
+        );
     }
 
     /* `^d` on the startup vault takes the `db` key with it. Left behind, the
-       next launch would reopen the vault just forgotten and put it back at
-       the top of the library. */
+    next launch would reopen the vault just forgotten and put it back at
+    the top of the library. */
     #[test]
     fn forgetting_the_startup_vault_clears_the_default() {
         let cfg = temp_config("forget-db");
@@ -7193,8 +7594,8 @@ pub mod tests {
     }
 
     /* Creating a vault says what to press next. It used to clear the flag
-       before reading it, so `created` was always false and the one line an
-       empty vault's owner needs had never been shown. */
+    before reading it, so `created` was always false and the one line an
+    empty vault's owner needs had never been shown. */
     #[test]
     fn a_created_vault_says_what_to_press_next() {
         let tmp = temp_path("created");
@@ -7206,11 +7607,15 @@ pub mod tests {
         let mut pw = "correct horse".to_owned().into_bytes();
         app.try_unlock(&mut pw, None);
         assert_eq!(app.view, View::Browser);
-        assert!(app.stage.contains("a adds your first entry"), "{}", app.stage);
+        assert!(
+            app.stage.contains("a adds your first entry"),
+            "{}",
+            app.stage
+        );
     }
     /* The popup arrives with a password already in it. An empty box with a
-       "press r" hint is one keystroke of ceremony in front of the only thing
-       the screen is for. */
+    "press r" hint is one keystroke of ceremony in front of the only thing
+    the screen is for. */
     #[test]
     fn the_generator_opens_with_a_password_ready() {
         let mut app = open_app();
@@ -7221,7 +7626,7 @@ pub mod tests {
     }
 
     /* Every roll is a new draw. Two identical passwords in a row would mean
-       `r` redrew the screen and not the secret. */
+    `r` redrew the screen and not the secret. */
     #[test]
     fn rolling_again_gives_a_different_password() {
         let mut app = open_app();
@@ -7232,8 +7637,8 @@ pub mod tests {
     }
 
     /* A toggle must change the password, not only the label under it: the
-       generator forces one character per requested class, so symbols on
-       means a symbol is there to find. */
+    generator forces one character per requested class, so symbols on
+    means a symbol is there to find. */
     #[test]
     fn a_toggle_changes_what_the_password_is_made_of() {
         let mut app = open_app();
@@ -7258,7 +7663,7 @@ pub mod tests {
     }
 
     /* The lookalike key reads the other way round from the setting behind
-       it: pressing `a` asks for `l 1 I O 0`, which turns the exclusion off. */
+    it: pressing `a` asks for `l 1 I O 0`, which turns the exclusion off. */
     #[test]
     fn the_lookalike_key_asks_for_them_rather_than_excluding_them() {
         let mut app = open_app();
@@ -7269,7 +7674,7 @@ pub mod tests {
     }
 
     /* `-` past the floor stops and says so rather than generating something
-       shorter than the classes asked for, which is an error, not a password. */
+    shorter than the classes asked for, which is an error, not a password. */
     #[test]
     fn the_length_keys_stop_at_the_bounds() {
         let mut app = open_app();
@@ -7281,30 +7686,37 @@ pub mod tests {
         assert_eq!(app.mint.as_ref().unwrap().settings.length, min);
         app.mint_resize(false);
         assert_eq!(app.mint.as_ref().unwrap().settings.length, min);
-        assert!(app.stage.contains(&format!("between {min} and {max}")), "{}", app.stage);
+        assert!(
+            app.stage.contains(&format!("between {min} and {max}")),
+            "{}",
+            app.stage
+        );
         /* And the password on screen is the length the popup claims, or the
-           number under it is describing a different secret. */
+        number under it is describing a different secret. */
         app.mint_resize(true);
         let mint = app.mint.as_ref().unwrap();
         assert_eq!(mint.password.chars().count(), mint.settings.length);
     }
 
     /* The popup's toggles are the session's, not the file's: `^P` twice must
-       not come back holding whatever the last visit turned on. */
+    not come back holding whatever the last visit turned on. */
     #[test]
     fn the_popup_never_edits_the_configured_default() {
         let mut app = open_app();
         app.open_mint();
         app.mint_toggle(Knob::Symbols);
         app.close_mint();
-        assert!(!app.generator.classes.symbols, "the popup rewrote the session default");
+        assert!(
+            !app.generator.classes.symbols,
+            "the popup rewrote the session default"
+        );
         app.open_mint();
         assert!(!app.mint.as_ref().unwrap().settings.classes.symbols);
     }
 
     /* Generating writes nothing. A password nobody asked to store must not
-       leave the vault dirty, or quitting would prompt to save a change that
-       was never made. */
+    leave the vault dirty, or quitting would prompt to save a change that
+    was never made. */
     #[test]
     fn generating_leaves_the_vault_alone() {
         let mut app = open_app();
@@ -7315,7 +7727,7 @@ pub mod tests {
     }
 
     /* `y` on an empty popup says so rather than wiping whatever the user is
-       already holding on the clipboard with an empty string. */
+    already holding on the clipboard with an empty string. */
     #[test]
     fn copying_nothing_says_so_and_leaves_the_clipboard_alone() {
         let mut app = open_app();
@@ -7326,16 +7738,20 @@ pub mod tests {
     }
 
     /* Copying must not consume what it copied: `y` then `y` again is one
-       password twice, not a password and then an empty clipboard. A session
-       with no board reports it, which is the only end of this the tests can
-       reach — the clipboard itself needs a desktop. */
+    password twice, not a password and then an empty clipboard. A session
+    with no board reports it, which is the only end of this the tests can
+    reach — the clipboard itself needs a desktop. */
     #[test]
     fn copying_leaves_the_password_on_screen() {
         let mut app = open_app();
         app.open_mint();
         let shown = app.mint.as_ref().unwrap().password.clone();
         app.mint_copy();
-        assert!(app.stage.contains("clipboard is not ready"), "{}", app.stage);
+        assert!(
+            app.stage.contains("clipboard is not ready"),
+            "{}",
+            app.stage
+        );
         assert_eq!(
             app.mint.as_ref().unwrap().password,
             shown,
@@ -7344,7 +7760,7 @@ pub mod tests {
     }
 
     /* A generated password is a secret on screen, so the lock takes it with
-       everything else. */
+    everything else. */
     #[test]
     fn locking_closes_the_generator() {
         let mut app = open_app();
@@ -7354,7 +7770,7 @@ pub mod tests {
     }
 
     /* `t` walks complex, passphrase, pin and back round, rolling a fresh
-       secret of the right shape at each stop. */
+    secret of the right shape at each stop. */
     #[test]
     fn the_type_key_walks_all_three_kinds() {
         use crate::generator::Kind;
@@ -7365,7 +7781,9 @@ pub mod tests {
         let mint = app.mint.as_ref().unwrap();
         assert_eq!(mint.settings.kind, Kind::Passphrase);
         assert_eq!(
-            mint.password.split(crate::generator::WORD_SEPARATOR).count(),
+            mint.password
+                .split(crate::generator::WORD_SEPARATOR)
+                .count(),
             mint.settings.words,
             "{}",
             mint.password
@@ -7393,7 +7811,9 @@ pub mod tests {
         assert_eq!(mint.settings.words, words + 1);
         assert_eq!(mint.settings.length, length, "words moved the length");
         assert_eq!(
-            mint.password.split(crate::generator::WORD_SEPARATOR).count(),
+            mint.password
+                .split(crate::generator::WORD_SEPARATOR)
+                .count(),
             words + 1
         );
         let (_, max) = crate::config::WORDS_RANGE;
@@ -7402,8 +7822,8 @@ pub mod tests {
         }
         assert_eq!(app.mint.as_ref().unwrap().settings.words, max);
         /* The cycle's own flash is still up, and a second message queues
-           behind it — expire it so the bound refusal is what the test reads
-           (it names words where the cycle message would also match). */
+        behind it — expire it so the bound refusal is what the test reads
+        (it names words where the cycle message would also match). */
         app.expire_now();
         app.mint_resize(true);
         assert!(app.stage.contains("words"), "{}", app.stage);
@@ -7417,7 +7837,7 @@ pub mod tests {
         app.open_mint();
         app.mint_cycle_kind();
         /* The cycle names itself in the flash, and a second message queues
-           behind it — the frame loop would expire it, tests have no loop. */
+        behind it — the frame loop would expire it, tests have no loop. */
         app.expire_now();
         app.mint_toggle(Knob::Symbols);
         assert!(app.stage.contains("t switches kind"), "{}", app.stage);
@@ -7425,7 +7845,7 @@ pub mod tests {
     }
 
     /* ^s follows the session kind: a passphrase default means words in the
-       box, priced as words in the flash. */
+    box, priced as words in the flash. */
     #[test]
     fn ctrl_s_follows_the_session_kind() {
         use crate::generator::Kind;
@@ -7445,7 +7865,7 @@ pub mod tests {
     }
 
     /* A pin has its own length: the default 20 for complex passwords must not
-       make a 20-digit pin. */
+    make a 20-digit pin. */
     #[test]
     fn a_pin_uses_its_own_length() {
         use crate::generator::Kind;

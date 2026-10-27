@@ -6,9 +6,9 @@ mod touchid;
 mod ui;
 
 use sennel_core::harden::{core_dumps_off, harden};
-use sennel_core::{agent, clipboard, export, generator, import, pwned, search, vault};
 #[cfg(not(test))]
 use sennel_core::touchid;
+use sennel_core::{agent, clipboard, export, generator, import, pwned, search, vault};
 
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -17,24 +17,23 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::SetTitle;
 use zeroize::Zeroize;
 
-use app::{App, Confirm};
 use crate::clipboard::Board;
+use app::{App, Confirm};
 use config::{Cli, Command, Config, Field};
 use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
 /* `sennel --check | head` is the reader having seen enough, not a failure.
-   Rust ignores SIGPIPE so the write comes back EPIPE instead, and `say!`
-   turns that into a panic — which on the paths that have a vault open would
-   also skip every zeroize on the way out. Dropped instead: the command runs
-   to its end, its destructors run, and what nobody is reading goes nowhere. */
+Rust ignores SIGPIPE so the write comes back EPIPE instead, and `say!`
+turns that into a panic — which on the paths that have a vault open would
+also skip every zeroize on the way out. Dropped instead: the command runs
+to its end, its destructors run, and what nobody is reading goes nowhere. */
 macro_rules! say {
     () => {{
         use std::io::Write;
@@ -48,12 +47,12 @@ macro_rules! say {
 
 fn main() -> Result<()> {
     /* First, before a config is read or a vault is opened. Every path below
-       this can end up holding secrets — `get` sleeps out the clipboard wipe
-       holding one, `audit --pwned` walks every password in the vault waiting
-       on the network, `import` holds the lot twice — and all three used to
-       reach that state with core dumps still enabled and, on Linux, still
-       attachable. It sat further down, on the TUI path only, so a subcommand
-       was one `return` away from missing it; up here a new one inherits it. */
+    this can end up holding secrets — `get` sleeps out the clipboard wipe
+    holding one, `audit --pwned` walks every password in the vault waiting
+    on the network, `import` holds the lot twice — and all three used to
+    reach that state with core dumps still enabled and, on Linux, still
+    attachable. It sat further down, on the TUI path only, so a subcommand
+    was one `return` away from missing it; up here a new one inherits it. */
     harden();
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
@@ -64,14 +63,23 @@ fn main() -> Result<()> {
         return list(&cfg);
     }
     /* Answers a question and exits, so it runs before the terminal checks
-       below: `sennel get` is the one path meant for a pipe. */
-    if let Some(Command::Get { needle, user, password, url, otp, stdout, force }) = &cfg.command {
+    below: `sennel get` is the one path meant for a pipe. */
+    if let Some(Command::Get {
+        needle,
+        user,
+        password,
+        url,
+        otp,
+        stdout,
+        force,
+    }) = &cfg.command
+    {
         let field = Field::of(*user, *password, *url, *otp)?;
         let (needle, stdout, force) = (needle.clone(), *stdout, *force);
         return get(&cfg, &needle, field, stdout, force);
     }
     /* Also before the terminal checks, and the one subcommand that opens no
-       vault at all: a password you are not storing needs no database. */
+    vault at all: a password you are not storing needs no database. */
     if let Some(Command::Gen {
         kind,
         length,
@@ -94,7 +102,11 @@ fn main() -> Result<()> {
         }
         if let Some(len) = *length {
             let pin = settings.kind == generator::Kind::Pin;
-            let (min, max) = if pin { config::PIN_RANGE } else { config::LENGTH_RANGE };
+            let (min, max) = if pin {
+                config::PIN_RANGE
+            } else {
+                config::LENGTH_RANGE
+            };
             if !(min..=max).contains(&len) {
                 anyhow::bail!("length {len} is outside {min}–{max}");
             }
@@ -130,23 +142,29 @@ fn main() -> Result<()> {
         if settings.kind != generator::Kind::Complex
             && (*symbols || *no_symbols || *no_digits || *no_upper || *ambiguous)
         {
-            eprintln!("class flags shape complex passwords only  ·  ignored for {}", settings.kind.name());
+            eprintln!(
+                "class flags shape complex passwords only  ·  ignored for {}",
+                settings.kind.name()
+            );
         }
         if settings.kind == generator::Kind::Passphrase && length.is_some() {
             eprintln!("-n sets characters, not words  ·  --words controls passphrases");
         }
         if settings.kind != generator::Kind::Passphrase && words.is_some() {
-            eprintln!("--words counts passphrase words  ·  ignored for {}", settings.kind.name());
+            eprintln!(
+                "--words counts passphrase words  ·  ignored for {}",
+                settings.kind.name()
+            );
         }
         return make_password(&cfg, settings, *count, *stdout, *force);
     }
     /* Before the config is even consulted: printing a completion script is
-       not a session, and it must work on a machine with no vault. */
+    not a session, and it must work on a machine with no vault. */
     if let Some(Command::Completions { shell }) = &cfg.command {
         let mut command = Cli::command();
         /* Into a buffer first: clap_complete unwraps the write, so generating
-           straight into a closed pipe panics rather than returning. The
-           script is a few kilobytes, so holding it costs nothing. */
+        straight into a closed pipe panics rather than returning. The
+        script is a few kilobytes, so holding it costs nothing. */
         let mut script: Vec<u8> = Vec::new();
         clap_complete::generate(*shell, &mut command, "sennel", &mut script);
         use std::io::Write;
@@ -167,33 +185,57 @@ fn main() -> Result<()> {
     if let Some(Command::Audit { pwned }) = &cfg.command {
         return audit(&cfg, *pwned);
     }
-    if let Some(Command::Import { file, group, dry_run }) = &cfg.command {
+    if let Some(Command::Import {
+        file,
+        group,
+        dry_run,
+    }) = &cfg.command
+    {
         let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
         return import_csv(&cfg, &file, group.as_deref(), dry_run);
     }
-    if let Some(Command::Export { format, out, stdout, force, group }) = &cfg.command {
-        return export_vault(&cfg, *format, out.as_deref(), *stdout, *force, group.as_deref());
+    if let Some(Command::Export {
+        format,
+        out,
+        stdout,
+        force,
+        group,
+    }) = &cfg.command
+    {
+        return export_vault(
+            &cfg,
+            *format,
+            out.as_deref(),
+            *stdout,
+            *force,
+            group.as_deref(),
+        );
     }
     /* Both ends, because the TUI needs to write frames and read keys. Piped
-       or in CI, crossterm's raw mode fails with an OS error about a device
-       that tells nobody which of the two is wrong or what does work here. */
+    or in CI, crossterm's raw mode fails with an OS error about a device
+    that tells nobody which of the two is wrong or what does work here. */
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         anyhow::bail!("Sennel needs a terminal · --check works without one");
     }
 
     /* A crash must not cost the user their terminal, or leave the vault's
-       name in the title bar. `ratatui::init` restores raw mode and the
-       alternate screen on panic; mouse capture and the title are ours, so
-       they are chained onto the same hook. */
+    name in the title bar. `ratatui::init` restores raw mode and the
+    alternate screen on panic; mouse capture and the title are ours, so
+    they are chained onto the same hook. */
     let mut terminal = ratatui::init();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, SetTitle(""));
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            SetTitle("")
+        );
         previous(info);
     }));
     /* Wheel and click, unless the config turned them off: capture takes the
-       terminal's own selection with it, which some people would rather keep
-       (shift usually still selects). */
+    terminal's own selection with it, which some people would rather keep
+    (shift usually still selects). */
     if cfg.mouse {
         let _ = execute!(std::io::stdout(), EnableMouseCapture);
     }
@@ -201,8 +243,8 @@ fn main() -> Result<()> {
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let mut app = App::new();
     /* Which file the lock screen is for, resolved once at startup. The draw
-       loop must not stat: `refresh_db_state` runs here and after every save,
-       and the cached `unlock_new` is all the draw ever reads. */
+    loop must not stat: `refresh_db_state` runs here and after every save,
+    and the cached `unlock_new` is all the draw ever reads. */
     app.set_db_path(cfg.db.clone());
     app.set_key_file(cfg.key_file.as_deref());
     app.set_yubikey(cfg.yubikey.clone());
@@ -222,7 +264,7 @@ fn main() -> Result<()> {
         }
     }
     /* Armed once from config: 0 means the user asked for no lock, and the
-       mapping lives in `App` so the frame loop below needs no branch. */
+    mapping lives in `App` so the frame loop below needs no branch. */
     app.set_lock_timeout(cfg.lock_timeout);
     app.set_backups(cfg.backups, cfg.backup_dir.clone());
     app.set_order(cfg.sort);
@@ -231,18 +273,18 @@ fn main() -> Result<()> {
     app.session.touch_id = cfg.touch_id && cfg!(target_os = "macos");
     app.theme_overridden = cfg.theme_overridden;
     /* Said once, on the first frame, and then it is the user's screen: an
-       override that measures badly is worth naming, not worth refusing. */
+    override that measures badly is worth naming, not worth refusing. */
     for note in &cfg.theme_warnings {
         app.warn(format!("theme: {note}"));
     }
     app.set_generator(cfg.generator);
     /* The clipboard with its auto-clear timer, armed once like the lock:
-       copies before this point cannot happen, since nothing is unlocked. */
+    copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));
     let result = run(&mut terminal, &mut app);
     /* Before anything else on the way out: the auto-clear lives in a thread
-       that dies with this process, so quitting three seconds after a copy
-       used to leave the password sitting on the clipboard. */
+    that dies with this process, so quitting three seconds after a copy
+    used to leave the password sitting on the clipboard. */
     app.clear_clipboard();
     app.agent_release();
     if cfg.mouse {
@@ -256,26 +298,30 @@ fn main() -> Result<()> {
 }
 
 /* The first thing to run on a new machine and the first thing to ask for in
-   a bug report: what Sennel read, and whether the clipboard it copies to is
-   there. Exits non-zero when copying could never work, so a script can act
-   on it. */
+a bug report: what Sennel read, and whether the clipboard it copies to is
+there. Exits non-zero when copying could never work, so a script can act
+on it. */
 fn check(cfg: &Config) -> Result<()> {
     say!("Sennel {}", env!("CARGO_PKG_VERSION"));
     say!(
         "config    {}",
         cfg.config_file
             .as_deref()
-            .map_or("(none · --no-config)".to_string(), |p| p.display().to_string())
+            .map_or("(none · --no-config)".to_string(), |p| p
+                .display()
+                .to_string())
     );
     say!(
         "db        {}",
         cfg.db
             .as_deref()
-            .map_or("(none · pass a file)".to_string(), |p| p.display().to_string())
+            .map_or("(none · pass a file)".to_string(), |p| p
+                .display()
+                .to_string())
     );
     /* What a bug report needs and what a first run wants to know: not only
-       which file was configured, but whether it is there and writable. A
-       vault Sennel cannot write is a vault that autosaves into an error. */
+    which file was configured, but whether it is there and writable. A
+    vault Sennel cannot write is a vault that autosaves into an error. */
     match cfg.db.as_deref() {
         Some(path) if path.is_file() => {
             let writable = std::fs::OpenOptions::new().write(true).open(path).is_ok();
@@ -289,7 +335,7 @@ fn check(cfg: &Config) -> Result<()> {
         None => say!("vault     (none)"),
     }
     /* The library, since "which vaults does this machine know about" is a
-       question a bug report asks and the TUI answers only behind `^v`. */
+    question a bug report asks and the TUI answers only behind `^v`. */
     if cfg.recent.is_empty() {
         say!("library   (none yet)");
     } else {
@@ -304,9 +350,9 @@ fn check(cfg: &Config) -> Result<()> {
         match core_dumps_off() {
             true => "core dumps off",
             /* Named rather than hidden: a machine where the limit will not
-               take is one where a crash writes every secret to disk, and the
-               user should hear that from --check and not from a forensics
-               report. */
+            take is one where a crash writes every secret to disk, and the
+            user should hear that from --check and not from a forensics
+            report. */
             false => "core dumps STILL ON · this machine refused the limit",
         }
     );
@@ -331,17 +377,25 @@ fn check(cfg: &Config) -> Result<()> {
     );
     say!("clear in  {}s", cfg.clipboard_timeout);
     say!("lock in   {}s (0 = off)", cfg.lock_timeout);
-    say!("backups   {} kept in {} (0 = off)", cfg.backups, cfg.backup_dir.display());
+    say!(
+        "backups   {} kept in {} (0 = off)",
+        cfg.backups,
+        cfg.backup_dir.display()
+    );
     let state = if cfg.ssh_agent { "on" } else { "off" };
     match agent::Agent::connect().and_then(|mut a| a.count()) {
-        Ok(n) => say!("ssh agent {state} · reachable, holding {n} keys · lifetime {}s", cfg.ssh_agent_lifetime),
+        Ok(n) => say!(
+            "ssh agent {state} · reachable, holding {n} keys · lifetime {}s",
+            cfg.ssh_agent_lifetime
+        ),
         Err(why) => say!("ssh agent {state} · {why}"),
     }
     if let Some(spec) = &cfg.yubikey {
         match keepass::ChallengeResponseKey::get_available_yubikeys() {
             Ok(keys) if keys.is_empty() => say!("yubikey   {spec} · no key connected"),
             Ok(keys) => {
-                let serials: Vec<String> = keys.iter().map(|k| k.serial_number.to_string()).collect();
+                let serials: Vec<String> =
+                    keys.iter().map(|k| k.serial_number.to_string()).collect();
                 say!("yubikey   {spec} · connected: {}", serials.join(", "));
             }
             Err(e) => say!("yubikey   {spec} · cannot look: {e}"),
@@ -365,19 +419,31 @@ fn check(cfg: &Config) -> Result<()> {
 }
 
 /* --list: the vault inventory without the secrets. Counts and entry titles
-   only — the point is scripting and inventory, not display. */
+only — the point is scripting and inventory, not display. */
 fn list(cfg: &Config) -> Result<()> {
     let vault = unlock(cfg)?;
-    say!("{} groups · {} entries", vault.num_groups(), vault.entry_count());
+    say!(
+        "{} groups · {} entries",
+        vault.num_groups(),
+        vault.entry_count()
+    );
     /* Walk the whole tree root-down so the output reads like the browser. */
     for (id, depth) in walk_groups(&vault) {
         let indent = "  ".repeat(depth);
-        say!("{}[{}]", indent, printable(&vault.get_group(&id).unwrap().name));
+        say!(
+            "{}[{}]",
+            indent,
+            printable(&vault.get_group(&id).unwrap().name)
+        );
         for entry in vault.entries_in(&id) {
             /* A script reading the inventory should see what the browser
-               sees, and "expired" is the one thing about an entry that can
-               make the rest of the line misleading. */
-            let stale = if vault::expired(&entry) { "  (expired)" } else { "" };
+            sees, and "expired" is the one thing about an entry that can
+            make the rest of the line misleading. */
+            let stale = if vault::expired(&entry) {
+                "  (expired)"
+            } else {
+                ""
+            };
             say!("{}  {}{stale}", indent, printable(entry.title()));
         }
     }
@@ -386,18 +452,18 @@ fn list(cfg: &Config) -> Result<()> {
 
 /* `sennel convert`: an older KDBX read in, a KDBX 4 written out.
 
-   Never in place, and never over an existing file. A conversion is the one
-   operation where a bug costs the whole vault, so the original is opened and
-   never touched, the new file is created exclusively, and what was written is
-   read back and compared before this says it worked. If the comparison fails
-   the new file is removed, because a half-converted vault sitting next to a
-   good one is the worst of both. */
+Never in place, and never over an existing file. A conversion is the one
+operation where a bug costs the whole vault, so the original is opened and
+never touched, the new file is created exclusively, and what was written is
+read back and compared before this says it worked. If the comparison fails
+the new file is removed, because a half-converted vault sitting next to a
+good one is the worst of both. */
 fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
     let Some(from) = cfg.db.clone() else {
         anyhow::bail!("no database given · pass --db <file>");
     };
     /* `<name>-kdbx4.kdbx` beside the original: the same directory, because
-       that is where the user keeps vaults, and a name that says what it is. */
+    that is where the user keeps vaults, and a name that says what it is. */
     let out = match to {
         Some(path) => config::expand(path),
         None => {
@@ -412,7 +478,10 @@ fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
         anyhow::bail!("that would write over the original · pick another --to");
     }
     if out.exists() {
-        anyhow::bail!("{} is already there · move it or pick another --to", out.display());
+        anyhow::bail!(
+            "{} is already there · move it or pick another --to",
+            out.display()
+        );
     }
 
     let mut vault = unlock(cfg)?;
@@ -421,19 +490,21 @@ fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
         anyhow::bail!("{} is already {was} · nothing to convert", from.display());
     }
     /* Read before the write, so the comparison below is against what came out
-       of the original rather than against the copy in memory. */
+    of the original rather than against the copy in memory. */
     let before = vault::inventory(&vault);
-    vault.convert_to_kdbx4().map_err(|e| anyhow::anyhow!("{e}"))?;
+    vault
+        .convert_to_kdbx4()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     /* No second password prompt: the key from the unlock is still held, so
-       the copy carries the original's password and key file exactly. Asking
-       again would be asking for the same secret twice, which is how people
-       end up typing a different one by accident. */
+    the copy carries the original's password and key file exactly. Asking
+    again would be asking for the same secret twice, which is how people
+    end up typing a different one by accident. */
     vault.save_copy(&out).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     /* Opened again from disk with the same key, and compared field by field.
-       A conversion that silently dropped an entry would otherwise be found
-       months later, by which time the original may be gone. */
+    A conversion that silently dropped an entry would otherwise be found
+    months later, by which time the original may be gone. */
     let fresh = match vault.open_copy(&out) {
         Ok(fresh) => fresh,
         Err(e) => {
@@ -452,15 +523,19 @@ fn convert(cfg: &Config, to: Option<&str>) -> Result<()> {
     }
 
     say!("{} → {}", from.display(), out.display());
-    say!("{was} → {} · {} entries, verified", fresh.format(), after.len());
+    say!(
+        "{was} → {} · {} entries, verified",
+        fresh.format(),
+        after.len()
+    );
     say!("the original is untouched · open the new file in KeePassXC before you replace it");
     Ok(())
 }
 
 /* `sennel audit`: the same findings the TUI's `!` shows, printed. The network
-   check lives out here rather than behind that key because a blocking http
-   request inside a frame loop is how a TUI stops redrawing, and because an
-   audit that reaches the internet should be something you typed. */
+check lives out here rather than behind that key because a blocking http
+request inside a frame loop is how a TUI stops redrawing, and because an
+audit that reaches the internet should be something you typed. */
 fn audit(cfg: &Config, pwned: bool) -> Result<()> {
     let vault = unlock(cfg)?;
 
@@ -479,9 +554,9 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
     }
 
     /* One request per prefix, not per entry. A vault where six entries
-       share a password should ask once, and passwords that merely share the
-       first five hex characters ride along in the same answer — which is the
-       same property that makes the k-anonymity worth anything. */
+    share a password should ask once, and passwords that merely share the
+    first five hex characters ride along in the same answer — which is the
+    same property that makes the k-anonymity worth anything. */
     say!();
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut breached = 0usize;
@@ -498,7 +573,10 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
         let count = pwned::count_in(&seen[&prefix], &suffix);
         if count > 0 {
             breached += 1;
-            say!("{:<40}  in {count} known breaches", printable(entry.title()));
+            say!(
+                "{:<40}  in {count} known breaches",
+                printable(entry.title())
+            );
         }
     }
     match breached {
@@ -510,10 +588,10 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
 
 /* `sennel import`: somebody else's export, into a group of its own.
 
-   Into a new group rather than merged into the tree the file describes:
-   an import is the one operation most likely to be regretted, and one
-   group is one thing to delete when it is. The file's own group column
-   becomes a subgroup, so the shape survives without colonising the vault. */
+Into a new group rather than merged into the tree the file describes:
+an import is the one operation most likely to be regretted, and one
+group is one thing to delete when it is. The file's own group column
+becomes a subgroup, so the shape survives without colonising the vault. */
 // `sennel export`: everything, in plaintext. Every refusal comes before the password prompt, so nobody
 // types a master password to be told the output has nowhere safe to go.
 fn export_vault(
@@ -537,7 +615,10 @@ fn export_vault(
     if let Some(path) = &target
         && path.exists()
     {
-        anyhow::bail!("{} is already there · move it or pick another --out", path.display());
+        anyhow::bail!(
+            "{} is already there · move it or pick another --out",
+            path.display()
+        );
     }
     let vault = unlock(cfg)?;
     let exported = export::render(&vault, format, group).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -550,7 +631,11 @@ fn export_vault(
             stdout.flush()?;
         }
     }
-    let plural = if exported.entries == 1 { "entry" } else { "entries" };
+    let plural = if exported.entries == 1 {
+        "entry"
+    } else {
+        "entries"
+    };
     eprintln!("exported {} {plural}", exported.entries);
     if exported.left_out_fields + exported.left_out_files > 0 {
         eprintln!(
@@ -559,7 +644,10 @@ fn export_vault(
         );
     }
     if let Some(path) = &target {
-        eprintln!("{} is plaintext · delete it when you are done", path.display());
+        eprintln!(
+            "{} is plaintext · delete it when you are done",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -568,19 +656,19 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
-    let mut text = std::fs::read_to_string(config::expand(file))
-        .with_context(|| format!("reading {file}"))?;
+    let mut text =
+        std::fs::read_to_string(config::expand(file)).with_context(|| format!("reading {file}"))?;
     let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"));
     /* The whole export, every password in it, in one buffer. Wiped as soon as
-       it has been parsed rather than left for the allocator — the rows that
-       came out of it wipe themselves on drop. */
+    it has been parsed rather than left for the allocator — the rows that
+    came out of it wipe themselves on drop. */
     text.zeroize();
     let found = found?;
     if found.rows.is_empty() {
         anyhow::bail!("{file} has a header and no entries");
     }
     /* Said before the password prompt: a dry run should not need the vault's
-       password to tell you what is in somebody else's csv. */
+    password to tell you what is in somebody else's csv. */
     if !found.ignored.is_empty() {
         eprintln!(
             "ignoring {} column(s): {}",
@@ -621,31 +709,31 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
             vault.format()
         );
     }
-    let (added, skipped) = import::into_vault(&mut vault, &found.rows, &into)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (added, skipped) =
+        import::into_vault(&mut vault, &found.rows, &into).map_err(|e| anyhow::anyhow!("{e}"))?;
     for note in &skipped {
         eprintln!("{}", printable(note));
     }
     vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
     say!("imported {added} entries into {into}");
     /* The export is still sitting on disk in the clear, which is the part
-       people forget once the import worked. */
+    people forget once the import worked. */
     eprintln!("{file} is still plaintext on disk · delete it");
     Ok(())
 }
 
 /* Every non-interactive path opens the vault the same way: prompt (or read a
-   piped line), read the key file if there is one, open, and wipe both. It was
-   copied into four commands, and all four passed `None` for the key file — so
-   a vault with one could not be reached from the command line at all. */
+piped line), read the key file if there is one, open, and wipe both. It was
+copied into four commands, and all four passed `None` for the key file — so
+a vault with one could not be reached from the command line at all. */
 fn unlock(cfg: &Config) -> Result<Vault> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
     let mut key_bytes = match &cfg.key_file {
-        Some(at) => Some(
-            std::fs::read(at).with_context(|| format!("reading key file {}", at.display()))?,
-        ),
+        Some(at) => {
+            Some(std::fs::read(at).with_context(|| format!("reading key file {}", at.display()))?)
+        }
         None => None,
     };
     let mut password = ask_password("password: ")?;
@@ -667,11 +755,11 @@ fn unlock(cfg: &Config) -> Result<Vault> {
 }
 
 /* The master password, from a terminal or from a pipe. rpassword needs a tty
-   and fails with "Device not configured" without one, which makes `get`
-   unusable from the very scripts it exists for. A piped stdin is read as one
-   line instead — the way every other tool takes a passphrase from a pipe.
+and fails with "Device not configured" without one, which makes `get`
+unusable from the very scripts it exists for. A piped stdin is read as one
+line instead — the way every other tool takes a passphrase from a pipe.
 
-   The buffer is the caller's to zeroize; this hands back the only copy. */
+The buffer is the caller's to zeroize; this hands back the only copy. */
 fn ask_password(prompt: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
         return Ok(rpassword::prompt_password(prompt)?);
@@ -685,15 +773,15 @@ fn ask_password(prompt: &str) -> Result<String> {
 }
 
 /* `sennel get`, the whole non-interactive path. Unlocks, resolves one entry,
-   and either copies (staying alive for the wipe) or prints.
+and either copies (staying alive for the wipe) or prints.
 
-   Exit codes are the contract a script reads: 0 copied, 2 ambiguous, 3 not
-   found, 1 for everything else. Ambiguous and not-found are separated because
-   a script retrying with a longer needle wants to know which happened. */
+Exit codes are the contract a script reads: 0 copied, 2 ambiguous, 3 not
+found, 1 for everything else. Ambiguous and not-found are separated because
+a script retrying with a longer needle wants to know which happened. */
 fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -> Result<()> {
     /* Refused before the password prompt, not after: making somebody type a
-       master password and *then* telling them the output has nowhere safe to
-       go is the rude order to do this in. */
+    master password and *then* telling them the output has nowhere safe to
+    go is the rude order to do this in. */
     if to_stdout && std::io::stdout().is_terminal() && !force {
         anyhow::bail!(
             "--stdout into a terminal would leave the secret in your scrollback · pipe it, or --force"
@@ -707,7 +795,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
         vault::Found::Many(ids) => {
             eprintln!("{needle:?} matches {} entries:", ids.len());
             /* Titles only, and sanitised: this is vault text going to a
-               terminal, and it may have been written by anyone. */
+            terminal, and it may have been written by anyone. */
             for id in ids.iter().take(10) {
                 if let Some(entry) = vault.get_entry(id) {
                     eprintln!("  {}", printable(entry.title()));
@@ -726,14 +814,14 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     let entry = vault.get_entry(&id).expect("resolve returned a live id");
     let title = printable(entry.title());
     /* Wiped when this returns: the copy path below holds it across a
-       clipboard-timeout sleep, and a `get -p` that leaves the password in a
-       freed allocation undoes the point of every zeroize above it. */
+    clipboard-timeout sleep, and a `get -p` that leaves the password in a
+    freed allocation undoes the point of every zeroize above it. */
     let value = zeroize::Zeroizing::new(match field {
         Field::User => entry.username().to_string(),
         Field::Password => entry.password().to_string(),
         Field::Url => entry.url().to_string(),
         /* The code, never the seed: the same rule the TUI's `t` follows, and
-           the reason `get` has no flag that would hand over the seed. */
+        the reason `get` has no flag that would hand over the seed. */
         Field::Otp => match vault::totp_now(&entry) {
             Some((code, _)) => code,
             None => anyhow::bail!("{title} has no one-time code"),
@@ -751,11 +839,14 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     board.copy(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
     match board.timeout_secs() {
         /* The wipe is a thread inside this process, so exiting now would
-           abandon the secret on the clipboard. Wait it out, say so, and wipe
-           before returning — a `get` that exits instantly is a `get` that
-           leaves a password sitting there. */
+        abandon the secret on the clipboard. Wait it out, say so, and wipe
+        before returning — a `get` that exits instantly is a `get` that
+        leaves a password sitting there. */
         Some(secs) => {
-            eprintln!("copied the {} for {title} · clears in {secs}s", field.name());
+            eprintln!(
+                "copied the {} for {title} · clears in {secs}s",
+                field.name()
+            );
             std::thread::sleep(Duration::from_secs(secs));
             board.clear_now();
         }
@@ -772,13 +863,15 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
 // unless a clipboard manager took it.
 fn warn_copy_dies_on_exit() {
     if cfg!(target_os = "linux") {
-        eprintln!("the copy lasts only while a clipboard manager holds it  ·  use --stdout otherwise");
+        eprintln!(
+            "the copy lasts only while a clipboard manager holds it  ·  use --stdout otherwise"
+        );
     }
 }
 
 /* `sennel gen`: the generator on its own, with no entry to write it into and
-   no vault to unlock. Copies by default, like `get`, so the password is one
-   paste away and gone on the same timer. */
+no vault to unlock. Copies by default, like `get`, so the password is one
+paste away and gone on the same timer. */
 fn make_password(
     cfg: &Config,
     settings: config::Generator,
@@ -796,9 +889,11 @@ fn make_password(
     }
     let make = || {
         (match settings.kind {
-            generator::Kind::Complex => {
-                generator::generate(settings.length, settings.classes, settings.exclude_ambiguous)
-            }
+            generator::Kind::Complex => generator::generate(
+                settings.length,
+                settings.classes,
+                settings.exclude_ambiguous,
+            ),
             generator::Kind::Passphrase => generator::generate_passphrase(settings.words),
             generator::Kind::Pin => generator::generate_pin(settings.pin_length),
         })
@@ -817,7 +912,7 @@ fn make_password(
     let mut password = make()?;
     let board = Board::new(cfg.clipboard_timeout);
     /* Wiped before the error is raised, not after: `?` on the copy would
-       return with the plaintext still in this frame's String. */
+    return with the plaintext still in this frame's String. */
     let copied = board.copy(&password).map_err(|e| anyhow::anyhow!("{e}"));
     password.zeroize();
     copied?;
@@ -858,17 +953,17 @@ fn walk_groups(vault: &Vault) -> Vec<(GroupId, usize)> {
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     /* The window title follows the vault, so a wall of terminals says which
-       one holds what. Only written when it changes: an escape sequence per
-       frame is a write per frame for nothing. */
+    one holds what. Only written when it changes: an escape sequence per
+    frame is a write per frame for nothing. */
     let mut titled = String::new();
     while !app.quit {
         app.expire_flash();
         /* Once per frame, not per keypress: idleness is the absence of keys,
-           and nothing else on screen moves between messages to re-check it. */
+        and nothing else on screen moves between messages to re-check it. */
         app.check_idle();
         terminal.draw(|frame| ui::draw(frame, app))?;
         /* After the frame, not in the key handler: Argon2 blocks this thread,
-           and the screen has to carry "unlocking…" before it does. */
+        and the screen has to carry "unlocking…" before it does. */
         if app.unlocking {
             unlock_now(app);
             terminal.draw(|frame| ui::draw(frame, app))?;
@@ -879,7 +974,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
             terminal.draw(|frame| ui::draw(frame, app))?;
         }
         /* Sanitised: the title is a file name, and a file name may hold an
-           escape — which would go straight into the terminal's OSC. */
+        escape — which would go straight into the terminal's OSC. */
         let title = printable(&app.window_title());
         if title != titled {
             let _ = execute!(std::io::stdout(), SetTitle(&title));
@@ -902,9 +997,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
 }
 
 /* Wheel scrolls the pane under the pointer, click selects a row and hands
-   that pane the keys. Nothing here is the only way to do anything — the mouse
-   is a convenience over a keyboard app, so it stays out of the popups, where
-   a stray click would answer a question. */
+that pane the keys. Nothing here is the only way to do anything — the mouse
+is a convenience over a keyboard app, so it stays out of the popups, where
+a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
     app.drop_blocked_menu();
     // Ahead of `click`, whose copy rows match on the screen row alone and may sit under a menu row.
@@ -912,7 +1007,9 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         app.touch();
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => app.click_menu(mouse.column, mouse.row),
-            MouseEventKind::Down(MouseButton::Right) => app.right_click_menu(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Right) => {
+                app.right_click_menu(mouse.column, mouse.row)
+            }
             MouseEventKind::ScrollDown => app.wheel_menu(mouse.column, mouse.row, true),
             MouseEventKind::ScrollUp => app.wheel_menu(mouse.column, mouse.row, false),
             _ => {}
@@ -920,10 +1017,10 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         return;
     }
     /* The popups that ask a question keep the mouse out, so a stray click
-       cannot answer one. The detail popup is not a question — it is the only
-       detail view a narrow terminal has, and its rows copy on click like the
-       pane's do — so it stays in, and `click` only acts on a copy row while
-       it is up. */
+    cannot answer one. The detail popup is not a question — it is the only
+    detail view a narrow terminal has, and its rows copy on click like the
+    pane's do — so it stays in, and `click` only acts on a copy row while
+    it is up. */
     if app.view != app::View::Browser || app.popup_open() {
         return;
     }
@@ -997,18 +1094,18 @@ fn handle_commands_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* First, because this is the proof of presence: every key that reaches
-       the session restarts the idle clock, including the ones swallowed
-       below. The poll timeout is not presence, so `run` never touches it. */
+    the session restarts the idle clock, including the ones swallowed
+    below. The poll timeout is not presence, so `run` never touches it. */
     app.touch();
     app.drop_blocked_menu();
     /* Ahead of every screen's keys: it is the UI's own question and the
-       answer must not also reach the list behind it. */
+    answer must not also reach the list behind it. */
     if app.confirm.is_some() {
         handle_confirm_key(app, code, mods);
         return;
     }
     /* The entry form is modal the same way: typing lands in the boxes and
-       the browser behind it must not also act on the key. */
+    the browser behind it must not also act on the key. */
     if app.form.is_some() {
         handle_form_key(app, code, mods);
         return;
@@ -1033,7 +1130,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     /* The fields screen owns the keys, and its own add prompt owns them
-       harder: every printable key is part of a field name or value there. */
+    harder: every printable key is part of a field name or value there. */
     if app.fields.is_some() {
         handle_fields_key(app, code, mods);
         return;
@@ -1044,37 +1141,37 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     /* So is the change-password prompt, and more so than most: every
-       printable key is part of a master password, so `q` and `h` are text
-       here the way they are on the lock screen. */
+    printable key is part of a master password, so `q` and `h` are text
+    here the way they are on the lock screen. */
     if app.rekey.is_some() {
         handle_rekey_key(app, code, mods);
         return;
     }
     /* The search band is modal the same way: `q` types a letter into the
-       needle, `h` too. Enter and Esc hand the keys back to the browser —
-       routing reads `band`, not `search.is_some()`, because a kept filter
-       must not swallow the browser's keys. */
+    needle, `h` too. Enter and Esc hand the keys back to the browser —
+    routing reads `band`, not `search.is_some()`, because a kept filter
+    must not swallow the browser's keys. */
     if app.band {
         handle_search_key(app, code, mods);
         return;
     }
     /* Enter's detail popup is modal too: the browser behind it must not move
-       under a key aimed at the entry on screen. */
+    under a key aimed at the entry on screen. */
     if app.detail {
         handle_detail_key(app, code, mods);
         return;
     }
     /* The overlay swallows the next key rather than acting on it: anything
-       else makes dismissing it a guess about what the key also did. `q`
-       included — it used to fall through, which quit the session on the
-       browser and typed a character into the master password on the lock
-       screen, with the popup still up over the box it landed in. */
+    else makes dismissing it a guess about what the key also did. `q`
+    included — it used to fall through, which quit the session on the
+    browser and typed a character into the master password on the lock
+    screen, with the popup still up over the box it landed in. */
     if app.show_help {
         app.show_help = false;
         return;
     }
     /* The picker owns the keys while it is open: the boxes behind it must not
-       take a letter meant to narrow a list. */
+    take a letter meant to narrow a list. */
     if app.browse.is_some() {
         handle_browse_key(app, code, mods);
         return;
@@ -1085,28 +1182,28 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     /* So does the generator: `y` copies what is on screen, and it must not
-       also copy the username of whatever the browser's cursor is on. */
+    also copy the username of whatever the browser's cursor is on. */
     if app.mint.is_some() {
         handle_mint_key(app, code, mods);
         return;
     }
     /* The lock screen owns every printable key, so the overlay needs one no
-       password can contain: `h` there types an h, which left the bar's "h
-       keys" promising a key that does not exist on the first screen anybody
-       sees. */
+    password can contain: `h` there types an h, which left the bar's "h
+    keys" promising a key that does not exist on the first screen anybody
+    sees. */
     if matches!(code, KeyCode::F(1)) {
         app.open_help();
         return;
     }
     /* The lock screen owns its own keys: typing `q` or `h` must land in the
-       box, not end the session or open the overlay. Only ^c quits here. */
+    box, not end the session or open the overlay. Only ^c quits here. */
     if app.view == app::View::Unlock {
         handle_unlock_key(app, code, mods);
         return;
     }
     /* The vault owns its own keys: movement, panes and (from later waves)
-       copy, edit and search. The global match below stays for the views that
-       have no screen of their own. */
+    copy, edit and search. The global match below stays for the views that
+    have no screen of their own. */
     if app.view == app::View::Browser {
         handle_browser_key(app, code, mods);
         return;
@@ -1116,17 +1213,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc never ends the session. There is no screen behind the lock yet,
-           so it says so rather than going silent: a key that goes silent
-           reads as a broken key. */
+        so it says so rather than going silent: a key that goes silent
+        reads as a broken key. */
         KeyCode::Esc => app.say("this is the top  ·  q quits"),
         _ => {}
     }
 }
 
- /* The vault's own keys: movement first, since a stuck cursor reads as a
-    dead tool. Keys owned by later waves (/ search) say which wave they
-    belong to rather than going silent: a key that goes silent reads as a
-    broken key. */
+/* The vault's own keys: movement first, since a stuck cursor reads as a
+dead tool. Keys owned by later waves (/ search) say which wave they
+belong to rather than going silent: a key that goes silent reads as a
+broken key. */
 fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1134,8 +1231,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc unwinds the armed cut, then a kept filter, before its usual
-           report: a mis-cut is one press from undone, a bad needle one press
-           from gone, and Esc never quits. */
+        report: a mis-cut is one press from undone, a bad needle one press
+        from gone, and Esc never quits. */
         KeyCode::Esc => {
             if !app.drop_cut() && !app.clear_search() {
                 app.say("this is the top  ·  q quits");
@@ -1148,21 +1245,21 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('d') if ctrl => app.page_pane(true),
         KeyCode::Char('u') if ctrl => app.page_pane(false),
         /* Locking on demand used to mean quitting: `^l` drops the vault and
-           leaves the session on the password prompt. */
+        leaves the session on the password prompt. */
         KeyCode::Char('l') if ctrl => app.lock_now(),
         /* Sennel autosaves, so `^s` is mostly the key a hand presses anyway —
-           and it is the retry when a save failed or was refused. */
+        and it is the retry when a save failed or was refused. */
         KeyCode::Char('s') if ctrl => app.save_now(),
         KeyCode::Char('r') if ctrl => app.reload_vault(),
         // `^m` is Enter to a terminal, so the merge sits on `^f` for fuse.
         KeyCode::Char('f') if ctrl => app.merge_vault(),
         /* `^t` walks the palettes: a theme is picked by looking at it, not by
-           reading its name in a config file. */
+        reading its name in a config file. */
         KeyCode::Char('t') if ctrl => app.cycle_theme(),
         /* `P`: a password with no entry to put it in. Shifted, beside the
-           other structural verbs, and not `^g` — that already narrows the
-           search to a group, and one key with two meanings in one keymap is
-           a key nobody trusts. */
+        other structural verbs, and not `^g` — that already narrows the
+        search to a group, and one key with two meanings in one keymap is
+        a key nobody trusts. */
         KeyCode::Char('P') => app.open_mint(),
         KeyCode::Char('g') | KeyCode::Home => app.jump_pane(false),
         KeyCode::Char('G') | KeyCode::End => app.jump_pane(true),
@@ -1170,14 +1267,14 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('*') => app.toggle_password(),
         KeyCode::Char('y') => app.copy_username(),
         /* Before the bare `p`, which matches whatever modifiers are held:
-           changing the master password sits one key away from copying one,
-           so the ctrl arm has to be the one tested first. */
+        changing the master password sits one key away from copying one,
+        so the ctrl arm has to be the one tested first. */
         KeyCode::Char('p') if ctrl => app.open_rekey(),
         KeyCode::Char('p') => app.copy_password(),
         KeyCode::Char('U') => app.copy_url(),
         KeyCode::Char('t') => app.copy_totp(),
         /* Case carries meaning: `a` adds, `A` names a group (wave 5), so
-           the edit keys stay lowercase-shifted apart on purpose. */
+        the edit keys stay lowercase-shifted apart on purpose. */
         KeyCode::Char('a') => app.open_add_form(),
         KeyCode::Char('e') => app.open_edit_form(),
         /* Group keys. A and E name groups from either pane; D follows the
@@ -1186,13 +1283,13 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            never a slip away from a movement key. */
         KeyCode::Char('!') => app.open_audit(),
         /* `F`: custom fields and attachments. Upper case, beside the other
-           structural keys, and never a slip from `f`. */
+        structural keys, and never a slip from `f`. */
         KeyCode::Char('F') => app.open_fields(),
         /* `H`: old versions, which only ever come from another client. */
         KeyCode::Char('H') => app.open_history(),
         /* `>` and `<` reorganise the tree without a cut-and-paste trip.
-           Groups pane only: on entries the cursor is on a row, not a folder,
-           and `X`/`V` is the move that means something there. */
+        Groups pane only: on entries the cursor is on a row, not a folder,
+        and `X`/`V` is the move that means something there. */
         KeyCode::Char('>') if app.active_pane == app::Pane::Groups => app.reparent_group(true),
         KeyCode::Char('<') if app.active_pane == app::Pane::Groups => app.reparent_group(false),
         KeyCode::Char('A') => app.open_group_prompt_new(),
@@ -1202,7 +1299,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('X') => app.cut_selected(),
         KeyCode::Char('V') => app.paste_cut(),
         /* Left folds on the groups pane and hops there from the entries pane;
-           Right re-opens. `o` cycles the entries order. */
+        Right re-opens. `o` cycles the entries order. */
         KeyCode::Left if app.active_pane == app::Pane::Groups => app.collapse_group(),
         KeyCode::Left => app.switch_pane(),
         KeyCode::Right if app.active_pane == app::Pane::Groups => app.expand_group(),
@@ -1210,7 +1307,7 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Right => app.open_detail(),
         KeyCode::Char('o') => app.cycle_order(),
         /* n/N walk the matches while the band is live, and step entries
-           otherwise — the same key, honest in both modes. */
+        otherwise — the same key, honest in both modes. */
         KeyCode::Char('n') => app.jump_match(true),
         KeyCode::Char('N') => app.jump_match(false),
         /* `u` undoes the last one-slot change; ^u stays page-up. */
@@ -1218,8 +1315,8 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('/') => app.open_search(),
         KeyCode::Char(':') => app.open_commands(),
         /* The near misses of a keymap that means case: silence here reads as
-           a broken key, and the message is the only thing that teaches the
-           shift. */
+        a broken key, and the message is the only thing that teaches the
+        shift. */
         KeyCode::Char(c @ ('x' | 'v' | 'd')) => app.say(format!(
             "{} is {} here  ·  shift matters in this keymap",
             c,
@@ -1230,15 +1327,15 @@ fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         )),
         /* Enter opens what the cursor is on: a group unfolds and hands over
-           its entries, an entry opens the detail popup. */
+        its entries, an entry opens the detail popup. */
         KeyCode::Enter => app.open_selection(),
         _ => {}
     }
 }
 
 /* The detail popup's own keys: the copies and the reveal it advertises, and
-   nothing that would move the list behind it. `e` edits the entry being read,
-   which is where the hand already is. */
+nothing that would move the list behind it. `e` edits the entry being read,
+which is where the hand already is. */
 fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1256,7 +1353,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.open_edit_form();
         }
         /* The popup is the detail view below 100 columns, so reading the next
-           entry must not mean closing it, moving, and opening it again. */
+        entry must not mean closing it, moving, and opening it again. */
         KeyCode::Char('j') | KeyCode::Down => app.step_detail(true),
         KeyCode::Char('k') | KeyCode::Up => app.step_detail(false),
         KeyCode::Char('n') => app.jump_match(true),
@@ -1266,8 +1363,8 @@ fn handle_detail_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The search band owns every printable key while it is open — `q` types a
-   letter, `h` types a letter — so only named chords and Enter/Esc are
-   commands. The shape mirrors the form boxes exactly. */
+letter, `h` types a letter — so only named chords and Enter/Esc are
+commands. The shape mirrors the form boxes exactly. */
 fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1279,8 +1376,8 @@ fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Enter => app.keep_search(),
         /* The list the band is filtering is the list the arrows move. Typing
-           a needle and reaching for ↓ is what every fuzzy finder has taught,
-           and the caret keys stay on ←/→ where the text is. */
+        a needle and reaching for ↓ is what every fuzzy finder has taught,
+        and the caret keys stay on ←/→ where the text is. */
         KeyCode::Down => app.step_entry(true),
         KeyCode::Up => app.step_entry(false),
         KeyCode::Char('n') if ctrl => app.step_entry(true),
@@ -1302,29 +1399,29 @@ fn handle_search_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The form owns every printable key while it is open — `q` types a letter,
-   `h` types a letter — so only named chords and Enter/Esc are commands. The
-   shape mirrors the unlock boxes: Tab cycles, ^u/^w clear, Enter submits. */
+`h` types a letter — so only named chords and Enter/Esc are commands. The
+shape mirrors the unlock boxes: Tab cycles, ^u/^w clear, Enter submits. */
 fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
         /* ^c asks the quit guard rather than dying mid-edit: the form may
-           hold changes the autosave never got to make. */
+        hold changes the autosave never got to make. */
         KeyCode::Char('c') if ctrl => app.ask_quit(),
         KeyCode::Esc => app.cancel_form(),
         KeyCode::Tab | KeyCode::Down if !ctrl => app.next_form_field(true),
         KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_form_field(false),
         KeyCode::Char('u') if ctrl => app.form_clear(),
         /* ^s generates into the password box: a fresh secret without
-           leaving the form, named in the flash with its entropy. */
+        leaving the form, named in the flash with its entropy. */
         KeyCode::Char('s') if ctrl => app.form_generate(),
         /* ^y copies the password box before the entry is saved: paste it
-           into the site first, then Enter keeps it. */
+        into the site first, then Enter keeps it. */
         KeyCode::Char('y') if ctrl => app.form_copy_password(),
         /* The lock screen's reveal, on the same key: a generated password
-           masked end to end cannot be checked before it is stored. */
+        masked end to end cannot be checked before it is stored. */
         KeyCode::Char('r') if ctrl => app.toggle_form_reveal(),
         /* Enter submits, so a line break needs a key of its own — otherwise
-           notes can lose one and never gain one. */
+        notes can lose one and never gain one. */
         KeyCode::Enter if mods.contains(KeyModifiers::ALT) => app.form_newline(),
         KeyCode::Char('j') if ctrl => app.form_newline(),
         KeyCode::Char('w') if ctrl => app.form_kill_word(),
@@ -1343,10 +1440,10 @@ fn handle_form_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The group prompt: one box, so no cycling — just editing keys, Enter and
-   Esc. Same shape as the entry form minus the field movement. */
+Esc. Same shape as the entry form minus the field movement. */
 /* Old versions of an entry. `D` clears the lot, which is the only write this
-   screen has: there is no "restore this version", because that is an edit and
-   the form is where edits happen. */
+screen has: there is no "restore this version", because that is an edit and
+the form is where edits happen. */
 fn handle_history_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1361,8 +1458,8 @@ fn handle_history_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The fields screen. While the add prompt is up it takes every printable
-   key, because a field name or value can be any of them; otherwise this is a
-   list you steer, with one key per verb. */
+key, because a field name or value can be any of them; otherwise this is a
+list you steer, with one key per verb. */
 fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     if app.fields.as_ref().is_some_and(|f| f.adding.is_some()) {
@@ -1393,8 +1490,8 @@ fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The audit list: move, open, leave. Enter is the whole point — a list of
-   problems you cannot act on from where you are standing is a list nobody
-   works through. */
+problems you cannot act on from where you are standing is a list nobody
+works through. */
 fn handle_audit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1408,8 +1505,8 @@ fn handle_audit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* Two masked boxes and nothing else. Every printable key is text, including
-   the ones that are verbs everywhere else, so the reveal is `^r` and the way
-   out is Esc. */
+the ones that are verbs everywhere else, so the reveal is `^r` and the way
+out is Esc. */
 fn handle_rekey_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1445,8 +1542,8 @@ fn handle_group_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The file picker: movement, a typed filter, and the two keys that leave it.
-   Left goes up a directory rather than moving a caret — there is no text here
-   to move through, only a tree. */
+Left goes up a directory rather than moving a caret — there is no text here
+to move through, only a tree. */
 fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1467,7 +1564,7 @@ fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* The vault library. Same shape as the picker above, plus `^d`, which drops
-   a row from the list and never touches the file behind it. */
+a row from the list and never touches the file behind it. */
 fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1488,7 +1585,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* One key per knob, and every one of them rolls a new password: the screen
-   must never describe settings the password on it was not drawn from. */
+must never describe settings the password on it was not drawn from. */
 fn handle_mint_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -1500,7 +1597,7 @@ fn handle_mint_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // `y` copies here as it does everywhere else in the browser.
         KeyCode::Char('y') | KeyCode::Enter => app.mint_copy(),
         /* `t` walks the kinds — complex, passphrase, pin — and rolls at
-           each stop, so the screen never describes a secret it did not draw. */
+        each stop, so the screen never describes a secret it did not draw. */
         KeyCode::Char('t') => app.mint_cycle_kind(),
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => app.mint_resize(true),
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left => app.mint_resize(false),
@@ -1513,33 +1610,33 @@ fn handle_mint_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 /* Every printable key is text while the lock owns the screen, so `q` types a
-   letter instead of ending the session. The shape mirrors earworm's prompt
-   keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
-   unlocks, Esc clears-or-reports, ^c quits. */
+letter instead of ending the session. The shape mirrors earworm's prompt
+keys: Tab/Up/Down cycle boxes, ^u/^w clear, arrows move by char, Enter
+unlocks, Esc clears-or-reports, ^c quits. */
 fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Esc if !app.active_unlock_value().is_empty() => app.unlock_clear(),
         /* The lock is the screen behind everything, so Esc has nothing to go
-           back to. It says so rather than quitting: Esc means the same thing
-           on every screen or it means nothing anywhere. */
+        back to. It says so rather than quitting: Esc means the same thing
+        on every screen or it means nothing anywhere. */
         KeyCode::Esc => app.say("locked  ·  ^c quits"),
         KeyCode::Tab | KeyCode::Down if !ctrl => app.next_unlock_field(true),
         KeyCode::BackTab | KeyCode::Up if !ctrl => app.next_unlock_field(false),
         KeyCode::Char('u') if ctrl => app.unlock_clear(),
         KeyCode::Char('w') if ctrl => app.unlock_kill_word(),
         /* `^r` flips the password box to plain text, matching the browser's
-           detail-pane reveal on a key a password cannot contain: every
-           printable key here is text, `*` and all — a password with a star
-           in it would have been typed missing it. */
+        detail-pane reveal on a key a password cannot contain: every
+        printable key here is text, `*` and all — a password with a star
+        in it would have been typed missing it. */
         KeyCode::Char('r') if ctrl => app.toggle_unlock_reveal(),
         /* `^o`: pick the vault from a list instead of typing its path. */
         KeyCode::Char('o') if ctrl => app.open_browse(),
         // The library mixes vaults with and without a hardware key, so it is chosen here.
         KeyCode::Char('y') if ctrl => app.toggle_yubikey(),
         /* `^v`: the vaults this machine has opened before, which is a shorter
-           list than the disk and the one a second vault lives on. */
+        list than the disk and the one a second vault lives on. */
         KeyCode::Char('v') if ctrl => app.open_library(),
         // The first screen anybody sees is the first one worth recolouring.
         KeyCode::Char('t') if ctrl => app.cycle_theme(),
@@ -1552,7 +1649,7 @@ fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Delete if !ctrl => app.unlock_delete(),
         KeyCode::Backspace => app.unlock_backspace(),
         /* The file box takes its own Enter: applying it is not an unlock, it
-           names the vault the next unlock opens. */
+        names the vault the next unlock opens. */
         KeyCode::Enter if app.unlock_field == crate::app::UnlockField::File => {
             app.accept_file_box()
         }
@@ -1569,22 +1666,22 @@ fn unlock_now(app: &mut App) {
     // Cleared before any early return, or the frame loop runs this again next frame.
     app.unlocking = false;
     /* Taken, not borrowed: `try_unlock` consumes and zeroizes on every path,
-       and a take leaves `App` holding nothing the moment the key is read. */
+    and a take leaves `App` holding nothing the moment the key is read. */
     // Replaced, not taken: `mem::take` leaves zero capacity, so the next password
     // would grow through unwiped reallocations. See `app::secret_box`.
     let mut password: Vec<u8> =
         std::mem::replace(&mut app.unlock_password, app::secret_box()).into_bytes();
     /* Copied out first: the read below borrows `app` through the match, and a
-       key-file error must still reach `say`. Key bytes are key material too,
-       wiped the moment the attempt returns. */
+    key-file error must still reach `say`. Key bytes are key material too,
+    wiped the moment the attempt returns. */
     let key_path = app.unlock_keyfile.trim().to_string();
     let mut key_bytes: Option<Vec<u8>> = match key_path.as_str() {
         "" => None,
         path => match std::fs::read(path) {
             Ok(b) => Some(b),
             /* Named, not probed further: the next step is a path the user can
-               check, and the content is key material that never reaches the
-               screen. */
+            check, and the content is key material that never reaches the
+            screen. */
             Err(_) => {
                 app.error(format!("cannot read key file {path}"));
                 password.zeroize();
@@ -1601,22 +1698,23 @@ fn unlock_now(app: &mut App) {
 }
 
 /* `y` and Enter mean yes anywhere; `q` and `^c` only on the quit question,
-   where they already mean quit — so `qq` still answers, and neither is a
-   hidden yes on a delete. Everything else dismisses: an unrecognised key
-   must not lose work. */
+where they already mean quit — so `qq` still answers, and neither is a
+hidden yes on a delete. Everything else dismisses: an unrecognised key
+must not lose work. */
 fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let quitting = matches!(app.confirm, Some(Confirm::Quit));
-    let yes = matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter)
-        || (quitting
-            && (matches!(code, KeyCode::Char('q'))
-                || (matches!(code, KeyCode::Char('c'))
-                    && mods.contains(KeyModifiers::CONTROL))));
+    let yes = matches!(
+        code,
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+    ) || (quitting
+        && (matches!(code, KeyCode::Char('q'))
+            || (matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL))));
     let question = app.confirm.take();
     if yes {
         match question {
             Some(Confirm::Quit) => app.quit = true,
             /* The delete acts at once: the popup said what it was about, so
-               a yes needs no second popup between answer and effect. */
+            a yes needs no second popup between answer and effect. */
             Some(Confirm::DeleteEntry { id, .. }) => app.confirm_delete_entry(id),
             Some(Confirm::DeleteGroup { id, .. }) => app.confirm_delete_group(id),
             None => {}
@@ -1631,7 +1729,7 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
 
     /* The guard on the one key that can still lose work, so an unrecognised
-       key must not be an accidental yes. */
+    key must not be an accidental yes. */
     #[test]
     fn only_a_deliberate_key_confirms_the_quit() {
         let asked = || {
@@ -1640,11 +1738,7 @@ mod tests {
             app
         };
 
-        for code in [
-            KeyCode::Char('y'),
-            KeyCode::Char('q'),
-            KeyCode::Enter,
-        ] {
+        for code in [KeyCode::Char('y'), KeyCode::Char('q'), KeyCode::Enter] {
             let mut app = asked();
             handle_confirm_key(&mut app, code, KeyModifiers::NONE);
             assert!(app.quit, "{code:?} was supposed to mean yes");
@@ -1665,7 +1759,7 @@ mod tests {
     }
 
     /* `q` means quit and `^c` means cancel everywhere else in the app: on a
-       delete confirm, which advertises only `y`, neither may be a yes. */
+    delete confirm, which advertises only `y`, neither may be a yes. */
     #[test]
     fn q_and_ctrl_c_do_not_confirm_a_delete() {
         for (code, mods) in [
@@ -1685,8 +1779,8 @@ mod tests {
     }
 
     /* The overlay swallows whatever dismisses it. `q` used to fall through:
-       on the browser that quit the session outright, and on the lock screen
-       it typed into the master password while the popup stayed up. */
+    on the browser that quit the session outright, and on the lock screen
+    it typed into the master password while the popup stayed up. */
     #[test]
     fn any_key_closes_the_overlay_and_reaches_nothing_behind_it() {
         let mut app = open_browser();
@@ -1703,7 +1797,7 @@ mod tests {
     }
 
     /* F1, because the lock screen takes every printable key as text and the
-       bar promises a keys table there. */
+    bar promises a keys table there. */
     #[test]
     fn f1_opens_the_overlay_on_the_lock_screen() {
         let mut app = App::new();
@@ -1716,7 +1810,7 @@ mod tests {
     }
 
     /* The band filters a list, and the arrows move it: Enter first was the
-       only way to touch the results, which no fuzzy finder asks for. */
+    only way to touch the results, which no fuzzy finder asks for. */
     #[test]
     fn the_band_moves_the_entry_cursor_while_it_filters() {
         let mut app = open_browser();
@@ -1731,7 +1825,7 @@ mod tests {
     }
 
     /* A kept filter is about entries, so Enter leaves the keys there rather
-       than on a tree the user has stopped looking at. */
+    than on a tree the user has stopped looking at. */
     #[test]
     fn keeping_a_filter_hands_the_keys_to_the_results() {
         let mut app = open_browser();
@@ -1744,7 +1838,7 @@ mod tests {
     }
 
     /* Near misses of a keymap that means case answer instead of going quiet,
-       and Right goes forward into the entry the way Left goes back. */
+    and Right goes forward into the entry the way Left goes back. */
     #[test]
     fn the_near_miss_keys_say_what_the_real_one_is() {
         for (typed, wanted) in [('x', "X (cut)"), ('v', "V (paste)"), ('d', "D (delete)")] {
@@ -1760,10 +1854,10 @@ mod tests {
     }
 
     /* The hardening is two syscalls whose only proof is the limit they set:
-       a core dump of this process would hold every secret at once. The
-       companion check — that every entry point reaches it, not only the TUI —
-       is `every_entry_point_disables_core_dumps` in tests/get.rs, which has
-       to be out of process to see a real `main`. */
+    a core dump of this process would hold every secret at once. The
+    companion check — that every entry point reaches it, not only the TUI —
+    is `every_entry_point_disables_core_dumps` in tests/get.rs, which has
+    to be out of process to see a real `main`. */
     #[test]
     fn hardening_forbids_core_dumps() {
         harden();
@@ -1771,7 +1865,7 @@ mod tests {
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what
-       the way out is instead of going quiet. */
+    the way out is instead of going quiet. */
     #[test]
     fn esc_reports_rather_than_quitting() {
         let mut app = App::new();
@@ -1781,7 +1875,7 @@ mod tests {
     }
 
     /* The lock owns its keys: `q` and `h` are text in the password box, not
-       commands. Only ^c quits without a vault open. */
+    commands. Only ^c quits without a vault open. */
     #[test]
     fn plain_keys_type_on_the_lock_screen() {
         let mut app = App::new();
@@ -1813,7 +1907,11 @@ mod tests {
         handle_paste(&mut app, "DDDD/qq".to_string());
         assert!(app.confirm.is_none() && !app.band && !app.quit);
         assert_eq!(app.session.vault().unwrap().entry_count(), 1);
-        assert!(app.stage.contains("nothing here takes pasted text"), "{}", app.stage);
+        assert!(
+            app.stage.contains("nothing here takes pasted text"),
+            "{}",
+            app.stage
+        );
     }
 
     #[test]
@@ -1841,8 +1939,8 @@ mod tests {
     }
 
     /* `^r` on the lock flips the password box to plain text like the
-       browser's `*` does — and `*` itself stays a password character, which
-       is exactly why the lock's reveal cannot borrow the browser's key. */
+    browser's `*` does — and `*` itself stays a password character, which
+    is exactly why the lock's reveal cannot borrow the browser's key. */
     #[test]
     fn ctrl_r_reveals_on_the_lock_screen_and_star_types() {
         let mut app = App::new();
@@ -1851,28 +1949,28 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
         assert!(!app.unlock_reveal, "* revealed instead of typing");
         assert_eq!(app.unlock_password, "s3*");
-        handle_key(
-            &mut app,
-            KeyCode::Char('r'),
-            KeyModifiers::CONTROL,
-        );
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(app.unlock_reveal, "^r did not reveal");
         handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(!app.unlock_reveal, "second ^r did not re-mask");
     }
 
     /* Enter on the lock with no database configured says what to do rather
-       than failing on an empty path. */
+    than failing on an empty path. */
     #[test]
     fn enter_without_a_database_names_the_flag() {
         let mut app = App::new();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         /* Enter arms the unlock and the loop performs it after one frame, so
-           the screen can say "unlocking…" before Argon2 takes the thread. */
+        the screen can say "unlocking…" before Argon2 takes the thread. */
         assert!(app.unlocking, "enter did not arm the unlock");
         assert_eq!(app.stage, "unlocking…");
         unlock_now(&mut app);
-        assert_eq!(app.view, crate::app::View::Unlock, "unlocked without a file");
+        assert_eq!(
+            app.view,
+            crate::app::View::Unlock,
+            "unlocked without a file"
+        );
         assert!(app.stage.contains("--db"), "{}", app.stage);
         assert!(!app.unlocking, "the busy state outlived the attempt");
     }
@@ -1889,7 +1987,11 @@ mod tests {
         app.session.touch_id = touch_id;
         app.unlock_password = "correct horse".into();
         enter(&mut app);
-        assert!(app.session.is_open(), "the typed unlock failed: {}", app.stage);
+        assert!(
+            app.session.is_open(),
+            "the typed unlock failed: {}",
+            app.stage
+        );
         app.expire_now();
         app.lock_now();
         (app, tmp)
@@ -1902,7 +2004,11 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.stage, "unlocking…  Touch ID");
         unlock_now(&mut app);
-        assert!(app.session.is_open(), "the sealed password did not open it: {}", app.stage);
+        assert!(
+            app.session.is_open(),
+            "the sealed password did not open it: {}",
+            app.stage
+        );
         assert_eq!(app.view, crate::app::View::Browser);
     }
 
@@ -1924,7 +2030,10 @@ mod tests {
         enter(&mut app);
         refuse(None);
         assert!(!app.session.is_open());
-        assert!(!app.unlocking, "the frame loop would open the prompt again next frame");
+        assert!(
+            !app.unlocking,
+            "the frame loop would open the prompt again next frame"
+        );
         assert!(app.stage.contains("cancelled"), "{}", app.stage);
         assert!(app.quick_ready(), "a cancel forgot the sealed password");
         enter(&mut app);
@@ -1956,7 +2065,10 @@ mod tests {
         enter(&mut app);
         std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(!app.session.is_open(), "opened an unreadable file");
-        assert!(app.quick_ready(), "a read error dropped the sealed password");
+        assert!(
+            app.quick_ready(),
+            "a read error dropped the sealed password"
+        );
         enter(&mut app);
         assert!(app.session.is_open(), "{}", app.stage);
     }
@@ -1978,10 +2090,15 @@ mod tests {
     #[test]
     fn a_password_changed_elsewhere_stops_the_offer() {
         let (mut app, tmp) = typed_then_locked(true);
-        crate::vault::Vault::new().save_as(&tmp.0, "changed elsewhere", None).unwrap();
+        crate::vault::Vault::new()
+            .save_as(&tmp.0, "changed elsewhere", None)
+            .unwrap();
         enter(&mut app);
         assert!(!app.session.is_open());
-        assert!(!app.quick_ready(), "Enter would try the stale password forever");
+        assert!(
+            !app.quick_ready(),
+            "Enter would try the stale password forever"
+        );
     }
 
     #[test]
@@ -2000,7 +2117,11 @@ mod tests {
         assert!(crate::vault::Vault::open(&tmp.0, "battery staple", None).is_ok());
         app.lock_now();
         enter(&mut app);
-        assert!(app.session.is_open(), "sealed the old password: {}", app.stage);
+        assert!(
+            app.session.is_open(),
+            "sealed the old password: {}",
+            app.stage
+        );
     }
 
     // Sealed for one vault, never offered for another typed into the file box.
@@ -2018,15 +2139,19 @@ mod tests {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
-        vault.create_entry(&banks, "savings", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "savings", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app
     }
 
     /* Tab hands the movement keys to the other pane: j after Tab steps
-       entries, not groups. */
+    entries, not groups. */
     #[test]
     fn tab_hands_movement_to_the_other_pane() {
         let mut app = open_browser();
@@ -2042,7 +2167,7 @@ mod tests {
     }
 
     /* q on the vault asks first when there are unsaved changes: quitting
-       would take them with it. A second q answers, so qq never reads. */
+    would take them with it. A second q answers, so qq never reads. */
     #[test]
     fn q_asks_before_dropping_unsaved_changes() {
         let mut app = open_browser();
@@ -2055,7 +2180,7 @@ mod tests {
     }
 
     /* Copy keys with no board wired (tests never touch the OS clipboard)
-       report the missing board instead of reaching for one. */
+    report the missing board instead of reaching for one. */
     #[test]
     fn copy_without_a_board_says_so() {
         let mut app = open_browser();
@@ -2066,19 +2191,19 @@ mod tests {
     }
 
     /* Keys owned by later waves report their wave: silence reads as a
-       broken key. `e` is live now (wave 5), so on the entry-less root it
-       names the miss instead of opening a form on nothing. */
+    broken key. `e` is live now (wave 5), so on the entry-less root it
+    names the miss instead of opening a form on nothing. */
     #[test]
     fn future_keys_name_their_wave() {
         /* One app per key: the first flash is still up when the second key
-           lands, so the second message queues instead of showing. */
+        lands, so the second message queues instead of showing. */
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
         assert!(app.stage.contains("no entry"), "{}", app.stage);
     }
 
     /* `/` opens the band and the band owns the keys: `q` types a letter
-       rather than quitting, Enter keeps the filter and hands keys back. */
+    rather than quitting, Enter keeps the filter and hands keys back. */
     #[test]
     fn slash_opens_the_band_and_typing_filters() {
         let mut app = open_browser();
@@ -2089,7 +2214,10 @@ mod tests {
         assert!(!app.quit, "q quit from inside the band");
         handle_key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
         // No entry matches "qz", so the pane empties rather than lying.
-        assert!(app.entry_rows().is_empty(), "a non-matching needle kept rows");
+        assert!(
+            app.entry_rows().is_empty(),
+            "a non-matching needle kept rows"
+        );
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.search.is_some(), "enter did not keep the filter");
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
@@ -2098,27 +2226,30 @@ mod tests {
     }
 
     /* Esc with text in the band clears the filter; Esc again falls through
-       to the usual report. Esc never quits. */
+    to the usual report. Esc never quits. */
     #[test]
     fn esc_clears_the_band_before_its_usual_report() {
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
         /* A needle nothing matches: "qz" is not in any haystack, so the
-           pane empties instead of quietly ignoring the filter. */
+        pane empties instead of quietly ignoring the filter. */
         for ch in "qz".chars() {
             handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
         }
         assert!(app.entry_rows().is_empty(), "the needle did not filter");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.search.is_none(), "esc did not clear the band");
-        assert!(!app.entry_rows().is_empty(), "clearing did not restore rows");
+        assert!(
+            !app.entry_rows().is_empty(),
+            "clearing did not restore rows"
+        );
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.quit, "esc quit the session");
     }
 
     /* The form is modal: `a` opens it, `q` types a letter rather than
-       quitting, Enter writes the row into the cursor group. */
+    quitting, Enter writes the row into the cursor group. */
     #[test]
     fn a_opens_the_form_and_typing_lands_in_it() {
         let mut app = open_browser();
@@ -2132,14 +2263,19 @@ mod tests {
         let rows = app.entry_rows();
         assert_eq!(rows.len(), 3, "the typed row was not added");
         assert_eq!(
-            app.session.vault().unwrap().get_entry(&rows[2]).unwrap().title(),
+            app.session
+                .vault()
+                .unwrap()
+                .get_entry(&rows[2])
+                .unwrap()
+                .title(),
             "q"
         );
     }
 
     /* D asks, y answers, the row is gone. The full loop through the real
-       key handler, not the app method alone. Tab first: D follows the pane,
-       and deleting a group is a different question. */
+    key handler, not the app method alone. Tab first: D follows the pane,
+    and deleting a group is a different question. */
     #[test]
     fn d_asks_and_y_deletes() {
         let mut app = open_browser();
@@ -2149,7 +2285,11 @@ mod tests {
         assert!(app.confirm.is_some(), "D deleted without asking");
         handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
         // Banks held two rows; one delete leaves the other intact.
-        assert_eq!(app.entry_rows().len(), 1, "y deleted the wrong number of rows");
+        assert_eq!(
+            app.entry_rows().len(),
+            1,
+            "y deleted the wrong number of rows"
+        );
         assert!(app.confirm.is_none(), "y left the question open");
     }
 
@@ -2166,7 +2306,7 @@ mod tests {
     }
 
     /* `A` opens the group prompt and it is modal on the same terms: `q`
-       types a letter rather than quitting. */
+    types a letter rather than quitting. */
     #[test]
     fn a_opens_the_group_prompt_and_typing_lands_in_it() {
         let mut app = open_browser();
@@ -2177,9 +2317,9 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.group_prompt.is_none(), "enter did not submit");
         let tree = app.group_tree();
-        let named = tree.iter().any(|(id, _)| {
-            app.session.vault().unwrap().get_group(id).unwrap().name == "q"
-        });
+        let named = tree
+            .iter()
+            .any(|(id, _)| app.session.vault().unwrap().get_group(id).unwrap().name == "q");
         assert!(named, "the typed name did not become a group");
     }
 
@@ -2192,7 +2332,7 @@ mod tests {
     }
 
     /* Esc unwinds the armed cut first; only with an empty shelf does it fall
-       through to the top-of-tree report. */
+    through to the top-of-tree report. */
     #[test]
     fn esc_drops_the_cut_before_its_usual_report() {
         let mut app = open_browser();
@@ -2208,27 +2348,32 @@ mod tests {
     }
 
     /* Left on the entries pane hands the keys to the groups pane, where the
-       fold keys live; Left on the groups pane folds instead. */
+    fold keys live; Left on the groups pane folds instead. */
     #[test]
     fn left_hops_panes_from_entries_and_folds_on_groups() {
         let mut app = open_browser();
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto Banks
         let banks = app.group_cursor.unwrap();
         // Banks needs a subtree to fold: a leaf correctly refuses.
-        app.session.vault_mut()
+        app.session
+            .vault_mut()
             .unwrap()
             .create_group(&banks, "Work")
             .unwrap();
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.active_pane, crate::app::Pane::Entries);
         handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
-        assert_eq!(app.active_pane, crate::app::Pane::Groups, "Left did not hop");
+        assert_eq!(
+            app.active_pane,
+            crate::app::Pane::Groups,
+            "Left did not hop"
+        );
         handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.group_tree().len(), 2, "Left did not fold the tree");
     }
 
     /* `o` cycles the entries order from the browser; the flash names the new
-       order so the key never reads as dead. */
+    order so the key never reads as dead. */
     #[test]
     fn o_cycles_the_order_and_says_so() {
         let mut app = open_browser();
@@ -2242,7 +2387,7 @@ mod tests {
     }
 
     /* n/N walk the matches while the band is live: n moves to the next hit,
-       and running past the end says so instead of wrapping. */
+    and running past the end says so instead of wrapping. */
     #[test]
     fn n_walks_matches_and_names_the_end() {
         let mut app = open_browser();
@@ -2258,20 +2403,20 @@ mod tests {
         assert!(app.stage.contains("last match"), "{}", app.stage);
         handle_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE);
         /* 'first match' queues behind the still-live 'last match' flash:
-           force the expiry the frame loop would perform, then read. */
+        force the expiry the frame loop would perform, then read. */
         app.expire_now();
         assert!(app.stage.contains("first match"), "{}", app.stage);
     }
 
     /* The generator draws over the detail pane, and the pane's copy rows
-       match on the screen row alone — no column. A click one row under the
-       generated password used to land on `CopyRow::Password` and put the
-       selected *entry's* password on the clipboard instead. */
+    match on the screen row alone — no column. A click one row under the
+    generated password used to land on `CopyRow::Password` and put the
+    selected *entry's* password on the clipboard instead. */
     #[test]
     fn the_generator_keeps_the_mouse_out() {
         use crate::vault::Vault;
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut vault = Vault::new();
         let root = vault.root_id();
@@ -2284,7 +2429,7 @@ mod tests {
         app.step_pane(true);
 
         /* Short enough that the popup, drawn centred, covers the detail
-           pane's copy rows — which is the terminal the bug needed. */
+        pane's copy rows — which is the terminal the bug needed. */
         let mut t = Terminal::new(TestBackend::new(120, 18)).unwrap();
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let rows = app.copy_rows.clone();
@@ -2304,7 +2449,10 @@ mod tests {
                 },
             );
         }
-        assert_eq!(app.stage, before, "a click reached the vault behind the popup");
+        assert_eq!(
+            app.stage, before,
+            "a click reached the vault behind the popup"
+        );
 
         // And the panes must not scroll under a popup that is not scrollable.
         let where_it_was = app.entry_cursor;
@@ -2317,7 +2465,10 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.entry_cursor, where_it_was, "the list moved behind the popup");
+        assert_eq!(
+            app.entry_cursor, where_it_was,
+            "the list moved behind the popup"
+        );
     }
 
     /* The form routes ^s to the generator; plainly typing 's' still types. */
@@ -2356,7 +2507,10 @@ mod tests {
     }
 
     fn menu_item(menu: crate::app::MenuId, label: &str) -> crate::app::MenuItem {
-        let (_, _, items) = crate::app::MENUS.iter().find(|(id, _, _)| *id == menu).unwrap();
+        let (_, _, items) = crate::app::MENUS
+            .iter()
+            .find(|(id, _, _)| *id == menu)
+            .unwrap();
         *items.iter().find(|item| item.label == label).unwrap()
     }
 
@@ -2380,20 +2534,36 @@ mod tests {
 
         let mut app = groups();
         app.run_menu(&menu_item(MenuId::Entry, "Delete"));
-        assert!(matches!(app.confirm, Some(Confirm::DeleteEntry { .. })), "{:?}", app.confirm);
+        assert!(
+            matches!(app.confirm, Some(Confirm::DeleteEntry { .. })),
+            "{:?}",
+            app.confirm
+        );
         assert_eq!(app.active_pane, Pane::Groups, "the menu moved the pane");
 
         let mut app = entries();
         app.run_menu(&menu_item(MenuId::Group, "Delete"));
-        assert!(matches!(app.confirm, Some(Confirm::DeleteGroup { .. })), "{:?}", app.confirm);
+        assert!(
+            matches!(app.confirm, Some(Confirm::DeleteGroup { .. })),
+            "{:?}",
+            app.confirm
+        );
 
         let mut app = groups();
         app.run_menu(&menu_item(MenuId::Entry, "Cut"));
-        assert!(matches!(app.session.cut(), Some(Cut::Entry(_))), "{:?}", app.session.cut());
+        assert!(
+            matches!(app.session.cut(), Some(Cut::Entry(_))),
+            "{:?}",
+            app.session.cut()
+        );
 
         let mut app = entries();
         app.run_menu(&menu_item(MenuId::Group, "Cut"));
-        assert!(matches!(app.session.cut(), Some(Cut::Group(_))), "{:?}", app.session.cut());
+        assert!(
+            matches!(app.session.cut(), Some(Cut::Group(_))),
+            "{:?}",
+            app.session.cut()
+        );
     }
 
     // On the fields screen `D` deletes a field without asking, and in the entry popup `p` copies.
@@ -2406,7 +2576,10 @@ mod tests {
         app.open_fields();
         assert!(app.fields.is_some());
         app.run_menu(&menu_item(MenuId::Entry, "Delete"));
-        assert!(app.confirm.is_none(), "Delete reached the browser behind the fields screen");
+        assert!(
+            app.confirm.is_none(),
+            "Delete reached the browser behind the fields screen"
+        );
         assert!(app.fields.is_some());
 
         let mut app = open_browser();
@@ -2415,7 +2588,11 @@ mod tests {
         app.run_menu(&menu_item(MenuId::Vault, "Change master password"));
         assert!(app.rekey.is_none(), "rekey opened behind the entry popup");
         app.run_menu(&menu_item(MenuId::Vault, "Lock"));
-        assert_eq!(app.view, crate::app::View::Browser, "Lock ran behind the entry popup");
+        assert_eq!(
+            app.view,
+            crate::app::View::Browser,
+            "Lock ran behind the entry popup"
+        );
     }
 
     #[test]
@@ -2456,7 +2633,9 @@ mod tests {
     fn menu_screen() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "bank", "octo", "vault-password", "", "").unwrap();
+        vault
+            .create_entry(&root, "bank", "octo", "vault-password", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         app.switch_pane();
@@ -2466,7 +2645,11 @@ mod tests {
         (app, t)
     }
 
-    fn open_menu(app: &mut App, t: &mut ratatui::Terminal<ratatui::backend::TestBackend>, menu: crate::app::MenuId) {
+    fn open_menu(
+        app: &mut App,
+        t: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        menu: crate::app::MenuId,
+    ) {
         let (at, _) = *app.menu_bar.iter().find(|(_, id)| *id == menu).unwrap();
         left_click(app, at.x, at.y);
         assert_eq!(app.menu, Some(menu));
@@ -2480,7 +2663,10 @@ mod tests {
         let row = app.menu_row(0).unwrap();
         left_click(&mut app, row.x + 1, row.y);
         assert_eq!(app.menu, None);
-        assert!(app.group_prompt.is_some(), "Group › Add did not open the prompt");
+        assert!(
+            app.group_prompt.is_some(),
+            "Group › Add did not open the prompt"
+        );
     }
 
     #[test]
@@ -2491,7 +2677,11 @@ mod tests {
         let groups = app.group_area;
         left_click(&mut app, groups.x + 1, groups.y);
         assert_eq!(app.menu, None);
-        assert_eq!((app.entry_cursor, app.active_pane), (cursor, pane), "the click reached the panes");
+        assert_eq!(
+            (app.entry_cursor, app.active_pane),
+            (cursor, pane),
+            "the click reached the panes"
+        );
     }
 
     #[test]
@@ -2540,13 +2730,20 @@ mod tests {
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.menu, None);
-        assert!(app.group_prompt.is_some(), "Group › Rename did not open the prompt");
+        assert!(
+            app.group_prompt.is_some(),
+            "Group › Rename did not open the prompt"
+        );
 
         let (mut app, mut t) = menu_screen();
         open_menu(&mut app, &mut t, crate::app::MenuId::Vault);
         handle_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(app.menu, None);
-        assert_eq!(app.view, crate::app::View::Unlock, "^l was swallowed by the open menu");
+        assert_eq!(
+            app.view,
+            crate::app::View::Unlock,
+            "^l was swallowed by the open menu"
+        );
     }
 
     #[test]
@@ -2558,7 +2755,11 @@ mod tests {
         let drawn = app.menu_shown;
         assert!(drawn < app.menu_items().len(), "the box was not cut off");
         handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.menu_cursor, drawn - 1, "the cursor wrapped onto a hidden item");
+        assert_eq!(
+            app.menu_cursor,
+            drawn - 1,
+            "the cursor wrapped onto a hidden item"
+        );
     }
 
     #[test]
@@ -2577,7 +2778,10 @@ mod tests {
             },
         );
         assert_eq!(app.menu_cursor, 1);
-        assert_eq!(app.entry_cursor, cursor, "the wheel scrolled the pane behind the menu");
+        assert_eq!(
+            app.entry_cursor, cursor,
+            "the wheel scrolled the pane behind the menu"
+        );
     }
 
     fn right_click(app: &mut App, column: u16, row: u16) {
@@ -2598,8 +2802,12 @@ mod tests {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
-        vault.create_entry(&banks, "savings", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&banks, "checking", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&banks, "savings", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
@@ -2608,21 +2816,38 @@ mod tests {
 
         let groups = app.group_area;
         right_click(&mut app, groups.x + 2, groups.y + 1); // Banks
-        assert_eq!((app.menu, app.active_pane), (Some(MenuId::Group), Pane::Groups));
+        assert_eq!(
+            (app.menu, app.active_pane),
+            (Some(MenuId::Group), Pane::Groups)
+        );
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert_eq!((app.menu_area.x, app.menu_area.y), (groups.x + 2, groups.y + 2), "not at the pointer");
+        assert_eq!(
+            (app.menu_area.x, app.menu_area.y),
+            (groups.x + 2, groups.y + 2),
+            "not at the pointer"
+        );
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let entries = app.entry_area;
         let first = app.entry_cursor;
         right_click(&mut app, entries.x + 2, entries.y + 1);
-        assert_eq!((app.menu, app.active_pane), (Some(MenuId::Entry), Pane::Entries));
-        assert_ne!(app.entry_cursor, first, "the right-click did not select its row");
+        assert_eq!(
+            (app.menu, app.active_pane),
+            (Some(MenuId::Entry), Pane::Entries)
+        );
+        assert_ne!(
+            app.entry_cursor, first,
+            "the right-click did not select its row"
+        );
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert_eq!(app.menu_area.x, entries.x + 2);
         assert!(app.menu_area.bottom() <= 18, "the menu ran off the screen");
-        assert_eq!(app.menu_shown, app.menu_items().len(), "lifting it still cut items off");
+        assert_eq!(
+            app.menu_shown,
+            app.menu_items().len(),
+            "lifting it still cut items off"
+        );
     }
 
     #[test]
@@ -2630,7 +2855,9 @@ mod tests {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
         for name in ["a", "b", "c", "d", "e", "f"] {
-            vault.create_entry(&root, name, "octo", "vault-password", "", "").unwrap();
+            vault
+                .create_entry(&root, name, "octo", "vault-password", "", "")
+                .unwrap();
         }
         let mut app = App::new();
         app.open_vault(vault);
@@ -2641,7 +2868,10 @@ mod tests {
         let entries = app.entry_area;
         // A row holding both an entry and a copy target, which is what `click` would copy from.
         let row = app.copy_rows[0].0;
-        assert!(entries.y <= row && row < entries.y + 6, "no entry row beside a copy row");
+        assert!(
+            entries.y <= row && row < entries.y + 6,
+            "no entry row beside a copy row"
+        );
         right_click(&mut app, entries.x + 1, row);
         assert_eq!(app.copied, None, "the right-click copied a field");
         assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
@@ -2681,8 +2911,12 @@ mod tests {
     fn a_right_click_menu_hands_over_cleanly() {
         let mut vault = crate::vault::Vault::new();
         let root = vault.root_id();
-        vault.create_entry(&root, "checking", "u", "p", "", "").unwrap();
-        vault.create_entry(&root, "savings", "u", "p", "", "").unwrap();
+        vault
+            .create_entry(&root, "checking", "u", "p", "", "")
+            .unwrap();
+        vault
+            .create_entry(&root, "savings", "u", "p", "", "")
+            .unwrap();
         let mut app = App::new();
         app.open_vault(vault);
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
@@ -2694,7 +2928,11 @@ mod tests {
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         // Left of the box, which opens at the first pointer's column.
         right_click(&mut app, entries.x, entries.y + 1);
-        assert_eq!(app.menu_at, Some((entries.x, entries.y + 1)), "the second right-click was dropped");
+        assert_eq!(
+            app.menu_at,
+            Some((entries.x, entries.y + 1)),
+            "the second right-click was dropped"
+        );
         assert_ne!(app.entry_cursor, first);
 
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
@@ -2709,14 +2947,23 @@ mod tests {
     #[test]
     fn arrows_keep_a_right_click_menu_open_when_the_labels_are_hidden() {
         let (mut app, mut t) = menu_screen();
-        app.error("save failed  ·  the disk is full and nothing was written at all, again and again");
+        app.error(
+            "save failed  ·  the disk is full and nothing was written at all, again and again",
+        );
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(app.menu_bar.is_empty(), "the flash left room for the labels");
+        assert!(
+            app.menu_bar.is_empty(),
+            "the flash left room for the labels"
+        );
         let entries = app.entry_area;
         right_click(&mut app, entries.x + 1, entries.y);
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert_eq!(app.menu, Some(crate::app::MenuId::Group), "the arrow closed the menu");
+        assert_eq!(
+            app.menu,
+            Some(crate::app::MenuId::Group),
+            "the arrow closed the menu"
+        );
     }
 
     #[test]
@@ -2735,9 +2982,15 @@ mod tests {
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let selected = app.entry_cursor;
         let row = app.menu_row(1).unwrap();
-        assert!(row.y < entries.y + 4, "the menu does not cover an entry row");
+        assert!(
+            row.y < entries.y + 4,
+            "the menu does not cover an entry row"
+        );
         right_click(&mut app, row.x + 1, row.y);
-        assert_eq!(app.entry_cursor, selected, "the right-click selected the row behind the menu");
+        assert_eq!(
+            app.entry_cursor, selected,
+            "the right-click selected the row behind the menu"
+        );
         assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
     }
 
@@ -2750,7 +3003,9 @@ mod tests {
             let root = vault.root_id();
             let a = vault.create_group(&root, "A").unwrap();
             vault.create_group(&root, "B").unwrap();
-            vault.create_entry(&a, "checking", "u", "p", "", "").unwrap();
+            vault
+                .create_entry(&a, "checking", "u", "p", "", "")
+                .unwrap();
             let mut app = App::new();
             app.open_vault(vault);
             handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto A
@@ -2761,7 +3016,10 @@ mod tests {
         app.run_menu(&menu_item(MenuId::Group, "Cut"));
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE); // onto B
         app.run_menu(&menu_item(MenuId::Entry, "Paste"));
-        assert!(matches!(app.session.cut(), Some(Cut::Group(_))), "Entry › Paste moved the group");
+        assert!(
+            matches!(app.session.cut(), Some(Cut::Group(_))),
+            "Entry › Paste moved the group"
+        );
         app.run_menu(&menu_item(MenuId::Group, "Paste"));
         assert_eq!(app.session.cut(), None, "Group › Paste did not move it");
 
@@ -2769,7 +3027,10 @@ mod tests {
         app.run_menu(&menu_item(MenuId::Entry, "Cut"));
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         app.run_menu(&menu_item(MenuId::Group, "Paste"));
-        assert!(matches!(app.session.cut(), Some(Cut::Entry(_))), "Group › Paste moved the entry");
+        assert!(
+            matches!(app.session.cut(), Some(Cut::Entry(_))),
+            "Group › Paste moved the entry"
+        );
         app.run_menu(&menu_item(MenuId::Entry, "Paste"));
         assert_eq!(app.session.cut(), None, "Entry › Paste did not move it");
     }
@@ -2780,9 +3041,17 @@ mod tests {
         let entries = app.entry_area;
         right_click(&mut app, entries.x + 1, entries.y);
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let (label, _) = *app.menu_bar.iter().find(|(_, id)| *id == crate::app::MenuId::Entry).unwrap();
+        let (label, _) = *app
+            .menu_bar
+            .iter()
+            .find(|(_, id)| *id == crate::app::MenuId::Entry)
+            .unwrap();
         left_click(&mut app, label.x, label.y);
-        assert_eq!(app.menu, Some(crate::app::MenuId::Entry), "the click closed the menu");
+        assert_eq!(
+            app.menu,
+            Some(crate::app::MenuId::Entry),
+            "the click closed the menu"
+        );
         assert_eq!(app.menu_at, None);
     }
 
@@ -2796,7 +3065,10 @@ mod tests {
         let before = app.stage.clone();
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(app.stage, before, "Enter ran Vault › Save or Reload off screen");
+        assert_eq!(
+            app.stage, before,
+            "Enter ran Vault › Save or Reload off screen"
+        );
         assert_eq!(app.menu, None);
     }
 
@@ -2827,13 +3099,24 @@ mod tests {
         handle_key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
         assert!(app.commands.is_some());
         // Every menu row but the palette's own.
-        let all: usize = crate::app::MENUS.iter().map(|(_, _, items)| items.len()).sum();
+        let all: usize = crate::app::MENUS
+            .iter()
+            .map(|(_, _, items)| items.len())
+            .sum();
         assert_eq!(app.command_rows().len(), all - 1, "an empty query hid rows");
-        assert!(app.command_rows().iter().all(|(_, item)| item.label != "Commands"));
+        assert!(
+            app.command_rows()
+                .iter()
+                .all(|(_, item)| item.label != "Commands")
+        );
 
         type_text(&mut app, "cp pass");
         let (menu, item) = app.command_rows()[0];
-        assert_eq!((menu, item.label), ("Entry", "Copy password"), "the docs' example");
+        assert_eq!(
+            (menu, item.label),
+            ("Entry", "Copy password"),
+            "the docs' example"
+        );
         app.command_clear();
 
         type_text(&mut app, "lock");
@@ -2841,14 +3124,22 @@ mod tests {
         assert_eq!((menu, item.label), ("Vault", "Lock"));
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let screen: String = (0..18)
-            .map(|y| (0..120).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .map(|y| {
+                (0..120)
+                    .map(|x| t.backend().buffer()[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("Vault › Lock"), "{screen}");
 
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.commands.is_none());
-        assert_eq!(app.view, crate::app::View::Unlock, "Vault › Lock did not lock");
+        assert_eq!(
+            app.view,
+            crate::app::View::Unlock,
+            "Vault › Lock did not lock"
+        );
     }
 
     #[test]
@@ -2881,7 +3172,10 @@ mod tests {
         type_text(&mut app, "zzzz");
         assert!(app.command_rows().is_empty());
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(app.commands.is_some(), "Enter on no match closed the palette");
+        assert!(
+            app.commands.is_some(),
+            "Enter on no match closed the palette"
+        );
     }
 
     #[test]
@@ -2890,7 +3184,11 @@ mod tests {
         app.open_commands();
         handle_paste(&mut app, "lock\n".to_string());
         assert_eq!(app.commands.as_ref().unwrap().query, "lock");
-        assert_eq!(app.view, crate::app::View::Browser, "the pasted newline ran the row");
+        assert_eq!(
+            app.view,
+            crate::app::View::Browser,
+            "the pasted newline ran the row"
+        );
     }
 
     #[test]
@@ -2911,10 +3209,17 @@ mod tests {
         let (menu, item) = *app.command_rows().last().unwrap();
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let screen: String = (0..12)
-            .map(|y| (0..80).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .map(|y| {
+                (0..80)
+                    .map(|x| t.backend().buffer()[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains(&format!("▌ {menu} › {}", item.label)), "{screen}");
+        assert!(
+            screen.contains(&format!("▌ {menu} › {}", item.label)),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -2924,7 +3229,11 @@ mod tests {
         type_text(&mut app, &format!("{}tail", "x".repeat(80)));
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let screen: String = (0..18)
-            .map(|y| (0..120).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>())
+            .map(|y| {
+                (0..120)
+                    .map(|x| t.backend().buffer()[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("tail█"), "{screen}");

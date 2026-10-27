@@ -52,11 +52,21 @@ impl Settings {
         Ok(Settings {
             config_file: Some(path),
             db: file.db.as_deref().map(config::expand),
-            recent: file.recent.unwrap_or_default().iter().map(|p| config::expand(p)).collect(),
-            clipboard_timeout: file.clipboard_timeout.unwrap_or(config::DEFAULT_CLIPBOARD_TIMEOUT),
+            recent: file
+                .recent
+                .unwrap_or_default()
+                .iter()
+                .map(|p| config::expand(p))
+                .collect(),
+            clipboard_timeout: file
+                .clipboard_timeout
+                .unwrap_or(config::DEFAULT_CLIPBOARD_TIMEOUT),
             lock_timeout: file.lock_timeout.unwrap_or(config::DEFAULT_LOCK_TIMEOUT),
             backups: config::backups(file.backups).map_err(fail)?,
-            backup_dir: file.backup_dir.as_deref().map_or_else(config::default_backup_dir, config::expand),
+            backup_dir: file
+                .backup_dir
+                .as_deref()
+                .map_or_else(config::default_backup_dir, config::expand),
             yubikey: file.yubikey.as_deref().map(str::parse).transpose()?,
             ssh_agent: file.ssh_agent.unwrap_or(false),
             ssh_lifetime: config::lifetime(file.ssh_agent_lifetime).map_err(fail)?,

@@ -54,7 +54,11 @@ pub enum Undo {
         before: Entry,
     },
     /// A group moved to the bin, with everything under it.
-    RecycleGroup { id: GroupId, parent: GroupId, title: String },
+    RecycleGroup {
+        id: GroupId,
+        parent: GroupId,
+        title: String,
+    },
     /// An added entry that undo removes again.
     AddEntry { id: EntryId, title: String },
     /// A group rename that undo turns back.
@@ -365,7 +369,6 @@ impl<S: Seal> Session<S> {
         self.lock_after = (secs > 0).then(|| Duration::from_secs(secs));
     }
 
-
     /// Opens a vault into the session. The single way in, so backups and the agent are never skipped.
     pub fn open(&mut self, mut vault: Vault) -> AgentReport {
         // Unset (empty) in tests, which must not write backups anywhere.
@@ -448,7 +451,9 @@ impl<S: Seal> Session<S> {
             Some(again) if again != password => return Err(UnlockError::Mismatch),
             Some(_) => {
                 let mut vault = Vault::new();
-                vault.save_as_with(path, pw, key_file, yubikey).map(|()| vault)
+                vault
+                    .save_as_with(path, pw, key_file, yubikey)
+                    .map(|()| vault)
             }
             None => Vault::open_with(path, pw, key_file, yubikey),
         };
@@ -457,7 +462,6 @@ impl<S: Seal> Session<S> {
             e => UnlockError::Open(e),
         })
     }
-
 
     /// Points the Touch ID copy at the vault about to be unlocked. Called when that changes, since
     /// comparing paths stats the disk and a draw must not.
@@ -504,7 +508,6 @@ impl<S: Seal> Session<S> {
         result.map_err(QuickError::Unlock)
     }
 
-
     /// A keypress or click happened, so the idle clock restarts.
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
@@ -539,7 +542,6 @@ impl<S: Seal> Session<S> {
         self.undo.clear();
         failed
     }
-
 
     // Autosave after every mutation. Dirty is set before the attempt and cleared on success, so a
     // failed save leaves the quit guard armed. `may_block` is false until the screen has asked for
@@ -645,12 +647,14 @@ impl<S: Seal> Session<S> {
         self.cut = None;
     }
 
-
     /// To the recycle bin, or for good when it is already there. Returns which.
     pub fn delete_entry(&mut self, id: EntryId) -> Result<bool, Delete> {
         let vault = self.vault.as_mut().ok_or(Delete::Missing)?;
         let parent = vault.parent_group_of_entry(&id).ok_or(Delete::Missing)?;
-        let before = vault.get_entry(&id).map(|e| e.clone()).ok_or(Delete::Missing)?;
+        let before = vault
+            .get_entry(&id)
+            .map(|e| e.clone())
+            .ok_or(Delete::Missing)?;
         let forever = vault.is_recycled(&id);
         match forever {
             true => vault.expunge_entry(&id),
@@ -688,7 +692,6 @@ impl<S: Seal> Session<S> {
         Ok(forever)
     }
 
-
     /// Moves the cut into `target`. One-shot: the shelf empties on success and stays armed on failure.
     pub fn paste(&mut self, target: Option<GroupId>) -> Result<Cut, Paste> {
         let cut = self.cut.ok_or(Paste::Nothing)?;
@@ -714,7 +717,9 @@ impl<S: Seal> Session<S> {
         if vault.in_recycle_bin(&id) {
             return Err(Reparent::InBin);
         }
-        let parent_of = |vault: &Vault, id: &GroupId| vault.get_group(id).and_then(|g| g.parent().map(|p| p.id()));
+        let parent_of = |vault: &Vault, id: &GroupId| {
+            vault.get_group(id).and_then(|g| g.parent().map(|p| p.id()))
+        };
         let parent = parent_of(vault, &id).ok_or(Reparent::Missing)?;
         let target = if deeper {
             let siblings: Vec<GroupId> = vault.groups_in(&parent).iter().map(|g| g.id()).collect();
@@ -734,7 +739,6 @@ impl<S: Seal> Session<S> {
         Ok(())
     }
 
-
     // Adds to `group`, or edits `id`. Every box is checked before anything is written, so a bad date
     // or seed cannot leave half an entry behind.
     pub fn save_entry(
@@ -750,17 +754,28 @@ impl<S: Seal> Session<S> {
             None => None,
             Some(seed) if seed.trim().is_empty() => Some(None),
             Some(seed) => Some(Some(
-                crate::vault::totp_url(seed, input.title, input.username).map_err(EntryError::Otp)?,
+                crate::vault::totp_url(seed, input.title, input.username)
+                    .map_err(EntryError::Otp)?,
             )),
         };
         let tags = split_tags(input.tags);
-        let vault = self.vault.as_mut().ok_or(EntryError::Vault(VaultError::EntryNotFound))?;
+        let vault = self
+            .vault
+            .as_mut()
+            .ok_or(EntryError::Vault(VaultError::EntryNotFound))?;
         let id = match target {
             EntryTarget::Add(group) => {
                 let group = group.ok_or(EntryError::NoGroup)?;
                 let password = input.password.unwrap_or("");
                 let id = vault
-                    .create_entry(&group, input.title, input.username, password, input.url, input.notes)
+                    .create_entry(
+                        &group,
+                        input.title,
+                        input.username,
+                        password,
+                        input.url,
+                        input.notes,
+                    )
                     .map_err(EntryError::Vault)?;
                 if let Some(Some(url)) = otp.as_ref() {
                     let _ = vault.set_otp(&id, Some(url));
@@ -777,7 +792,14 @@ impl<S: Seal> Session<S> {
                 // Taken before the write and pushed only once it lands.
                 let before = vault.get_entry(&id).map(|e| e.clone());
                 vault
-                    .update_entry(&id, input.title, input.username, input.password, input.url, input.notes)
+                    .update_entry(
+                        &id,
+                        input.title,
+                        input.username,
+                        input.password,
+                        input.url,
+                        input.notes,
+                    )
                     .and_then(|()| vault.set_tags(&id, &tags))
                     .and_then(|()| vault.set_expiry(&id, expires))
                     .and_then(|()| match otp.as_ref() {
@@ -797,7 +819,11 @@ impl<S: Seal> Session<S> {
         })
     }
 
-    pub fn add_group(&mut self, parent: Option<GroupId>, name: &str) -> Result<GroupId, VaultError> {
+    pub fn add_group(
+        &mut self,
+        parent: Option<GroupId>,
+        name: &str,
+    ) -> Result<GroupId, VaultError> {
         let parent = parent.ok_or(VaultError::GroupNotFound)?;
         let vault = self.vault.as_mut().ok_or(VaultError::GroupNotFound)?;
         vault.create_group(&parent, name)
@@ -813,7 +839,6 @@ impl<S: Seal> Session<S> {
         Ok(())
     }
 
-
     fn push_undo(&mut self, step: Undo) {
         if self.undo.len() == UNDO_DEPTH {
             self.undo.remove(0);
@@ -828,16 +853,25 @@ impl<S: Seal> Session<S> {
         Some(match self.undo.pop()? {
             Undo::Edit { id, before } => {
                 let _ = vault.replace_entry(&before);
-                Undone::Edit { id, title: before.title().to_string() }
+                Undone::Edit {
+                    id,
+                    title: before.title().to_string(),
+                }
             }
             Undo::Delete { id, parent, before } => {
                 let _ = vault.restore_entry(&before, &parent);
-                Undone::Entry { id, title: before.title().to_string() }
+                Undone::Entry {
+                    id,
+                    title: before.title().to_string(),
+                }
             }
             // Out of the bin rather than back from the dead, so the entry keeps its id and history.
             Undo::Recycle { id, parent, before } => {
                 let _ = vault.move_entry(&id, &parent);
-                Undone::Entry { id, title: before.title().to_string() }
+                Undone::Entry {
+                    id,
+                    title: before.title().to_string(),
+                }
             }
             Undo::RecycleGroup { id, parent, title } => {
                 let _ = vault.move_group(&id, &parent);
@@ -854,10 +888,13 @@ impl<S: Seal> Session<S> {
         })
     }
 
-
     // The file on disk becomes the new password's, so nothing is left dirty. The Touch ID copy held
     // the old password, so it is sealed again.
-    pub fn rekey(&mut self, password: &str, key_file: Option<&[u8]>) -> Result<Rekeyed, VaultError> {
+    pub fn rekey(
+        &mut self,
+        password: &str,
+        key_file: Option<&[u8]>,
+    ) -> Result<Rekeyed, VaultError> {
         let vault = self.vault.as_mut().ok_or(VaultError::Unsaved)?;
         let removed = vault.rekey(password, key_file)?;
         self.moved();
@@ -870,9 +907,11 @@ impl<S: Seal> Session<S> {
                 Err(why) => touch_id_off = Some(why),
             }
         }
-        Ok(Rekeyed { removed, touch_id_off })
+        Ok(Rekeyed {
+            removed,
+            touch_id_off,
+        })
     }
-
 
     /// Added protected: a field somebody adds by hand to a password manager is more often a secret than not.
     pub fn add_field(&mut self, id: EntryId, name: &str, value: &str) -> Result<(), VaultError> {
@@ -925,7 +964,6 @@ impl<S: Seal> Session<S> {
         }
     }
 
-
     // Gives the agent the keys this vault's KeeAgent entries ask for. Opt-in, since it hands keys to
     // another process, and never a failed unlock.
     fn agent_load(&mut self) -> AgentReport {
@@ -957,13 +995,17 @@ impl<S: Seal> Session<S> {
     // Takes back the keys this session gave out, except those whose settings say to leave them;
     // those expire on their own, as every key would after a crash. Returns how many stayed.
     pub fn agent_release(&mut self) -> usize {
-        let (remove, _kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.agent_keys).into_iter().partition(|k| k.remove_at_close);
+        let (remove, _kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.agent_keys)
+            .into_iter()
+            .partition(|k| k.remove_at_close);
         if remove.is_empty() {
             return 0;
         }
         match crate::agent::Agent::connect() {
-            Ok(mut agent) => remove.iter().filter(|k| agent.remove(&k.blob).is_err()).count(),
+            Ok(mut agent) => remove
+                .iter()
+                .filter(|k| agent.remove(&k.blob).is_err())
+                .count(),
             Err(_) => remove.len(),
         }
     }
@@ -980,7 +1022,8 @@ impl<S: Seal> Session<S> {
         let settings = vault
             .attachment_bytes(&id, crate::agent::SETTINGS)
             .and_then(|bytes| crate::agent::parse_settings(&bytes));
-        let mut key = crate::agent::add_entry_key(&mut agent, vault, &id, name, settings.as_ref(), lifetime)?;
+        let mut key =
+            crate::agent::add_entry_key(&mut agent, vault, &id, name, settings.as_ref(), lifetime)?;
         key.remove_at_close = true;
         if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
             self.agent_keys.push(key);
@@ -1054,7 +1097,10 @@ mod tests {
         fn new(tag: &str) -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Temp(std::env::temp_dir().join(format!("sennel-session-{tag}-{}-{n}.kdbx", std::process::id())))
+            Temp(std::env::temp_dir().join(format!(
+                "sennel-session-{tag}-{}-{n}.kdbx",
+                std::process::id()
+            )))
         }
     }
 
@@ -1073,7 +1119,9 @@ mod tests {
         let mut vault = Vault::new();
         let root = vault.root_id();
         let banks = vault.create_group(&root, "Banks").unwrap();
-        let entry = vault.create_entry(&banks, "checking", "u", "p", "", "").unwrap();
+        let entry = vault
+            .create_entry(&banks, "checking", "u", "p", "", "")
+            .unwrap();
         let mut s = session();
         s.open(vault);
         (s, banks, entry)
@@ -1087,7 +1135,10 @@ mod tests {
     fn unlock(s: &mut Session<Fake>, file: &Temp, password: &str) -> Result<Unlocked, UnlockError> {
         let mut typed = password.as_bytes().to_vec();
         let result = s.unlock(&file.0, &mut typed, None, None, None);
-        assert!(typed.iter().all(|b| *b == 0), "the typed password outlived the unlock");
+        assert!(
+            typed.iter().all(|b| *b == 0),
+            "the typed password outlived the unlock"
+        );
         result
     }
 
@@ -1099,7 +1150,10 @@ mod tests {
         assert!(made.created && made.entries == 0);
         s.lock();
         assert!(!s.is_open());
-        assert!(matches!(unlock(&mut s, &file, "nope"), Err(UnlockError::WrongPassword)));
+        assert!(matches!(
+            unlock(&mut s, &file, "nope"),
+            Err(UnlockError::WrongPassword)
+        ));
         assert!(unlock(&mut s, &file, "pw").is_ok());
     }
 
@@ -1124,14 +1178,19 @@ mod tests {
         other.create_group(&root, "theirs").unwrap();
         other.save().unwrap();
 
-        let ours = s.add_group(s.vault.as_ref().map(Vault::root_id), "ours").unwrap();
+        let ours = s
+            .add_group(s.vault.as_ref().map(Vault::root_id), "ours")
+            .unwrap();
         assert_eq!(s.persist(true), Saved::Conflict);
         assert!(s.in_conflict() && s.is_dirty());
         s.cut = Some(Cut::Group(ours));
         let summary = s.merge(true).unwrap();
         assert!(!summary.describe().is_empty());
         assert!(!s.in_conflict() && !s.is_dirty());
-        assert!(s.cut.is_none() && s.undo.is_empty(), "a merge kept state about the old tree");
+        assert!(
+            s.cut.is_none() && s.undo.is_empty(),
+            "a merge kept state about the old tree"
+        );
         assert!(matches!(s.reload(), Err(Resolve::NoConflict)));
     }
 
@@ -1145,11 +1204,16 @@ mod tests {
         let root = other.root_id();
         other.create_group(&root, "theirs").unwrap();
         other.save().unwrap();
-        s.add_group(s.vault.as_ref().map(Vault::root_id), "ours").unwrap();
+        s.add_group(s.vault.as_ref().map(Vault::root_id), "ours")
+            .unwrap();
         assert_eq!(s.persist(true), Saved::Conflict);
         assert_eq!(s.save_now(true), SaveNow::Overwrote);
         let back = Vault::open_with(&file.0, "pw", None, None).unwrap();
-        let names: Vec<String> = back.groups_in(&back.root_id()).iter().map(|g| g.name.clone()).collect();
+        let names: Vec<String> = back
+            .groups_in(&back.root_id())
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
         assert_eq!(names, ["ours"]);
     }
 
@@ -1171,7 +1235,11 @@ mod tests {
         let locked_at = s.revision();
         assert_ne!(locked_at, open_at, "a lock left the revision where it was");
         s.open(Vault::new());
-        assert_ne!(s.revision(), locked_at, "an open left the revision where it was");
+        assert_ne!(
+            s.revision(),
+            locked_at,
+            "an open left the revision where it was"
+        );
     }
 
     #[test]
@@ -1181,19 +1249,31 @@ mod tests {
         assert!(matches!(s.delete_entry(entry), Err(Delete::Missing)));
         assert!(matches!(s.paste(None), Err(Paste::Nothing)));
         s.arm_cut(Cut::Entry(entry));
-        assert!(matches!(s.paste(Some(Vault::new().root_id())), Err(Paste::Locked)));
+        assert!(matches!(
+            s.paste(Some(Vault::new().root_id())),
+            Err(Paste::Locked)
+        ));
     }
 
     #[test]
     fn delete_goes_to_the_bin_then_for_good_and_undo_brings_it_back() {
         let (mut s, banks, entry) = open();
-        assert!(!s.delete_entry(entry).unwrap(), "the first delete was not to the bin");
+        assert!(
+            !s.delete_entry(entry).unwrap(),
+            "the first delete was not to the bin"
+        );
         assert!(s.vault.as_ref().unwrap().is_recycled(&entry));
         assert!(matches!(s.undo(), Some(Undone::Entry { id, .. }) if id == entry));
-        assert_eq!(s.vault.as_ref().unwrap().parent_group_of_entry(&entry), Some(banks));
+        assert_eq!(
+            s.vault.as_ref().unwrap().parent_group_of_entry(&entry),
+            Some(banks)
+        );
 
         s.delete_entry(entry).unwrap();
-        assert!(s.delete_entry(entry).unwrap(), "a delete inside the bin was not for good");
+        assert!(
+            s.delete_entry(entry).unwrap(),
+            "a delete inside the bin was not for good"
+        );
         assert!(s.vault.as_ref().unwrap().get_entry(&entry).is_none());
         assert!(matches!(s.undo(), Some(Undone::Entry { title, .. }) if title == "checking"));
         assert!(s.vault.as_ref().unwrap().get_entry(&entry).is_some());
@@ -1215,11 +1295,18 @@ mod tests {
         assert!(matches!(s.paste(Some(root)), Err(Paste::Nothing)));
         s.cut = Some(Cut::Group(root));
         assert!(matches!(s.paste(Some(banks)), Err(Paste::Vault(_))));
-        assert_eq!(s.cut, Some(Cut::Group(root)), "a failed paste emptied the shelf");
+        assert_eq!(
+            s.cut,
+            Some(Cut::Group(root)),
+            "a failed paste emptied the shelf"
+        );
         s.cut = Some(Cut::Entry(entry));
         assert_eq!(s.paste(Some(root)).unwrap(), Cut::Entry(entry));
         assert!(s.cut.is_none());
-        assert_eq!(s.vault.as_ref().unwrap().parent_group_of_entry(&entry), Some(root));
+        assert_eq!(
+            s.vault.as_ref().unwrap().parent_group_of_entry(&entry),
+            Some(root)
+        );
     }
 
     #[test]
@@ -1228,12 +1315,24 @@ mod tests {
         let root = s.vault.as_ref().unwrap().root_id();
         let cards = s.add_group(Some(root), "Cards").unwrap();
         assert!(matches!(s.reparent_group(root, true), Err(Reparent::Root)));
-        assert!(matches!(s.reparent_group(banks, true), Err(Reparent::NothingAbove)));
-        assert!(matches!(s.reparent_group(cards, false), Err(Reparent::AtTop)));
+        assert!(matches!(
+            s.reparent_group(banks, true),
+            Err(Reparent::NothingAbove)
+        ));
+        assert!(matches!(
+            s.reparent_group(cards, false),
+            Err(Reparent::AtTop)
+        ));
         s.reparent_group(cards, true).unwrap();
-        assert_eq!(s.vault.as_ref().unwrap().group_path(&cards), ["Root", "Banks", "Cards"]);
+        assert_eq!(
+            s.vault.as_ref().unwrap().group_path(&cards),
+            ["Root", "Banks", "Cards"]
+        );
         s.reparent_group(cards, false).unwrap();
-        assert_eq!(s.vault.as_ref().unwrap().group_path(&cards), ["Root", "Cards"]);
+        assert_eq!(
+            s.vault.as_ref().unwrap().group_path(&cards),
+            ["Root", "Cards"]
+        );
     }
 
     fn input<'a>(title: &'a str, expires: &'a str, otp: Option<&'a str>) -> EntryInput<'a> {
@@ -1254,10 +1353,22 @@ mod tests {
         let (mut s, banks, _) = open();
         let before = s.vault.as_ref().unwrap().entry_count();
         let add = EntryTarget::Add(Some(banks));
-        assert!(matches!(s.save_entry(add, &input(" ", "", None)), Err(EntryError::NoTitle)));
-        assert!(matches!(s.save_entry(add, &input("x", "16/09/2026", None)), Err(EntryError::Expiry(_))));
-        assert!(matches!(s.save_entry(add, &input("x", "", Some("not base32!"))), Err(EntryError::Otp(_))));
-        assert!(matches!(s.save_entry(EntryTarget::Add(None), &input("x", "", None)), Err(EntryError::NoGroup)));
+        assert!(matches!(
+            s.save_entry(add, &input(" ", "", None)),
+            Err(EntryError::NoTitle)
+        ));
+        assert!(matches!(
+            s.save_entry(add, &input("x", "16/09/2026", None)),
+            Err(EntryError::Expiry(_))
+        ));
+        assert!(matches!(
+            s.save_entry(add, &input("x", "", Some("not base32!"))),
+            Err(EntryError::Otp(_))
+        ));
+        assert!(matches!(
+            s.save_entry(EntryTarget::Add(None), &input("x", "", None)),
+            Err(EntryError::NoGroup)
+        ));
         assert_eq!(s.vault.as_ref().unwrap().entry_count(), before);
         assert!(s.undo.is_empty());
     }
@@ -1265,7 +1376,12 @@ mod tests {
     #[test]
     fn an_added_entry_carries_its_tags_and_undo_removes_it() {
         let (mut s, banks, _) = open();
-        let saved = s.save_entry(EntryTarget::Add(Some(banks)), &input("new", "2026-09-16", None)).unwrap();
+        let saved = s
+            .save_entry(
+                EntryTarget::Add(Some(banks)),
+                &input("new", "2026-09-16", None),
+            )
+            .unwrap();
         let id = saved.id.unwrap();
         assert_eq!(saved.otp, None);
         let vault = s.vault.as_ref().unwrap();
@@ -1286,7 +1402,8 @@ mod tests {
             (e.title().to_string(), e.password().to_string())
         };
         assert_eq!(read(&s), ("renamed".into(), "p".into()));
-        s.save_entry(EntryTarget::Edit(entry), &input("renamed", "", None)).unwrap();
+        s.save_entry(EntryTarget::Edit(entry), &input("renamed", "", None))
+            .unwrap();
         assert_eq!(read(&s).1, "pw");
         s.undo();
         assert_eq!(read(&s), ("renamed".into(), "p".into()));
@@ -1315,7 +1432,10 @@ mod tests {
         assert!(!s.is_open() && !s.is_dirty() && s.cut.is_none() && s.undo.is_empty());
         assert!(s.quick_here(), "the lock dropped what unlocks it");
         let opened = s.quick_unlock(None, None).unwrap();
-        assert!(matches!(opened.sealing, Sealing::Skipped), "a fingerprint unlock sealed again");
+        assert!(
+            matches!(opened.sealing, Sealing::Skipped),
+            "a fingerprint unlock sealed again"
+        );
     }
 
     #[test]
@@ -1326,13 +1446,22 @@ mod tests {
         create(&mut s, &file, "pw").unwrap();
         s.lock();
         REFUSE.set(Some(Refused::Again("cancelled".into())));
-        assert!(matches!(s.quick_unlock(None, None), Err(QuickError::Refused(Refused::Again(_)))));
+        assert!(matches!(
+            s.quick_unlock(None, None),
+            Err(QuickError::Refused(Refused::Again(_)))
+        ));
         assert!(s.quick_here());
         REFUSE.set(Some(Refused::Void("fingers changed".into())));
-        assert!(matches!(s.quick_unlock(None, None), Err(QuickError::Refused(Refused::Void(_)))));
+        assert!(matches!(
+            s.quick_unlock(None, None),
+            Err(QuickError::Refused(Refused::Void(_)))
+        ));
         assert!(!s.quick_here());
         REFUSE.set(None);
-        assert!(matches!(s.quick_unlock(None, None), Err(QuickError::Nothing)));
+        assert!(matches!(
+            s.quick_unlock(None, None),
+            Err(QuickError::Nothing)
+        ));
     }
 
     #[test]
@@ -1344,9 +1473,15 @@ mod tests {
         s.rekey("new", None).unwrap();
         s.lock();
         s.aim(Some(Path::new("/elsewhere/other.kdbx")));
-        assert!(!s.quick_here(), "a copy sealed for one vault offered to open another");
+        assert!(
+            !s.quick_here(),
+            "a copy sealed for one vault offered to open another"
+        );
         s.aim(Some(&file.0));
-        assert!(s.quick_unlock(None, None).is_ok(), "the copy still held the old password");
+        assert!(
+            s.quick_unlock(None, None).is_ok(),
+            "the copy still held the old password"
+        );
     }
 
     #[test]

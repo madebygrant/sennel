@@ -10,7 +10,7 @@ use serde::Deserialize;
 pub struct FileConfig {
     pub db: Option<String>,
     /* Written by the app rather than by hand, which is why it is one line of
-       paths and not a table: `^v` on the unlock screen picks from it. */
+    paths and not a table: `^v` on the unlock screen picks from it. */
     /// Vaults opened before, newest first.
     pub recent: Option<Vec<String>>,
     pub clipboard_timeout: Option<u64>,
@@ -30,7 +30,7 @@ pub struct FileConfig {
     pub theme: Option<String>,
     /// `#rrggbb` per slot, on top of whichever theme is named.
     /* Ordered, not hashed: with two unusable colours in the table, a HashMap
-       names whichever one it felt like this run. */
+    names whichever one it felt like this run. */
     pub colors: Option<std::collections::BTreeMap<String, String>>,
     pub generator: Option<FileGenerator>,
     /// Wheel and click. On by default; off gives the terminal its own
@@ -61,12 +61,12 @@ pub struct FileGenerator {
 }
 
 /* One bound for the config file, `sennel gen --length` and the `P` popup,
-   so it cannot drift between them. Four is the floor because all four
-   classes have to fit. */
+so it cannot drift between them. Four is the floor because all four
+classes have to fit. */
 pub const LENGTH_RANGE: (usize, usize) = (4, 256);
 
 /* The same, for passphrase words: one word is barely a secret, and past 64
-   the popup is a wall of text nobody reads before copying. */
+the popup is a wall of text nobody reads before copying. */
 pub const WORDS_RANGE: (usize, usize) = (1, 64);
 
 // Digits in a pin: below 4 is not a pin, past 12 no screen asks for one.
@@ -85,7 +85,7 @@ impl FileConfig {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         /* A typo'd key silently ignored would look like Sennel disregarding
-           the setting, so deny_unknown_fields turns it into a startup error. */
+        the setting, so deny_unknown_fields turns it into a startup error. */
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 }
@@ -120,9 +120,9 @@ pub fn default_backup_dir() -> PathBuf {
 }
 
 /* Writing one key back into a file a person wrote by hand: the whole file is
-   read, the `db` line swapped (or added at the top), and everything else —
-   comments, ordering, keys Sennel does not know — comes through untouched. A
-   serialize-the-struct round trip would eat all of it. */
+read, the `db` line swapped (or added at the top), and everything else —
+comments, ordering, keys Sennel does not know — comes through untouched. A
+serialize-the-struct round trip would eat all of it. */
 pub fn remember_db(config_file: Option<&std::path::Path>, db: &std::path::Path) -> Result<()> {
     remember(config_file, "db", &quote(&db.display().to_string()))
 }
@@ -165,11 +165,11 @@ fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>
     let mut replaced = false;
     let mut first_table: Option<usize> = None;
     /* Brackets still open from an earlier line, and whether those lines
-       belong to the value being replaced. An array can span lines — every
-       formatter writes ten paths that way — and swapping only its first line
-       leaves the rest orphaned, which is a config file that no longer
-       parses and an app that will not start until someone edits it by
-       hand. */
+    belong to the value being replaced. An array can span lines — every
+    formatter writes ten paths that way — and swapping only its first line
+    leaves the rest orphaned, which is a config file that no longer
+    parses and an app that will not start until someone edits it by
+    hand. */
     let mut depth = 0i32;
     let mut dropping = false;
     for text in existing.lines() {
@@ -182,9 +182,9 @@ fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>
         }
         dropping = false;
         /* Only a top-level key, and only before any [table] header: a `db`
-           inside [generator] is a different key with the same name. A `#`
-           before it makes the whole line a comment, and `split_once` leaves
-           the `#` on the name, so a commented-out key is never the match. */
+        inside [generator] is a different key with the same name. A `#`
+        before it makes the whole line a comment, and `split_once` leaves
+        the `#` on the name, so a commented-out key is never the match. */
         let is_key = !replaced
             && first_table.is_none()
             && text
@@ -207,7 +207,7 @@ fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>
     }
     if !replaced && let Some(line) = line {
         /* Above any table header, or the key would be read as belonging to
-           the last table in the file. */
+        the last table in the file. */
         let at = first_table.unwrap_or(out.len());
         out.insert(at, line);
     }
@@ -217,9 +217,9 @@ fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>
 }
 
 /* Bracket depth after this line, counting from `depth`. Quoted text and
-   comments are skipped, so a vault in a folder named `a]b` does not throw the
-   count off. A `"""` multi-line string would, but nothing Sennel reads or
-   writes uses one. */
+comments are skipped, so a vault in a folder named `a]b` does not throw the
+count off. A `"""` multi-line string would, but nothing Sennel reads or
+writes uses one. */
 fn scan(line: &str, depth: i32) -> i32 {
     let mut depth = depth;
     let mut chars = line.chars();
@@ -270,14 +270,14 @@ fn quote(value: &str) -> String {
 }
 
 /* Beside the target and renamed over it, the same rule the vault saves by: a
-   half-written config is a session that will not start. */
+half-written config is a session that will not start. */
 fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
     /* Owner-only: it holds no secret, but it names where the vault lives,
-       which is not something to hand every account on the machine. */
+    which is not something to hand every account on the machine. */
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::remove_file(&temp);
@@ -290,9 +290,10 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
     out.write_all(text.as_bytes())
         .with_context(|| format!("writing {}", temp.display()))?;
     /* Bytes before name, the same rule the vault saves by: a rename is atomic
-       about the name only, and a config that comes back empty after a crash
-       is a session that opens no vault. */
-    out.sync_all().with_context(|| format!("writing {}", temp.display()))?;
+    about the name only, and a config that comes back empty after a crash
+    is a session that opens no vault. */
+    out.sync_all()
+        .with_context(|| format!("writing {}", temp.display()))?;
     drop(out);
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -316,11 +317,11 @@ pub fn absolute(path: &std::path::Path) -> PathBuf {
         }
     };
     /* Resolved through the parent, never the file: the directory has to
-       exist for a vault to be opened or created there, while the vault
-       itself may not yet. It also leaves a vault file that is itself a
-       symlink — into a synced folder, say — as the symlink, so saves still
-       go through it. `..` and a symlinked folder both collapse here, which
-       is what stops one vault holding two rows in the library. */
+    exist for a vault to be opened or created there, while the vault
+    itself may not yet. It also leaves a vault file that is itself a
+    symlink — into a synced folder, say — as the symlink, so saves still
+    go through it. `..` and a symlinked folder both collapse here, which
+    is what stops one vault holding two rows in the library. */
     let (Some(dir), Some(name)) = (joined.parent(), joined.file_name()) else {
         return joined;
     };
@@ -337,9 +338,9 @@ pub fn expand(path: &str) -> PathBuf {
         return PathBuf::from(home);
     }
     /* `~other/…` is somebody else's home, which needs the password database
-       to resolve; taken literally it becomes a directory named `~other` that
-       the unlock screen then offers to create. Left alone and reported by the
-       caller instead of silently becoming a different path. */
+    to resolve; taken literally it becomes a directory named `~other` that
+    the unlock screen then offers to create. Left alone and reported by the
+    caller instead of silently becoming a different path. */
     match path.strip_prefix("~/") {
         Some(rest) => PathBuf::from(home).join(rest),
         None => PathBuf::from(path),
@@ -451,21 +452,25 @@ pub fn lifetime(seconds: Option<u32>) -> anyhow::Result<u32> {
 pub fn backups(keep: Option<usize>) -> anyhow::Result<usize> {
     let keep = keep.unwrap_or(DEFAULT_BACKUPS);
     if keep > crate::vault::BACKUPS_MAX {
-        anyhow::bail!("backups = {keep} is outside 0–{}", crate::vault::BACKUPS_MAX);
+        anyhow::bail!(
+            "backups = {keep} is outside 0–{}",
+            crate::vault::BACKUPS_MAX
+        );
     }
     Ok(keep)
 }
 
 /* Every field optional, and a length that could never produce a password is
-   a startup error rather than a surprise at `^s`. */
+a startup error rather than a surprise at `^s`. */
 pub fn generator(file: Option<&FileGenerator>) -> anyhow::Result<Generator> {
     let mut out = Generator::default();
     let Some(file) = file else {
         return Ok(out);
     };
     if let Some(kind) = file.kind.as_deref() {
-        out.kind = crate::generator::Kind::parse(kind)
-            .ok_or_else(|| anyhow::anyhow!("generator kind {kind:?} is none of complex, passphrase, pin"))?;
+        out.kind = crate::generator::Kind::parse(kind).ok_or_else(|| {
+            anyhow::anyhow!("generator kind {kind:?} is none of complex, passphrase, pin")
+        })?;
     }
     if let Some(words) = file.words {
         let (min, max) = WORDS_RANGE;
@@ -509,25 +514,31 @@ mod tests {
     use super::*;
 
     /* --no-config asked for the file to be left out of the run, so it cannot
-       be where a choice is kept. */
+    be where a choice is kept. */
     #[test]
     fn no_config_has_nowhere_to_remember() {
         assert!(remember_db(None, std::path::Path::new("/vaults/x.kdbx")).is_err());
     }
 
     /* A relative path names a different file from every other directory, so
-       the library cannot hold one. */
+    the library cannot hold one. */
     #[test]
     fn a_relative_path_is_resolved_against_the_working_directory() {
         let here = std::env::current_dir().unwrap().canonicalize().unwrap();
-        assert_eq!(absolute(std::path::Path::new("vault.kdbx")), here.join("vault.kdbx"));
+        assert_eq!(
+            absolute(std::path::Path::new("vault.kdbx")),
+            here.join("vault.kdbx")
+        );
         /* `..` collapses too, or one vault would hold two rows in the
-           library. Through a folder that exists: one that does not cannot be
-           resolved, and guessing past it is how `..` lands somewhere else
-           entirely when a symlink is in the way. */
-        assert_eq!(absolute(&here.join("src/../vault.kdbx")), here.join("vault.kdbx"));
+        library. Through a folder that exists: one that does not cannot be
+        resolved, and guessing past it is how `..` lands somewhere else
+        entirely when a symlink is in the way. */
+        assert_eq!(
+            absolute(&here.join("src/../vault.kdbx")),
+            here.join("vault.kdbx")
+        );
         /* A folder that does not exist cannot be resolved, and saying so by
-           leaving the path alone beats inventing one. */
+        leaving the path alone beats inventing one. */
         let absent = std::path::Path::new("/nowhere-at-all/x.kdbx");
         assert_eq!(absolute(absent), absent);
     }
@@ -536,7 +547,10 @@ mod tests {
     fn a_named_config_must_exist() {
         let missing = std::env::temp_dir().join("sennel-test-absent.toml");
         let _ = std::fs::remove_file(&missing);
-        assert!(FileConfig::load(&missing, false).is_ok(), "default path may be absent");
+        assert!(
+            FileConfig::load(&missing, false).is_ok(),
+            "default path may be absent"
+        );
         let err = FileConfig::load(&missing, true).unwrap_err().to_string();
         assert!(err.contains("reading"), "{err}");
     }

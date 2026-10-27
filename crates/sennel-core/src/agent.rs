@@ -73,7 +73,12 @@ impl Agent {
     }
 
     /// Hands the key to the agent. `lifetime` makes the agent forget it by itself.
-    pub fn add(&mut self, key: &PrivateKey, lifetime: Option<u32>, confirm: bool) -> Result<(), String> {
+    pub fn add(
+        &mut self,
+        key: &PrivateKey,
+        lifetime: Option<u32>,
+        confirm: bool,
+    ) -> Result<(), String> {
         let payload = add_message(key, lifetime, confirm)?;
         let reply = self.call(&payload)?;
         Self::expect_success(&reply, "take the key")
@@ -135,7 +140,14 @@ fn add_message(
             put_string(&mut out, &pair.to_bytes());
         }
         KeypairData::Rsa(pair) => {
-            for n in [&pair.public.n, &pair.public.e, &pair.private.d, &pair.private.iqmp, &pair.private.p, &pair.private.q] {
+            for n in [
+                &pair.public.n,
+                &pair.public.e,
+                &pair.private.d,
+                &pair.private.iqmp,
+                &pair.private.p,
+                &pair.private.q,
+            ] {
                 put_string(&mut out, n.as_bytes());
             }
         }
@@ -144,7 +156,12 @@ fn add_message(
             put_string(&mut out, pair.public_key_bytes());
             put_mpint(&mut out, pair.private_key_bytes());
         }
-        _ => return Err(format!("{} keys cannot be given to the agent", key.algorithm())),
+        _ => {
+            return Err(format!(
+                "{} keys cannot be given to the agent",
+                key.algorithm()
+            ));
+        }
     }
     put_string(&mut out, key.comment().as_bytes());
     if let Some(seconds) = lifetime {
@@ -211,8 +228,16 @@ pub fn parse_settings(bytes: &[u8]) -> Option<Settings> {
 fn decode_text(bytes: &[u8]) -> Option<String> {
     let units = |pairs: Vec<u16>| String::from_utf16(&pairs).ok();
     match bytes {
-        [0xff, 0xfe, rest @ ..] => units(rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()),
-        [0xfe, 0xff, rest @ ..] => units(rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect()),
+        [0xff, 0xfe, rest @ ..] => units(
+            rest.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        ),
+        [0xfe, 0xff, rest @ ..] => units(
+            rest.chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect(),
+        ),
         [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
         _ => String::from_utf8(bytes.to_vec()).ok(),
     }
@@ -244,7 +269,9 @@ pub fn add_entry_key(
 ) -> Result<Loaded, String> {
     let entry = vault.get_entry(id).ok_or("the entry is gone")?;
     let title = entry.title().to_string();
-    let bytes = vault.attachment_bytes(id, attachment).ok_or_else(|| format!("{title}: no attachment named {attachment}"))?;
+    let bytes = vault
+        .attachment_bytes(id, attachment)
+        .ok_or_else(|| format!("{title}: no attachment named {attachment}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| format!("{title}: {attachment} is not a text key file"))?;
     let key = PrivateKey::from_openssh(text).map_err(|_| {
@@ -261,10 +288,17 @@ pub fn add_entry_key(
     } else {
         key
     };
-    let lifetime = settings.and_then(|s| s.lifetime).map_or(max_lifetime, |own| own.min(max_lifetime));
+    let lifetime = settings
+        .and_then(|s| s.lifetime)
+        .map_or(max_lifetime, |own| own.min(max_lifetime));
     let confirm = settings.is_some_and(|s| s.confirm);
-    agent.add(&key, Some(lifetime), confirm).map_err(|e| format!("{title}: {e}"))?;
-    let blob = key.public_key().to_bytes().map_err(|e| format!("{title}: {e}"))?;
+    agent
+        .add(&key, Some(lifetime), confirm)
+        .map_err(|e| format!("{title}: {e}"))?;
+    let blob = key
+        .public_key()
+        .to_bytes()
+        .map_err(|e| format!("{title}: {e}"))?;
     Ok(Loaded {
         blob,
         label: title,
@@ -281,14 +315,19 @@ pub fn load_vault(agent: &mut Agent, vault: &Vault, max_lifetime: u32) -> Outcom
             continue;
         };
         let Some(settings) = parse_settings(&raw) else {
-            outcome.problems.push(format!("{}: unreadable {SETTINGS}", entry.title()));
+            outcome
+                .problems
+                .push(format!("{}: unreadable {SETTINGS}", entry.title()));
             continue;
         };
         if !settings.allow || !settings.add_at_open {
             continue;
         }
         let Some(name) = settings.attachment.clone() else {
-            outcome.problems.push(format!("{}: the key is a file on disk, and only attachments are read", entry.title()));
+            outcome.problems.push(format!(
+                "{}: the key is a file on disk, and only attachments are read",
+                entry.title()
+            ));
             continue;
         };
         match add_entry_key(agent, vault, &id, &name, Some(&settings), max_lifetime) {
@@ -341,15 +380,23 @@ mod tests {
             .replace("<AllowUseOfSshKey>", "<AllowUseOfSshKey >")
             .replace("<SelectedType>", "<SelectedType kind=\"x\">")
             .replace("<FileName/>", "<FileName />");
-        assert_eq!(parse_settings(odd.as_bytes()).unwrap(), parse_settings(KEEPASSXC.as_bytes()).unwrap());
+        assert_eq!(
+            parse_settings(odd.as_bytes()).unwrap(),
+            parse_settings(KEEPASSXC.as_bytes()).unwrap()
+        );
         // A longer tag that starts with the same name is not the tag.
-        let prefixed = KEEPASSXC.replace("<EntrySettings>", "<EntrySettings>\n <AllowUseOfSshKeyX>false</AllowUseOfSshKeyX>");
+        let prefixed = KEEPASSXC.replace(
+            "<EntrySettings>",
+            "<EntrySettings>\n <AllowUseOfSshKeyX>false</AllowUseOfSshKeyX>",
+        );
         assert!(parse_settings(prefixed.as_bytes()).unwrap().allow);
     }
 
     #[test]
     fn keeagent_writes_utf16_and_a_file_location_is_not_an_attachment() {
-        let xml = KEEPASSXC.replace("attachment</Sel", "file</Sel").replace("<FileName/>", "<FileName>/k</FileName>");
+        let xml = KEEPASSXC
+            .replace("attachment</Sel", "file</Sel")
+            .replace("<FileName/>", "<FileName>/k</FileName>");
         let mut utf16 = vec![0xff, 0xfe];
         utf16.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
         let s = parse_settings(&utf16).unwrap();
@@ -359,10 +406,17 @@ mod tests {
 
     #[test]
     fn lifetime_needs_its_switch_and_nonsense_is_not_settings() {
-        let off = KEEPASSXC.replace("<UseLifetimeConstraintWhenAdding>true", "<UseLifetimeConstraintWhenAdding>false");
+        let off = KEEPASSXC.replace(
+            "<UseLifetimeConstraintWhenAdding>true",
+            "<UseLifetimeConstraintWhenAdding>false",
+        );
         assert_eq!(parse_settings(off.as_bytes()).unwrap().lifetime, None);
         assert_eq!(parse_settings(b"just text"), None);
-        assert_eq!(parse_settings(&[0xff, 0xfe, 0x00, 0xd8]), None, "a lone surrogate");
+        assert_eq!(
+            parse_settings(&[0xff, 0xfe, 0x00, 0xd8]),
+            None,
+            "a lone surrogate"
+        );
         assert!(parse_settings(b"<EntrySettings></EntrySettings>").is_some_and(|s| !s.allow));
     }
 
@@ -395,7 +449,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("a.sock");
         let mut child = Command::new("ssh-agent")
-            .args(["-D", "-a"]).arg(&sock).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            .args(["-D", "-a"])
+            .arg(&sock)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         for _ in 0..100 {
             if sock.exists() {
                 break;
@@ -403,43 +462,94 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
         }
         let listing = || {
-            let out = Command::new("ssh-add").arg("-l").env("SSH_AUTH_SOCK", &sock).output().unwrap();
+            let out = Command::new("ssh-add")
+                .arg("-l")
+                .env("SSH_AUTH_SOCK", &sock)
+                .output()
+                .unwrap();
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         let make = |kind: &str, bits: &str, pass: &str| {
             let path = dir.join(format!("k_{kind}{bits}"));
             let _ = std::fs::remove_file(&path);
             let ok = Command::new("ssh-keygen")
-                .args(["-q", "-t", kind, "-b", bits, "-N", pass, "-C", "test-comment", "-f"])
-                .arg(&path).status().unwrap().success();
+                .args([
+                    "-q",
+                    "-t",
+                    kind,
+                    "-b",
+                    bits,
+                    "-N",
+                    pass,
+                    "-C",
+                    "test-comment",
+                    "-f",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success();
             assert!(ok);
             std::fs::read_to_string(path).unwrap()
         };
 
         let mut client = Agent::connect_to(&sock).unwrap();
-        for (kind, bits) in [("ed25519", "256"), ("rsa", "2048"), ("ecdsa", "256"), ("ecdsa", "384"), ("ecdsa", "521")] {
+        for (kind, bits) in [
+            ("ed25519", "256"),
+            ("rsa", "2048"),
+            ("ecdsa", "256"),
+            ("ecdsa", "384"),
+            ("ecdsa", "521"),
+        ] {
             // ssh-key 0.6.7 cannot read about 1 in 20 ECDSA keys, so make another until one reads.
             let key = (0..30)
-                .find_map(|_| PrivateKey::from_openssh(make(kind, bits, "pass phrase")).ok()?.decrypt("pass phrase").ok())
+                .find_map(|_| {
+                    PrivateKey::from_openssh(make(kind, bits, "pass phrase"))
+                        .ok()?
+                        .decrypt("pass phrase")
+                        .ok()
+                })
                 .expect("no key of this type could be read");
             client.add(&key, Some(60), false).unwrap();
             let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
-            assert!(listing().contains(&fingerprint), "{kind} {bits} is not in:\n{}", listing());
-            client.remove(&key.public_key().to_bytes().unwrap()).unwrap();
-            assert!(!listing().contains(&fingerprint), "{kind} {bits} was not removed");
+            assert!(
+                listing().contains(&fingerprint),
+                "{kind} {bits} is not in:\n{}",
+                listing()
+            );
+            client
+                .remove(&key.public_key().to_bytes().unwrap())
+                .unwrap();
+            assert!(
+                !listing().contains(&fingerprint),
+                "{kind} {bits} was not removed"
+            );
         }
         assert_eq!(client.count().unwrap(), 0);
 
         // A vault entry the way KeePassXC stores it: key attachment, settings, passphrase = password.
         let mut vault = Vault::new();
         let root = vault.root_id();
-        let id = vault.create_entry(&root, "deploy key", "git", "entry pw", "", "").unwrap();
-        vault.add_attachment(&id, "id_ed25519", make("ed25519", "256", "entry pw").into_bytes()).unwrap();
-        vault.add_attachment(&id, SETTINGS, KEEPASSXC.as_bytes().to_vec()).unwrap();
+        let id = vault
+            .create_entry(&root, "deploy key", "git", "entry pw", "", "")
+            .unwrap();
+        vault
+            .add_attachment(
+                &id,
+                "id_ed25519",
+                make("ed25519", "256", "entry pw").into_bytes(),
+            )
+            .unwrap();
+        vault
+            .add_attachment(&id, SETTINGS, KEEPASSXC.as_bytes().to_vec())
+            .unwrap();
         let outcome = load_vault(&mut client, &vault, 3600);
         assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
         assert_eq!(outcome.added.len(), 1);
-        assert!(!outcome.added[0].remove_at_close, "KEEPASSXC says to leave it");
+        assert!(
+            !outcome.added[0].remove_at_close,
+            "KEEPASSXC says to leave it"
+        );
         assert_eq!(client.count().unwrap(), 1);
         client.remove(&outcome.added[0].blob).unwrap();
 
@@ -451,14 +561,33 @@ mod tests {
         // The wrong passphrase is named as such and nothing is added.
         let mut wrong = Vault::new();
         let root = wrong.root_id();
-        let entry = wrong.create_entry(&root, "locked", "git", "not the passphrase", "", "").unwrap();
-        wrong.add_attachment(&entry, "id_ed25519", make("ed25519", "256", "entry pw").into_bytes()).unwrap();
-        wrong.add_attachment(&entry, SETTINGS, KEEPASSXC.as_bytes().to_vec()).unwrap();
+        let entry = wrong
+            .create_entry(&root, "locked", "git", "not the passphrase", "", "")
+            .unwrap();
+        wrong
+            .add_attachment(
+                &entry,
+                "id_ed25519",
+                make("ed25519", "256", "entry pw").into_bytes(),
+            )
+            .unwrap();
+        wrong
+            .add_attachment(&entry, SETTINGS, KEEPASSXC.as_bytes().to_vec())
+            .unwrap();
         let outcome = load_vault(&mut client, &wrong, 3600);
-        assert!(outcome.added.is_empty() && outcome.problems[0].contains("does not open id_ed25519"), "{:?}", outcome.problems);
+        assert!(
+            outcome.added.is_empty() && outcome.problems[0].contains("does not open id_ed25519"),
+            "{:?}",
+            outcome.problems
+        );
         assert_eq!(client.count().unwrap(), 0);
 
-        assert!(Agent::connect_to(&dir.join("none.sock")).err().unwrap().contains("cannot reach the agent"));
+        assert!(
+            Agent::connect_to(&dir.join("none.sock"))
+                .err()
+                .unwrap()
+                .contains("cannot reach the agent")
+        );
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);

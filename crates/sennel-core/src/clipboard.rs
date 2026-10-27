@@ -11,13 +11,13 @@ use arboard::Clipboard;
 #[derive(Clone)]
 pub struct Board {
     /* Each copy bumps this; the clearer thread only wipes when its own
-       generation is still current. A second copy re-arms the timer instead of
-       being wiped early by the first one's thread. */
+    generation is still current. A second copy re-arms the timer instead of
+    being wiped early by the first one's thread. */
     epoch: Arc<Mutex<u64>>,
     timeout: Option<Duration>,
     /* When the secret on the clipboard stops being there; the status bar
-       counts it down. On the wall clock because a sleeping thread does not
-       run during a system suspend, so a monotonic wipe outlasts a closed lid. */
+    counts it down. On the wall clock because a sleeping thread does not
+    run during a system suspend, so a monotonic wipe outlasts a closed lid. */
     until: Arc<Mutex<Option<SystemTime>>>,
 }
 
@@ -35,8 +35,8 @@ impl Board {
     /// Next copy generation. Bumped once per copy, read back by the clearer.
     fn claim(&self) -> u64 {
         /* A poisoned mutex would otherwise take the whole TUI down on the
-           next copy; the counter is the only thing behind it, so keep going
-           with whatever value survived. */
+        next copy; the counter is the only thing behind it, so keep going
+        with whatever value survived. */
         let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
         *epoch += 1;
         *epoch
@@ -61,11 +61,11 @@ impl Board {
     }
 
     /* Wipe now, if what is on the clipboard is still ours. The timer is a
-       thread inside this process, so quitting used to abandon a password on
-       the pasteboard — on macOS it is system-owned and sits there until
-       something else copies. A cleared deadline means either nothing of ours
-       is there or the user asked for no wipe at all (`clipboard_timeout =
-       0`), and both are left alone. */
+    thread inside this process, so quitting used to abandon a password on
+    the pasteboard — on macOS it is system-owned and sits there until
+    something else copies. A cleared deadline means either nothing of ours
+    is there or the user asked for no wipe at all (`clipboard_timeout =
+    0`), and both are left alone. */
     pub fn clear_now(&self) {
         let mut until = self.until.lock().unwrap_or_else(|e| e.into_inner());
         if until.is_none() {
@@ -82,9 +82,7 @@ impl Board {
     /// fix and never echoes the text back: it is usually a password.
     pub fn copy(&self, text: &str) -> Result<(), String> {
         let mut board = Clipboard::new().map_err(|e| {
-            format!(
-                "no clipboard to copy to · {e} · needs wl-clipboard on Wayland, xclip on X11"
-            )
+            format!("no clipboard to copy to · {e} · needs wl-clipboard on Wayland, xclip on X11")
         })?;
         board
             .set_text(text.to_owned())
@@ -110,14 +108,14 @@ impl Board {
                     }
                     std::thread::sleep(left.min(Duration::from_secs(1)));
                     /* A newer copy has a thread of its own; this one is done
-                       and must not wipe what that one put there. */
+                    and must not wipe what that one put there. */
                     if board.stale(generation) {
                         return;
                     }
                 }
                 /* Best effort and generation-checked: by now the user may have
-                   copied something else themselves, and wiping that would
-                   destroy their data to protect ours. */
+                copied something else themselves, and wiping that would
+                destroy their data to protect ours. */
                 if !board.stale(generation) {
                     let _ = Clipboard::new().and_then(|mut c| c.clear());
                     *board.until.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -133,7 +131,7 @@ mod tests {
     use super::*;
 
     /* The whole auto-clear contract without touching a real clipboard: the
-       generation is what the clearer thread decides on. */
+    generation is what the clearer thread decides on. */
     #[test]
     fn copies_bump_the_generation() {
         let board = Board::new(15);
@@ -152,7 +150,7 @@ mod tests {
     }
 
     /* The countdown the status bar reads: armed by a copy, and never a stale
-       number once the wipe has landed. */
+    number once the wipe has landed. */
     #[test]
     fn the_countdown_is_armed_and_runs_out() {
         let board = Board::new(15);
@@ -164,8 +162,8 @@ mod tests {
     }
 
     /* Quitting must not abandon a secret: the wipe deadline is dropped and
-       the generation bumped, so the sleeping thread cannot wipe whatever the
-       user copies next. */
+    the generation bumped, so the sleeping thread cannot wipe whatever the
+    user copies next. */
     #[test]
     fn clearing_on_exit_disarms_the_pending_wipe() {
         let board = Board::new(15);
@@ -173,7 +171,10 @@ mod tests {
         let generation = *board.epoch.lock().unwrap();
         board.clear_now();
         assert_eq!(board.clears_in(), None, "the deadline survived");
-        assert!(board.stale(generation), "the sleeping clearer stayed current");
+        assert!(
+            board.stale(generation),
+            "the sleeping clearer stayed current"
+        );
         // Nothing of ours on the board: no clipboard call, no surprise wipe.
         let quiet = Board::new(15);
         quiet.clear_now();
@@ -187,7 +188,7 @@ mod tests {
     }
 
     /* Needs a real display server, so it never runs in CI. Run it by hand
-       with `cargo test -- --ignored` on a machine with a clipboard. */
+    with `cargo test -- --ignored` on a machine with a clipboard. */
     #[test]
     #[ignore]
     fn copy_reaches_the_clipboard() {

@@ -1,14 +1,14 @@
 /* Thin adapter over the `keepass` crate's Database, which already is the
-   domain model (groups/entries keyed by stable uuid ids, secrets held in
-   zeroizing SecretBoxes). No parallel model: a second Group/Entry pair would
-   need a mapping layer and every op implemented twice. This module adds only
-   what Sennel needs on top: guarded moves/deletes, paths, and ordered child
-   views for the panes. File IO lives here too.
+domain model (groups/entries keyed by stable uuid ids, secrets held in
+zeroizing SecretBoxes). No parallel model: a second Group/Entry pair would
+need a mapping layer and every op implemented twice. This module adds only
+what Sennel needs on top: guarded moves/deletes, paths, and ordered child
+views for the panes. File IO lives here too.
 
-   Why keepass 13 not keepass-rs 02: keepass-rs 0.2 cannot read real
-   KeePassXC files — a correct password fails parsing (CBC padding / header
-   HMAC errors on vanilla KDBX 3.1 and 4.1). The `keepass` crate round-trips
-   with keepassxc-cli in both directions, which is the bar. */
+Why keepass 13 not keepass-rs 02: keepass-rs 0.2 cannot read real
+KeePassXC files — a correct password fails parsing (CBC padding / header
+HMAC errors on vanilla KDBX 3.1 and 4.1). The `keepass` crate round-trips
+with keepassxc-cli in both directions, which is the bar. */
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,16 +16,16 @@ use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
 use keepass::{
+    ChallengeResponseKey, Database, DatabaseKey,
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
         ChallengeResponseKeyError, CryptographyError, DatabaseKeyError, DatabaseOpenError,
         DatabaseSaveError, DestinationGroupNotFoundError, DuplicateEntryIdError, MoveGroupError,
     },
-    ChallengeResponseKey, Database, DatabaseKey,
 };
 
 /* The five standard field names. Strings rather than the crate's constants:
-   they are stable parts of the KDBX format, and one less re-export to chase. */
+they are stable parts of the KDBX format, and one less re-export to chase. */
 pub const TITLE: &str = "Title";
 pub const USERNAME: &str = "UserName";
 pub const PASSWORD: &str = "Password";
@@ -46,10 +46,10 @@ pub trait EntryExt {
 }
 
 /* Field reads as plain strings, defaulting to "" — KDBX entries may omit
-   any field, and the UI and search want a printable &str, not Options.
-   Macro-read: the same five reads apply to the owned record and to the
-   crate's borrowed Ref wrappers (the blanket-impl route collides because
-   Deref overlaps Entry itself). */
+any field, and the UI and search want a printable &str, not Options.
+Macro-read: the same five reads apply to the owned record and to the
+crate's borrowed Ref wrappers (the blanket-impl route collides because
+Deref overlaps Entry itself). */
 macro_rules! impl_entry_ext {
     ($t:ty) => {
         impl EntryExt for $t {
@@ -77,11 +77,11 @@ impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
 /* Text from a vault, on its way somewhere that is not the TUI. Ratatui drops
-   control characters on the way into its cell buffer, so the browser is safe
-   by construction; `println!` and the terminal-title escape are not, and a
-   `.kdbx` is a file that can arrive from anyone. An entry titled
-   "\x1b]0;owned\x07" would otherwise retitle the window of whoever ran
-   `--list`, and OSC 52 can reach the clipboard on some terminals. */
+control characters on the way into its cell buffer, so the browser is safe
+by construction; `println!` and the terminal-title escape are not, and a
+`.kdbx` is a file that can arrive from anyone. An entry titled
+"\x1b]0;owned\x07" would otherwise retitle the window of whoever ran
+`--list`, and OSC 52 can reach the clipboard on some terminals. */
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { '·' } else { c })
@@ -94,10 +94,10 @@ pub fn raw_otp(entry: &EntryRef<'_>) -> Option<String> {
 }
 
 /* What a site gives you is either a long `otpauth://` URL (behind the QR
-   code) or a run of base32 with spaces in it ("JBSW Y3DP EHPK 3PXP"). Both
-   have to work: retyping the second into the first by hand is exactly the
-   kind of chore a password manager exists to absorb. The URL is what KDBX
-   stores, so a bare secret gets wrapped in one. */
+code) or a run of base32 with spaces in it ("JBSW Y3DP EHPK 3PXP"). Both
+have to work: retyping the second into the first by hand is exactly the
+kind of chore a password manager exists to absorb. The URL is what KDBX
+stores, so a bare secret gets wrapped in one. */
 pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -121,7 +121,7 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
             .map_err(|e| format!("{e}"));
     }
     /* Groupings and hyphens are how the secret is printed, never part of it,
-       and base32 is case-insensitive. */
+    and base32 is case-insensitive. */
     let secret: String = input
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
@@ -131,9 +131,9 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
         return Err("nothing to read".into());
     }
     /* Checked against the base32 alphabet before it is put in a url, or a
-       "secret" carrying `&algorithm=SHA512` would smuggle its own parameters
-       in beside ours — base32 decoding never sees them, so nothing else would
-       catch it. */
+    "secret" carrying `&algorithm=SHA512` would smuggle its own parameters
+    in beside ours — base32 decoding never sees them, so nothing else would
+    catch it. */
     if !secret
         .chars()
         .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c) || c == '=')
@@ -146,24 +146,24 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
         format!("{title}:{username}")
     };
     /* Digits and period spelled out rather than left to a default: see
-       `with_digits` for why the default is the one thing here that cannot be
-       left unsaid. */
+    `with_digits` for why the default is the one thing here that cannot be
+    left unsaid. */
     let url = format!(
         "otpauth://totp/{}?secret={secret}&digits=6&period=30",
         urlish(&label)
     );
     /* Parsed before it is stored: a seed that cannot produce a code must be
-       refused while the form is still open and the text still on screen. */
+    refused while the form is still open and the text still on screen. */
     url.parse::<keepass::db::TOTP>()
         .map(|_| url)
         .map_err(|_| "not a base32 secret or an otpauth:// url".to_string())
 }
 
 /* RFC 6238 and every authenticator app treat six digits as the default when
-   an `otpauth://` url does not say — the keepass crate treats it as eight, so
-   a url written by a site that left `digits` out would produce codes that are
-   the right secret and the wrong length. Spelled out on the way in and on the
-   way to the screen, and never by rewriting what is stored. */
+an `otpauth://` url does not say — the keepass crate treats it as eight, so
+a url written by a site that left `digits` out would produce codes that are
+the right secret and the wrong length. Spelled out on the way in and on the
+way to the screen, and never by rewriting what is stored. */
 fn with_digits(url: &str) -> String {
     if url.contains("digits=") || !url.contains('?') {
         return url.to_string();
@@ -197,11 +197,15 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
 }
 
 /* KDBX carries an expiry on every entry and Sennel read neither half of it,
-   so an entry KeePassXC shows as expired looked perfectly healthy here. Both
-   halves matter: `expires` is the switch and `expiry` is the date, and a date
-   with the switch off is a date somebody set and then turned off. */
+so an entry KeePassXC shows as expired looked perfectly healthy here. Both
+halves matter: `expires` is the switch and `expiry` is the date, and a date
+with the switch off is a date somebody set and then turned off. */
 pub fn expires_at(entry: &EntryRef<'_>) -> Option<chrono::NaiveDateTime> {
-    entry.times.expires.unwrap_or(false).then(|| entry.times.expiry)?
+    entry
+        .times
+        .expires
+        .unwrap_or(false)
+        .then(|| entry.times.expiry)?
 }
 
 // When the current password was set, as near as the file can say. An entry's last change is never earlier
@@ -234,8 +238,8 @@ pub fn expired(entry: &EntryRef<'_>) -> bool {
 }
 
 /* Set or clear the expiry. `None` turns it off and leaves the old date where
-   it was, the way KeePassXC does — unticking the box should not throw away
-   the date you would tick it back on with. */
+it was, the way KeePassXC does — unticking the box should not throw away
+the date you would tick it back on with. */
 impl Vault {
     pub fn set_expiry(
         &mut self,
@@ -263,9 +267,9 @@ pub const STANDARD: [&str; 6] = [TITLE, USERNAME, PASSWORD, URL, NOTES, "otp"];
 
 /// One line of the `F` screen: a custom string field, or a file.
 /* Carries the decrypted value, which for a custom field is a recovery code or
-   an api key as often as not — so it wipes on drop, the same rule the typed
-   boxes follow. Freeing a String without zeroizing it leaves the bytes in the
-   allocation, which is the distinction this codebase draws everywhere else. */
+an api key as often as not — so it wipes on drop, the same rule the typed
+boxes follow. Freeing a String without zeroizing it leaves the bytes in the
+allocation, which is the distinction this codebase draws everywhere else. */
 #[derive(Clone, PartialEq, Debug)]
 pub enum Extra {
     Field {
@@ -282,9 +286,9 @@ pub enum Extra {
 
 impl Extra {
     /* What `Drop` does, split out so a test can watch it work on a value it
-       still owns. Reading a freed allocation to check a zeroize landed proves
-       nothing: the allocator writes its own bookkeeping into the block, so
-       the secret is usually gone from it whether or not anybody wiped it. */
+    still owns. Reading a freed allocation to check a zeroize landed proves
+    nothing: the allocator writes its own bookkeeping into the block, so
+    the secret is usually gone from it whether or not anybody wiped it. */
     pub fn wipe(&mut self) {
         if let Extra::Field { value, .. } = self {
             value.zeroize();
@@ -307,8 +311,8 @@ impl Extra {
 }
 
 /* Everything on an entry that the five fixed rows cannot show. Fields first,
-   then files, each alphabetical: this list is read, and a list that reorders
-   itself between openings cannot be. */
+then files, each alphabetical: this list is read, and a list that reorders
+itself between openings cannot be. */
 pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
     let mut fields: Vec<Extra> = entry
         .fields
@@ -334,18 +338,18 @@ pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
 }
 
 /* A needle that starts with `#` is a tag filter, not a fuzzy search. Tags are
-   a KeePassXC feature Sennel could see (`extras` prints them) and not act on,
-   and fuzzing them alongside titles would make `#work` match "homework".
+a KeePassXC feature Sennel could see (`extras` prints them) and not act on,
+and fuzzing them alongside titles would make `#work` match "homework".
 
-   Prefix, case-insensitive: typing `#wo` narrows as you go, which is the
-   whole point of a filter in a live band. */
+Prefix, case-insensitive: typing `#wo` narrows as you go, which is the
+whole point of a filter in a live band. */
 pub fn tag_needle(needle: &str) -> Option<&str> {
     needle.strip_prefix('#')
 }
 
 pub fn has_tag(entry: &EntryRef<'_>, prefix: &str) -> bool {
     /* An empty prefix (`#` alone) means "anything tagged", which is the
-       useful answer while the user is still typing. */
+    useful answer while the user is still typing. */
     entry
         .tags
         .iter()
@@ -366,7 +370,7 @@ pub fn all_tags(vault: &Vault) -> Vec<String> {
 
 /// One old version of an entry, as the history screen reads it.
 /* Every row is a password somebody used to have, which is the whole reason
-   the screen exists — so it wipes on drop like the boxes that type one. */
+the screen exists — so it wipes on drop like the boxes that type one. */
 #[derive(Clone, PartialEq, Debug)]
 pub struct Version {
     /// Newest first, so 0 is the version just before the current one.
@@ -392,10 +396,10 @@ impl Drop for Version {
 }
 
 /* Old versions of an entry, newest first. Sennel writes none of these — its
-   own edits deliberately leave no history record — but KeePassXC does, and an
-   entry imported from there arrives carrying every password it ever had.
-   Invisible is the wrong way to hold that: you cannot decide whether to keep
-   something you cannot see. */
+own edits deliberately leave no history record — but KeePassXC does, and an
+entry imported from there arrives carrying every password it ever had.
+Invisible is the wrong way to hold that: you cannot decide whether to keep
+something you cannot see. */
 pub fn history(entry: &EntryRef<'_>) -> Vec<Version> {
     let mut out = Vec::new();
     let Some(count) = entry.history.as_ref().map(|h| h.get_entries().len()) else {
@@ -414,10 +418,10 @@ pub fn history(entry: &EntryRef<'_>) -> Vec<Version> {
         });
     }
     /* Sorted by the stamp each version carries rather than trusting the
-       stored order: this crate prepends new history, a KDBX file written
-       elsewhere may hold the other order, and "newest first" has to mean the
-       same thing whichever client wrote the file. Versions with no stamp sink
-       to the bottom, where an undated old password belongs. */
+    stored order: this crate prepends new history, a KDBX file written
+    elsewhere may hold the other order, and "newest first" has to mean the
+    same thing whichever client wrote the file. Versions with no stamp sink
+    to the bottom, where an undated old password belongs. */
     out.sort_by_key(|v| std::cmp::Reverse(v.modified));
     out
 }
@@ -445,21 +449,28 @@ fn backup_path(dir: &Path, path: &Path, n: usize) -> PathBuf {
 
 /// The backups of `path` held in `dir`, newest first.
 pub fn backups_of(dir: &Path, path: &Path) -> Vec<PathBuf> {
-    (1..=BACKUPS_MAX).map(|n| backup_path(dir, path, n)).filter(|p| p.exists()).collect()
+    (1..=BACKUPS_MAX)
+        .map(|n| backup_path(dir, path, n))
+        .filter(|p| p.exists())
+        .collect()
 }
 
 /// Deletes every backup of `path` in `dir` and returns how many there were.
 pub fn forget_backups(dir: &Path, path: &Path) -> usize {
     // `.0` is the staging copy, which a crash mid-backup can leave behind.
     let staged = usize::from(std::fs::remove_file(backup_path(dir, path, 0)).is_ok());
-    staged + backups_of(dir, path).into_iter().filter(|p| std::fs::remove_file(p).is_ok()).count()
+    staged
+        + backups_of(dir, path)
+            .into_iter()
+            .filter(|p| std::fs::remove_file(p).is_ok())
+            .count()
 }
 
 /* An attachment on its way out of the vault, written the way the vault
-   itself is: created exclusively so a symlink planted at the path cannot
-   redirect it, and 0600 from the first byte. The file loses every protection
-   the vault gave it the moment it lands, so the least this can do is not
-   hand it to the rest of the machine. */
+itself is: created exclusively so a symlink planted at the path cannot
+redirect it, and 0600 from the first byte. The file loses every protection
+the vault gave it the moment it lands, so the least this can do is not
+hand it to the rest of the machine. */
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -469,7 +480,8 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
         .mode(0o600)
         .open(path)
         .map_err(|e| VaultError::Io(format!("{e}")))?;
-    file.write_all(bytes).map_err(|e| VaultError::Io(e.to_string()))?;
+    file.write_all(bytes)
+        .map_err(|e| VaultError::Io(e.to_string()))?;
     Ok(())
 }
 
@@ -486,7 +498,11 @@ pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
     }
     let files = entry.attachments().count();
     if files > 0 {
-        let plural = if files == 1 { "attachment" } else { "attachments" };
+        let plural = if files == 1 {
+            "attachment"
+        } else {
+            "attachments"
+        };
         out.push(format!("{files} {plural}"));
     }
     if !entry.tags.is_empty() {
@@ -498,7 +514,7 @@ pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
 /* Payloads are Strings, not sources: io and database errors stay
-   assert_eq-friendly, and the UI only ever displays them. */
+assert_eq-friendly, and the UI only ever displays them. */
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum VaultError {
     GroupNotFound,
@@ -572,7 +588,11 @@ impl std::str::FromStr for YubiSpec {
             other => return Err(format!("yubikey slot {other:?} is not 1 or 2")),
         };
         let serial = serial
-            .map(|n| n.trim().parse::<u32>().map_err(|_| format!("yubikey serial {n:?} is not a number")))
+            .map(|n| {
+                n.trim()
+                    .parse::<u32>()
+                    .map_err(|_| format!("yubikey serial {n:?} is not a number"))
+            })
             .transpose()?;
         Ok(YubiSpec { slot, serial })
     }
@@ -602,17 +622,17 @@ fn challenge_failure(why: &ChallengeResponseKeyError) -> VaultError {
 pub struct Vault {
     db: Database,
     /* The key stays with the vault so `save` needs no password prompt:
-       re-asking on every save would train "type it without thinking".
-       DatabaseKey zeroizes on drop, so holding it is holding secrets right.
-       It is held by value: `save` consumes a clone of it. */
+    re-asking on every save would train "type it without thinking".
+    DatabaseKey zeroizes on drop, so holding it is holding secrets right.
+    It is held by value: `save` consumes a clone of it. */
     key: Option<DatabaseKey>,
     // The hardware key inside `key`, kept so a re-key can include it again.
     challenge: Option<ChallengeResponseKey>,
     path: Option<PathBuf>,
     /* What the file looked like when this vault last agreed with it. Sennel
-       autosaves after every change, so without this a KeePassXC edit (or a
-       sync client, or a second Sennel) is overwritten by the next keypress
-       here, atomically and without a word. */
+    autosaves after every change, so without this a KeePassXC edit (or a
+    sync client, or a second Sennel) is overwritten by the next keypress
+    here, atomically and without a word. */
     stamp: Option<Stamp>,
     // Copies kept, and the folder they go in; 0 turns backups off. Set by the caller.
     backups: usize,
@@ -681,7 +701,8 @@ fn attachment_hazard(ours: &Database, theirs: &Database) -> Option<String> {
 fn same_files(a: &EntryRef<'_>, b: &EntryRef<'_>) -> bool {
     a.attachments_named().count() == b.attachments_named().count()
         && a.attachments_named().all(|(name, file)| {
-            b.attachment_by_name(name).is_some_and(|other| file.data.get() == other.data.get())
+            b.attachment_by_name(name)
+                .is_some_and(|other| file.data.get() == other.data.get())
         })
 }
 
@@ -744,7 +765,10 @@ pub struct MergeSummary {
 impl MergeSummary {
     fn of(log: &keepass::db::merge::MergeLog) -> Self {
         use keepass::db::merge::MergeEventType as Kind;
-        let mut out = MergeSummary { warnings: log.warnings.len(), ..Default::default() };
+        let mut out = MergeSummary {
+            warnings: log.warnings.len(),
+            ..Default::default()
+        };
         for event in &log.events {
             match event.event_type {
                 Kind::Created => out.added += 1,
@@ -770,7 +794,11 @@ impl MergeSummary {
         .filter(|(n, _)| *n > 0)
         .map(|(n, what)| format!("{n} {what}"))
         .collect();
-        if parts.is_empty() { "nothing new in the file".to_string() } else { parts.join(" · ") }
+        if parts.is_empty() {
+            "nothing new in the file".to_string()
+        } else {
+            parts.join(" · ")
+        }
     }
 }
 
@@ -815,14 +843,14 @@ impl Vault {
     }
 
     /* A wrong key shows differently by version: KDBX4 verifies the header
-       HMAC first (IncorrectKey), while a KDBX3 file decrypts your key into
-       garbage that fails the final padding check (InvalidPadding). Both are
-       "the key did not open it". A genuinely bad password on a corrupt file
-       keeps arriving as one of these, which is exactly what users see in
-       KeePass clients. The converse is inherent to KDBX3 (it has no header
-       HMAC): a corrupt or truncated KDBX3 body also fails the padding check
-       and reports as WrongPassword even with the right key. No client can
-       tell those apart before decrypting, so we do not pretend to. */
+    HMAC first (IncorrectKey), while a KDBX3 file decrypts your key into
+    garbage that fails the final padding check (InvalidPadding). Both are
+    "the key did not open it". A genuinely bad password on a corrupt file
+    keeps arriving as one of these, which is exactly what users see in
+    KeePass clients. The converse is inherent to KDBX3 (it has no header
+    HMAC): a corrupt or truncated KDBX3 body also fails the padding check
+    and reports as WrongPassword even with the right key. No client can
+    tell those apart before decrypting, so we do not pretend to. */
     fn map_db_error(e: DatabaseOpenError) -> VaultError {
         match e {
             DatabaseOpenError::Key(ref key_err)
@@ -865,11 +893,7 @@ impl Vault {
     /// Open an existing `.kdbx` file. The password string is copied into the
     /// retained key; the caller zeroizes its own buffer.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn open(
-        path: &Path,
-        password: &str,
-        key_file: Option<&[u8]>,
-    ) -> Result<Self, VaultError> {
+    pub fn open(path: &Path, password: &str, key_file: Option<&[u8]>) -> Result<Self, VaultError> {
         Self::open_with(path, password, key_file, None)
     }
 
@@ -887,8 +911,12 @@ impl Vault {
     }
 
     fn resolve_yubikey(spec: &YubiSpec) -> Result<ChallengeResponseKey, VaultError> {
-        let key = ChallengeResponseKey::get_yubikey(spec.serial).map_err(|e| challenge_failure(&e))?;
-        Ok(ChallengeResponseKey::YubikeyChallenge(key, spec.slot.to_string()))
+        let key =
+            ChallengeResponseKey::get_yubikey(spec.serial).map_err(|e| challenge_failure(&e))?;
+        Ok(ChallengeResponseKey::YubikeyChallenge(
+            key,
+            spec.slot.to_string(),
+        ))
     }
 
     pub fn open_keyed(
@@ -922,7 +950,10 @@ impl Vault {
     // the first autosave fails with "Unsupported database version" after the
     // user has already made edits.
     pub fn writable(&self) -> bool {
-        matches!(self.db.config.version, keepass::config::DatabaseVersion::KDB4(1))
+        matches!(
+            self.db.config.version,
+            keepass::config::DatabaseVersion::KDB4(1)
+        )
     }
 
     /// What the file is, for the warning and for `--check`.
@@ -981,19 +1012,28 @@ impl Vault {
         Ok(())
     }
 
-// `^f` on a conflict. Merges into a clone and swaps it in only on success, and re-checks the file
-// stamp before writing so a third writer is a conflict again. The replaced file is backed up.
+    // `^f` on a conflict. Merges into a clone and swaps it in only on success, and re-checks the file
+    // stamp before writing so a third writer is a conflict again. The replaced file is backed up.
     // The crate names an entry by uuid, which means nothing to the person reading the status line.
     fn merge_failure(&self, why: &keepass::db::merge::MergeError) -> String {
         use keepass::db::merge::MergeError as E;
         match why {
             E::EntryModificationTimeNotUpdated(id) | E::DuplicateHistoryEntries(_, id) => {
-                let title = self.db.entry(*id).map_or("an entry".to_string(), |e| format!("\"{}\"", e.title()));
-                format!("{title} was changed on both sides within the same second, so neither is newer")
+                let title = self
+                    .db
+                    .entry(*id)
+                    .map_or("an entry".to_string(), |e| format!("\"{}\"", e.title()));
+                format!(
+                    "{title} was changed on both sides within the same second, so neither is newer"
+                )
             }
             E::GroupModificationTimeNotUpdated(id) => {
-                let name = self.db.group(*id).map_or("a group".to_string(), |g| format!("the group \"{}\"", g.name));
-                format!("{name} was changed on both sides within the same second, so neither is newer")
+                let name = self.db.group(*id).map_or("a group".to_string(), |g| {
+                    format!("the group \"{}\"", g.name)
+                });
+                format!(
+                    "{name} was changed on both sides within the same second, so neither is newer"
+                )
             }
             other => other.to_string(),
         }
@@ -1016,7 +1056,9 @@ impl Vault {
         }
         let mut merged = self.db.clone();
         settle_ties(&mut merged, &theirs);
-        let log = merged.merge(&theirs).map_err(|e| VaultError::Merge(self.merge_failure(&e)))?;
+        let log = merged
+            .merge(&theirs)
+            .map_err(|e| VaultError::Merge(self.merge_failure(&e)))?;
         if Stamp::of(&path) != seen {
             return Err(VaultError::ChangedOnDisk);
         }
@@ -1056,7 +1098,11 @@ impl Vault {
             return Ok(());
         }
         let fail = |e: std::io::Error| VaultError::Io(format!("backup failed · {e}"));
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(fail)?;
         // Written under a staging name first, so a failure leaves the existing backups as they were.
         let bytes = Zeroizing::new(std::fs::read(path).map_err(fail)?);
         let staging = backup_path(dir, path, 0);
@@ -1085,13 +1131,13 @@ impl Vault {
     }
 
     /* The same database written somewhere else under the key it was opened
-       with. No password argument, and none asked for: the key is already held
-       from the unlock, so a copy keeps the original's password and key file
-       without anybody typing either again — and without a second plaintext
-       copy of a master password existing to be typed wrongly.
+    with. No password argument, and none asked for: the key is already held
+    from the unlock, so a copy keeps the original's password and key file
+    without anybody typing either again — and without a second plaintext
+    copy of a master password existing to be typed wrongly.
 
-       `self` is left pointing at the original: this writes a file, it does
-       not move the session onto it. */
+    `self` is left pointing at the original: this writes a file, it does
+    not move the session onto it. */
     pub fn save_copy(&self, path: &Path) -> Result<(), VaultError> {
         let Some(key) = self.key.as_ref() else {
             return Err(VaultError::Unsaved);
@@ -1100,10 +1146,10 @@ impl Vault {
     }
 
     /* A file written by `save_copy`, opened again with the same key. The
-       password was wiped the moment the original opened, so this is the only
-       way to prove the copy decrypts with the credentials its owner will
-       actually use — which is the whole question a conversion has to answer
-       before it says it worked. */
+    password was wiped the moment the original opened, so this is the only
+    way to prove the copy decrypts with the credentials its owner will
+    actually use — which is the whole question a conversion has to answer
+    before it says it worked. */
     pub fn open_copy(&self, path: &Path) -> Result<Vault, VaultError> {
         let Some(key) = self.key.clone() else {
             return Err(VaultError::Unsaved);
@@ -1166,37 +1212,40 @@ impl Vault {
     }
 
     /* KDBX 3.1 and older open here and can never be written: the format's
-       writer does not exist in the keepass crate (its kdbx3 module is
-       parse-only, and `save` refuses anything below KDBX 4), and writing one
-       would mean a hashed-block-stream framer, a Salsa20 inner stream and a
-       second XML shape for attachments — crypto-adjacent work that belongs
-       upstream, with round-trip fixtures, not in this file.
+    writer does not exist in the keepass crate (its kdbx3 module is
+    parse-only, and `save` refuses anything below KDBX 4), and writing one
+    would mean a hashed-block-stream framer, a Salsa20 inner stream and a
+    second XML shape for attachments — crypto-adjacent work that belongs
+    upstream, with round-trip fixtures, not in this file.
 
-       So the way out is forward rather than back. KeePassXC has read and
-       written KDBX 4 since 2.0 in 2016, so converting costs no compatibility
-       with the client the file most likely came from.
+    So the way out is forward rather than back. KeePassXC has read and
+    written KDBX 4 since 2.0 in 2016, so converting costs no compatibility
+    with the client the file most likely came from.
 
-       Swaps the whole config, not just the version: a KDBX 4 file carrying
-       3.1's Salsa20 inner stream and AES-KDF header would claim a format it
-       is not written in. What comes out is what `Vault::new` would have
-       produced — the same cipher, KDF and compression as every vault Sennel
-       creates. */
+    Swaps the whole config, not just the version: a KDBX 4 file carrying
+    3.1's Salsa20 inner stream and AES-KDF header would claim a format it
+    is not written in. What comes out is what `Vault::new` would have
+    produced — the same cipher, KDF and compression as every vault Sennel
+    creates. */
     pub fn convert_to_kdbx4(&mut self) -> Result<(), VaultError> {
         if self.writable() {
-            return Err(VaultError::Db(format!("{} is already writable", self.format())));
+            return Err(VaultError::Db(format!(
+                "{} is already writable",
+                self.format()
+            )));
         }
         self.db.config = keepass::config::DatabaseConfig::default();
         Ok(())
     }
 
     /* Re-key: the same database, written again under a new password. The
-       file is written before the key is swapped, so a refused or failed write
-       leaves the vault openable with the password it already had — a rekey
-       that half-lands is a vault nobody can open.
+    file is written before the key is swapped, so a refused or failed write
+    leaves the vault openable with the password it already had — a rekey
+    that half-lands is a vault nobody can open.
 
-       Guarded like `save`, because it is a save: re-keying over somebody
-       else's write would lose their work *and* change the password they would
-       need to get it back. */
+    Guarded like `save`, because it is a save: re-keying over somebody
+    else's write would lose their work *and* change the password they would
+    need to get it back. */
     pub fn rekey(&mut self, password: &str, key_file: Option<&[u8]>) -> Result<usize, VaultError> {
         let Some(path) = self.path.clone() else {
             return Err(VaultError::Unsaved);
@@ -1216,7 +1265,10 @@ impl Vault {
         self.key = Some(key);
         self.stamp = Stamp::of(&path);
         // The copies still open with the old password, and a leaked password is a common reason to change it.
-        let gone = self.backup_dir.as_deref().map_or(0, |dir| forget_backups(dir, &path));
+        let gone = self
+            .backup_dir
+            .as_deref()
+            .map_or(0, |dir| forget_backups(dir, &path));
         self.backed_up = false;
         Ok(gone)
     }
@@ -1226,8 +1278,8 @@ impl Vault {
     }
 
     /* Beside the target and renamed over it: a truncated write turns a
-       half-written kdbx into nothing. Mode 0600, because this file holds
-       every secret at once. */
+    half-written kdbx into nothing. Mode 0600, because this file holds
+    every secret at once. */
     fn write_file(db: &Database, key: &DatabaseKey, path: &Path) -> Result<(), VaultError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| VaultError::Io(e.to_string()))?;
@@ -1235,14 +1287,14 @@ impl Vault {
         let temp = path.with_extension(format!("{}.tmp", std::process::id()));
         use std::os::unix::fs::OpenOptionsExt;
         /* 0600 from the first byte: File::create + set_permissions afterwards
-           would leave a umask-wide window holding a full plaintext-free but
-           still sensitive copy of the vault.
+        would leave a umask-wide window holding a full plaintext-free but
+        still sensitive copy of the vault.
 
-           create_new, not create: in a directory somebody else can write to,
-           a symlink planted at this path would be followed and the vault
-           written wherever it points — 0600 on a file that is not ours. A
-           leftover from a killed process is removed first, since the name
-           carries our own pid. */
+        create_new, not create: in a directory somebody else can write to,
+        a symlink planted at this path would be followed and the vault
+        written wherever it points — 0600 on a file that is not ours. A
+        leftover from a killed process is removed first, since the name
+        carries our own pid. */
         let _ = std::fs::remove_file(&temp);
         let opened = std::fs::OpenOptions::new()
             .write(true)
@@ -1280,8 +1332,8 @@ impl Vault {
             return Err(VaultError::Io(e.to_string()));
         }
         /* And the directory entry, so the rename itself survives the same
-           crash. Best effort: a filesystem that refuses to sync a directory
-           handle leaves us no worse off than the line above already did. */
+        crash. Best effort: a filesystem that refuses to sync a directory
+        handle leaves us no worse off than the line above already did. */
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
         }
@@ -1289,18 +1341,18 @@ impl Vault {
     }
 
     /* Escape hatch for exceptional reads. The 0.13 rewrite left no prod
-       caller (previous uses read password strings and entry maps), but it
-       stays as the sanctioned read-only back door so tests and future
-       scripts do not bypass the guarded methods. */
+    caller (previous uses read password strings and entry maps), but it
+    stays as the sanctioned read-only back door so tests and future
+    scripts do not bypass the guarded methods. */
     #[allow(dead_code)]
     pub fn db(&self) -> &Database {
         &self.db
     }
 
     /* Test-only: prod paths go through guarded Vault methods that keep the
-       cursors and the dirty flag consistent. db_mut escapes those guards,
-       so it stays behind this comment as the documented back door for tests
-       that need to stamp timestamps directly. */
+    cursors and the dirty flag consistent. db_mut escapes those guards,
+    so it stays behind this comment as the documented back door for tests
+    that need to stamp timestamps directly. */
     #[allow(dead_code)]
     pub fn db_mut(&mut self) -> &mut Database {
         &mut self.db
@@ -1330,10 +1382,10 @@ impl Vault {
     }
 
     /* Recycle-bin entries are trash: the group walk still surfaces the bin to
-       a user who goes looking for it (it is a group like any other), but
-       counts and the flattened global scope skip its subtree. A real
-       KeePassXC vault parks deleted entries there, and an honest
-       "unlocked N entries" or search hit must not include deleted things. */
+    a user who goes looking for it (it is a group like any other), but
+    counts and the flattened global scope skip its subtree. A real
+    KeePassXC vault parks deleted entries there, and an honest
+    "unlocked N entries" or search hit must not include deleted things. */
     pub fn recycled(&self) -> HashSet<EntryId> {
         let mut out = HashSet::new();
         let Some(bin) = self.db.recycle_bin() else {
@@ -1352,23 +1404,30 @@ impl Vault {
 
     /// Every live entry id in the file, for the global search scope.
     /* Test-only since the row cache took over the counting: kept because the
-       KeePassXC fixture reads entries without knowing their ids. */
+    KeePassXC fixture reads entries without knowing their ids. */
     #[cfg(any(test, feature = "test-support"))]
     pub fn all_entry_ids(&self) -> Vec<EntryId> {
         let dead = self.recycled();
-        self.db.iter_all_entries().map(|e| e.id()).filter(|id| !dead.contains(id)).collect()
+        self.db
+            .iter_all_entries()
+            .map(|e| e.id())
+            .filter(|id| !dead.contains(id))
+            .collect()
     }
 
     /// Every live entry as a ref in one borrowed batch: the entries-pane
     /// views sort and filter across all of them per call.
     pub fn entry_refs(&self) -> Vec<EntryRef<'_>> {
         let dead = self.recycled();
-        self.db.iter_all_entries().filter(|e| !dead.contains(&e.id())).collect()
+        self.db
+            .iter_all_entries()
+            .filter(|e| !dead.contains(&e.id()))
+            .collect()
     }
 
     /* Expansion is presentation, not data: toggling it does not mark the vault
-       dirty, so folding the tree never triggers the quit guard. KeePass does
-       store the flag, so it rides along on the next real save. */
+    dirty, so folding the tree never triggers the quit guard. KeePass does
+    store the flag, so it rides along on the next real save. */
     pub fn set_expanded(&mut self, id: &GroupId, expanded: bool) {
         if let Some(mut group) = self.db.group_mut(*id) {
             group.edit(|g| g.is_expanded = expanded);
@@ -1419,7 +1478,10 @@ impl Vault {
     /// Parent of a group via the stored back-pointer.
     #[allow(dead_code)]
     pub fn parent_group(&self, id: &GroupId) -> Option<GroupId> {
-        self.db.group(*id).map(|g| g.parent().map(|p| p.id())).unwrap_or(None)
+        self.db
+            .group(*id)
+            .map(|g| g.parent().map(|p| p.id()))
+            .unwrap_or(None)
     }
 
     pub fn parent_group_of_entry(&self, id: &EntryId) -> Option<GroupId> {
@@ -1452,7 +1514,7 @@ impl Vault {
     }
 
     /* A group moves with its whole subtree: children live behind the group's
-       id, so only the child lists change. The move_to guard mirrors ours. */
+    id, so only the child lists change. The move_to guard mirrors ours. */
     pub fn move_group(&mut self, id: &GroupId, new_parent: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotMoveRoot);
@@ -1474,8 +1536,8 @@ impl Vault {
     }
 
     /* The recursive delete `delete_group` refuses to be. Only reachable on a
-       group already inside the bin, where the subtree has been deleted once
-       already and the confirm says it cannot be undone. */
+    group already inside the bin, where the subtree has been deleted once
+    already and the confirm says it cannot be undone. */
     pub fn delete_group_tree(&mut self, id: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotDeleteRoot);
@@ -1488,7 +1550,11 @@ impl Vault {
         };
         group.remove();
         let now = Some(Times::now());
-        for uuid in groups.iter().map(|g| g.uuid()).chain(entries.iter().map(|e| e.uuid())) {
+        for uuid in groups
+            .iter()
+            .map(|g| g.uuid())
+            .chain(entries.iter().map(|e| e.uuid()))
+        {
             self.db.deleted_objects.insert(uuid, now);
         }
         Ok(())
@@ -1500,9 +1566,9 @@ impl Vault {
     }
 
     /* Notes ride protected here where KeePass convention stores them in the
-       clear. It round-trips (a keepassxc-cli-written fixture's notes read
-       back; our files open there too) and protecting them only ever hides
-       more — left as-is deliberately. */
+    clear. It round-trips (a keepassxc-cli-written fixture's notes read
+    back; our files open there too) and protecting them only ever hides
+    more — left as-is deliberately. */
     pub fn create_entry(
         &mut self,
         group: &GroupId,
@@ -1538,7 +1604,7 @@ impl Vault {
         notes: &str,
     ) -> Result<(), VaultError> {
         /* Password is Option: the edit form sends None when the box was left
-           untouched, so an edit that never looked at the secret keeps it. */
+        untouched, so an edit that never looked at the secret keeps it. */
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
         };
@@ -1550,14 +1616,14 @@ impl Vault {
         entry.set_unprotected(URL, url);
         entry.set_protected(NOTES, notes);
         /* The editor is the only thing that mutates an entry in Sennel, so
-           this is where the modification stamp moves forward (`updated`
-           sort reads it). */
+        this is where the modification stamp moves forward (`updated`
+        sort reads it). */
         entry.times.last_modification = Some(Times::now());
         Ok(())
     }
 
     /* EntryMut::move_to keeps both child lists and the back-pointer in step
-       with one call. */
+    with one call. */
     pub fn move_entry(&mut self, id: &EntryId, new_group: &GroupId) -> Result<(), VaultError> {
         if self.db.group(*new_group).is_none() {
             return Err(VaultError::GroupNotFound);
@@ -1573,9 +1639,9 @@ impl Vault {
     }
 
     /* The bin every other KeePass client routes deletes through, found by
-       the uuid in the file's own metadata or created on the first delete.
-       KeePassXC writes exactly this: a root-level group, its uuid in
-       `recyclebin_uuid`, and the enabled flag set. */
+    the uuid in the file's own metadata or created on the first delete.
+    KeePassXC writes exactly this: a root-level group, its uuid in
+    `recyclebin_uuid`, and the enabled flag set. */
     pub fn ensure_recycle_bin(&mut self) -> Result<GroupId, VaultError> {
         if let Some(bin) = self.recycle_bin_id() {
             return Ok(bin);
@@ -1622,9 +1688,9 @@ impl Vault {
     }
 
     /* `D` on a live entry. A move, not a removal: the entry keeps its id and
-       its history, KeePassXC shows it under Recycle Bin, and undo is a move
-       home rather than a resurrection from a snapshot. An entry already in
-       the bin is deleted for real by `expunge_entry`. */
+    its history, KeePassXC shows it under Recycle Bin, and undo is a move
+    home rather than a resurrection from a snapshot. An entry already in
+    the bin is deleted for real by `expunge_entry`. */
     pub fn recycle_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
         if self.db.entry(*id).is_none() {
             return Err(VaultError::EntryNotFound);
@@ -1634,8 +1700,8 @@ impl Vault {
     }
 
     /* `D` on a group. The whole subtree rides along, which is why this no
-       longer refuses a non-empty group the way a recursive *removal* had to:
-       nothing is destroyed, and one keypress undoes it. */
+    longer refuses a non-empty group the way a recursive *removal* had to:
+    nothing is destroyed, and one keypress undoes it. */
     pub fn recycle_group(&mut self, id: &GroupId) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotDeleteRoot);
@@ -1651,10 +1717,10 @@ impl Vault {
     }
 
     /* Undo support (Wave 7): the app snapshots whole entries and calls back
-       here to restore them. */
+    here to restore them. */
     /* The `otp` field, set or cleared. Protected, like the password: it is a
-       seed that mints codes forever, so it must not sit in the file in the
-       clear. */
+    seed that mints codes forever, so it must not sit in the file in the
+    clear. */
     pub fn set_otp(&mut self, id: &EntryId, url: Option<&str>) -> Result<(), VaultError> {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
@@ -1686,12 +1752,12 @@ impl Vault {
     /// a one-level undo that restores content is worth the position it
     /// cannot bring back.
     /* The caller must hand back the parent the snapshot was taken from —
-       that is what the undo slot records — because the whole-record clone
-       also carries the snapshot's own back-pointer, and a different parent
-       would leave group child list and entry pointing at different places
-       (Entry's parent field is crate-private, so we cannot fix it here).
-       DuplicateEntryIdError maps to EntryNotFound as "cannot restore into
-       a slot that is not empty": the entry exists where it should not. */
+    that is what the undo slot records — because the whole-record clone
+    also carries the snapshot's own back-pointer, and a different parent
+    would leave group child list and entry pointing at different places
+    (Entry's parent field is crate-private, so we cannot fix it here).
+    DuplicateEntryIdError maps to EntryNotFound as "cannot restore into
+    a slot that is not empty": the entry exists where it should not. */
     pub fn restore_entry(&mut self, entry: &Entry, parent: &GroupId) -> Result<(), VaultError> {
         let Some(mut group) = self.db.group_mut(*parent) else {
             return Err(VaultError::GroupNotFound);
@@ -1706,9 +1772,9 @@ impl Vault {
     }
 
     /* The bytes of one attachment, for writing it out. Cloned rather than
-       borrowed: the caller writes it to a file and drops it, and threading a
-       borrow of the database through that is not worth the lifetime. The
-       clone is wiped on drop, since the vault keeps the original protected. */
+    borrowed: the caller writes it to a file and drops it, and threading a
+    borrow of the database through that is not worth the lifetime. The
+    clone is wiped on drop, since the vault keeps the original protected. */
     pub fn attachment_bytes(&self, id: &EntryId, name: &str) -> Option<Zeroizing<Vec<u8>>> {
         self.db
             .entry(*id)?
@@ -1717,9 +1783,9 @@ impl Vault {
     }
 
     /* A custom field, set or replaced. Protected by default for the same
-       reason notes are: a field somebody added by hand to a password manager
-       is more likely to be a secret than not, and protecting it only ever
-       hides more. */
+    reason notes are: a field somebody added by hand to a password manager
+    is more likely to be a secret than not, and protecting it only ever
+    hides more. */
     pub fn set_field(
         &mut self,
         id: &EntryId,
@@ -1731,9 +1797,11 @@ impl Vault {
             return Err(VaultError::Db("a field needs a name".into()));
         }
         /* The five fixed rows have their own editor; letting this one write
-           them would mean two paths to the same field disagreeing. */
+        them would mean two paths to the same field disagreeing. */
         if STANDARD.contains(&name) {
-            return Err(VaultError::Db(format!("{name} has its own row in the form")));
+            return Err(VaultError::Db(format!(
+                "{name} has its own row in the form"
+            )));
         }
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
@@ -1747,8 +1815,8 @@ impl Vault {
     }
 
     /* Tags, which KeePassXC writes and `#` filters on. Whole list at a time:
-       a tag set is small and edited as a set, and per-tag add/remove would be
-       two more verbs for the same result. */
+    a tag set is small and edited as a set, and per-tag add/remove would be
+    two more verbs for the same result. */
     pub fn set_tags(&mut self, id: &EntryId, tags: &[String]) -> Result<(), VaultError> {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
@@ -1774,9 +1842,9 @@ impl Vault {
     }
 
     /* A file into the vault, protected. KDBX stores attachments in a shared
-       pool keyed off the entry, which the crate handles; what matters here is
-       that it goes in protected, because an attachment is usually the most
-       sensitive thing on the entry. */
+    pool keyed off the entry, which the crate handles; what matters here is
+    that it goes in protected, because an attachment is usually the most
+    sensitive thing on the entry. */
     pub fn add_attachment(
         &mut self,
         id: &EntryId,
@@ -1817,19 +1885,19 @@ impl Vault {
             return Err(VaultError::EntryNotFound);
         };
         /* Through the entry, not through the attachment. `AttachmentMut::
-           remove` clears the back-references it knows about, and a file
-           loaded from disk arrives with those back-references empty — so it
-           dropped the bytes and left the entry pointing at them, which is a
-           panic the next time anything reads the list. */
+        remove` clears the back-references it knows about, and a file
+        loaded from disk arrives with those back-references empty — so it
+        dropped the bytes and left the entry pointing at them, which is a
+        panic the next time anything reads the list. */
         entry.remove_attachment_by_name(name);
         entry.times.last_modification = Some(Times::now());
         Ok(())
     }
 
     /* Throw away every old version an entry carries. The one thing Sennel
-       could not do about history before: it preserved what KeePassXC wrote
-       and told the user to go there to clear it, which is a strange place
-       for a password manager to leave somebody. */
+    could not do about history before: it preserved what KeePassXC wrote
+    and told the user to go there to clear it, which is a strange place
+    for a password manager to leave somebody. */
     pub fn clear_history(&mut self, id: &EntryId) -> Result<usize, VaultError> {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
@@ -1839,23 +1907,25 @@ impl Vault {
             return Ok(0);
         }
         /* Emptied rather than set to None: an entry with no History element
-           and an entry with an empty one read the same to KeePassXC, and
-           keeping the element is the smaller change to the file. */
+        and an entry with an empty one read the same to KeePassXC, and
+        keeping the element is the smaller change to the file. */
         entry.history = Some(keepass::db::History::default());
         entry.times.last_modification = Some(Times::now());
         Ok(gone)
     }
 
     /* Gone for good: an add that `u` takes back, and `D` on something
-       already in the bin. The one path in Sennel that destroys an entry, and
-       both callers have either just created it or already deleted it once. */
+    already in the bin. The one path in Sennel that destroys an entry, and
+    both callers have either just created it or already deleted it once. */
     pub fn expunge_entry(&mut self, id: &EntryId) -> Result<(), VaultError> {
         let Some(entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
         };
         entry.remove();
         // Recorded as deleted, or a merge would bring it back from the other side.
-        self.db.deleted_objects.insert(id.uuid(), Some(Times::now()));
+        self.db
+            .deleted_objects
+            .insert(id.uuid(), Some(Times::now()));
         Ok(())
     }
 
@@ -1879,8 +1949,8 @@ pub enum Issue {
     /// The same password as this many other entries.
     Reused(usize),
     /* Past its own expiry date. Not a weakness in the password — it may be a
-       fine one — but a credential the owner already decided had a shelf life,
-       and the audit is the list of things to go and do. */
+    fine one — but a credential the owner already decided had a shelf life,
+    and the audit is the list of things to go and do. */
     Expired,
     /// Fewer bits than a password worth having, by the form's own estimate.
     Weak(f64),
@@ -1895,8 +1965,8 @@ impl Issue {
             Issue::Empty => 0,
             Issue::Reused(_) => 1,
             /* Above `weak`: an expired credential is a decision somebody
-               already made, where weak is only an estimate disagreeing with
-               them. */
+            already made, where weak is only an estimate disagreeing with
+            them. */
             Issue::Expired => 2,
             Issue::Weak(_) => 3,
             // Last: age alone says nothing is wrong with the password, only that it has had time to leak.
@@ -1923,16 +1993,16 @@ const WEAK_BITS: f64 = 60.0;
 const OLD_YEARS: u32 = 3;
 
 /* Everything wrong with the vault's passwords, in one pass. Reuse first
-   because it is the finding that matters most and the one a person cannot
-   possibly spot themselves: a weak password costs one account, a reused one
-   costs every account that shares it.
+because it is the finding that matters most and the one a person cannot
+possibly spot themselves: a weak password costs one account, a reused one
+costs every account that shares it.
 
-   Passwords are grouped by hash, not by keeping a map of the plaintext: a
-   table of every password in the vault is not a thing to build when buckets
-   will do. The bucket is where the answer starts, not where it ends — two
-   passwords that merely hash alike are compared before either is called
-   reused, because a false "reused" is the one finding a reader cannot check
-   without putting two passwords side by side. */
+Passwords are grouped by hash, not by keeping a map of the plaintext: a
+table of every password in the vault is not a thing to build when buckets
+will do. The bucket is where the answer starts, not where it ends — two
+passwords that merely hash alike are compared before either is called
+reused, because a false "reused" is the one finding a reader cannot check
+without putting two passwords side by side. */
 pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
@@ -1944,7 +2014,7 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
         hasher.finish()
     };
     /* Positions, not passwords: the plaintext stays where it already is, on
-       the entries, and a bucket is a handful of indices to compare against. */
+    the entries, and a bucket is a handful of indices to compare against. */
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
     for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
@@ -1985,11 +2055,14 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
         out.push((entry.id(), issue));
     }
     /* Worst first, then by title, so the list is stable between openings —
-       a to-do list that reshuffles itself is one nobody works through. */
+    a to-do list that reshuffles itself is one nobody works through. */
     out.sort_by(|a, b| {
         a.1.rank().cmp(&b.1.rank()).then_with(|| {
             let name = |id: &EntryId| {
-                vault.get_entry(id).map(|e| e.title().to_lowercase()).unwrap_or_default()
+                vault
+                    .get_entry(id)
+                    .map(|e| e.title().to_lowercase())
+                    .unwrap_or_default()
             };
             name(&a.0).cmp(&name(&b.0))
         })
@@ -1998,13 +2071,13 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
 }
 
 /* Every entry as one comparable line. What `convert` checks a rewritten file
-   against, so a format change that silently dropped an entry is caught while
-   the original is still there rather than months later.
+against, so a format change that silently dropped an entry is caught while
+the original is still there rather than months later.
 
-   Secrets included, because the point is that they survived unchanged; this
-   never leaves the process. Sorted, because entry order is not something a
-   format change promises to keep. The separator is a control character no
-   field can contain, so two entries cannot collide by concatenation. */
+Secrets included, because the point is that they survived unchanged; this
+never leaves the process. Sorted, because entry order is not something a
+format change promises to keep. The separator is a control character no
+field can contain, so two entries cannot collide by concatenation. */
 pub fn inventory(vault: &Vault) -> Vec<String> {
     let mut out: Vec<String> = vault
         .entry_refs()
@@ -2039,22 +2112,18 @@ pub enum Found {
 }
 
 /* Resolving a needle with nobody to ask. The TUI can show a list and let the
-   cursor decide; `sennel get` has one shot, so the rules have to be ones a
-   user can predict:
+cursor decide; `sennel get` has one shot, so the rules have to be ones a
+user can predict:
 
-   an exact title match, case-insensitive, wins outright even when a dozen
-   entries fuzzy-match it — "mail" should find the entry called "mail" and not
-   the one called "mailchimp-api-key". Failing that, a single fuzzy match
-   wins. Anything else is ambiguous and gets listed rather than guessed at.
+an exact title match, case-insensitive, wins outright even when a dozen
+entries fuzzy-match it — "mail" should find the entry called "mail" and not
+the one called "mailchimp-api-key". Failing that, a single fuzzy match
+wins. Anything else is ambiguous and gets listed rather than guessed at.
 
-   Binned entries are not candidates. Copying the password of something
-   deleted last week is the one outcome worth engineering against. */
+Binned entries are not candidates. Copying the password of something
+deleted last week is the one outcome worth engineering against. */
 pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &str) -> Found {
-    let live: Vec<EntryId> = vault
-        .entry_refs()
-        .iter()
-        .map(|e| e.id())
-        .collect();
+    let live: Vec<EntryId> = vault.entry_refs().iter().map(|e| e.id()).collect();
     let exact: Vec<EntryId> = live
         .iter()
         .copied()
@@ -2068,7 +2137,7 @@ pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &s
         return Found::One(exact[0]);
     }
     /* One parse of the needle and one pass of haystacks for the whole vault:
-       `rank_entry` would rebuild both per entry. */
+    `rank_entry` would rebuild both per entry. */
     let pattern = crate::search::pattern(needle);
     let hays = crate::search::haystacks(vault, &live);
     let mut hits: Vec<(u16, EntryId)> = live
@@ -2082,8 +2151,8 @@ pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &s
         0 => Found::None,
         1 => Found::One(hits[0].1),
         /* Two entries with the same title are ambiguous even when one scores
-           higher: the score is not something the user can see or reason
-           about, so it must not be what picks their password. */
+        higher: the score is not something the user can see or reason
+        about, so it must not be what picks their password. */
         _ => Found::Many(hits.into_iter().map(|(_, id)| id).collect()),
     }
 }
@@ -2104,7 +2173,9 @@ mod tests {
 
     // The fixtures sit at the workspace root, beside the TUI's tests that read them too.
     fn fixture(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures").join(name)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
     }
 
     #[test]
@@ -2131,9 +2202,9 @@ mod tests {
     }
 
     /* A group goes to the bin whole. It used to be refused while it held
-       anything, on the grounds that a recursive delete is one keypress from
-       losing a subtree — which stops being true once the keypress is a move
-       that `u` takes back. */
+    anything, on the grounds that a recursive delete is one keypress from
+    losing a subtree — which stops being true once the keypress is a move
+    that `u` takes back. */
     #[test]
     fn deleting_a_group_moves_it_and_its_contents_to_the_bin() {
         let mut v = vault();
@@ -2156,7 +2227,7 @@ mod tests {
     }
 
     /* The bin is the one KeePassXC looks for: a root-level group whose uuid
-       is in the file's own metadata, created on the first delete. */
+    is in the file's own metadata, created on the first delete. */
     #[test]
     fn the_first_delete_makes_the_bin_the_format_describes() {
         let mut v = vault();
@@ -2186,7 +2257,7 @@ mod tests {
     }
 
     /* The bin survives a round trip, so KeePassXC opens the file and shows
-       the deleted entry under Recycle Bin rather than losing it. */
+    the deleted entry under Recycle Bin rather than losing it. */
     #[test]
     fn the_bin_round_trips_through_the_file() {
         let dir = std::env::temp_dir().join(format!("sennel-bin-{}", std::process::id()));
@@ -2199,7 +2270,9 @@ mod tests {
         v.save_as(&path, "pw", None).unwrap();
 
         let back = Vault::open(&path, "pw", None).unwrap();
-        let bin = back.recycle_bin_id().expect("the bin did not survive the save");
+        let bin = back
+            .recycle_bin_id()
+            .expect("the bin did not survive the save");
         assert_eq!(back.get_group(&bin).unwrap().name, RECYCLE_BIN);
         assert!(back.is_recycled(&e), "the entry is not in the reopened bin");
         assert_eq!(back.entry_count(), 0);
@@ -2207,24 +2280,34 @@ mod tests {
     }
 
     /* The fixture is a KeePassXC-written 3.1 file, which opens and can never
-       be written. Sennel used to find that out at the first autosave, ten
-       minutes into editing, with nowhere for the work to go. */
+    be written. Sennel used to find that out at the first autosave, ten
+    minutes into editing, with nowhere for the work to go. */
     #[test]
     fn an_older_kdbx_opens_and_says_it_cannot_be_written() {
         let path = &fixture("keepassxc3.kdbx");
         let mut v = Vault::open(path, "sennel-fixture", None).expect("the fixture did not open");
-        assert!(!v.writable(), "the fixture is writable now, so this test is wrong");
+        assert!(
+            !v.writable(),
+            "the fixture is writable now, so this test is wrong"
+        );
         assert_eq!(v.format(), "KDBX 3.1");
 
         /* Refused by name rather than by the crate's "Unsupported database
-           version", and refused before the file is touched. */
+        version", and refused before the file is touched. */
         let before = std::fs::metadata(path).unwrap().len();
         let err = v.save().unwrap_err();
         assert_eq!(err, VaultError::ReadOnlyFormat("KDBX 3.1".into()));
         assert!(err.to_string().contains("KDBX 4"), "{err}");
         // `^s`, the deliberate overwrite, is refused for the same reason.
-        assert_eq!(v.save_over().unwrap_err(), VaultError::ReadOnlyFormat("KDBX 3.1".into()));
-        assert_eq!(std::fs::metadata(path).unwrap().len(), before, "the fixture was written");
+        assert_eq!(
+            v.save_over().unwrap_err(),
+            VaultError::ReadOnlyFormat("KDBX 3.1".into())
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            before,
+            "the fixture was written"
+        );
 
         // A vault Sennel made is KDBX 4, and writable.
         let dir = std::env::temp_dir().join(format!("sennel-fmt-{}", std::process::id()));
@@ -2245,7 +2328,10 @@ mod tests {
         v.db.config.version = keepass::config::DatabaseVersion::KDB4(0);
         assert!(!v.writable());
         assert_eq!(v.format(), "KDBX 4.0");
-        assert_eq!(v.save().unwrap_err(), VaultError::ReadOnlyFormat("KDBX 4.0".into()));
+        assert_eq!(
+            v.save().unwrap_err(),
+            VaultError::ReadOnlyFormat("KDBX 4.0".into())
+        );
     }
 
     // A KDBX 4.1 file written by KeePassXC 2.7.10, opened, saved and reopened from a copy to show that
@@ -2260,7 +2346,11 @@ mod tests {
 
         let check = |v: &Vault| {
             let live = v.entry_refs();
-            assert_eq!(live.len(), 1, "the recycle bin leaked into the live entries");
+            assert_eq!(
+                live.len(),
+                1,
+                "the recycle bin leaked into the live entries"
+            );
             let entry = &live[0];
             assert_eq!(entry.title(), "checking");
             assert_eq!(history(entry).len(), 3, "history did not survive");
@@ -2279,7 +2369,11 @@ mod tests {
         v.save().unwrap();
         let mut back = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         assert_eq!(back.entry_count(), 2);
-        let added = back.entry_refs().iter().find(|e| e.title() == "added here").map(|e| e.id());
+        let added = back
+            .entry_refs()
+            .iter()
+            .find(|e| e.title() == "added here")
+            .map(|e| e.id());
         back.expunge_entry(&added.unwrap()).unwrap();
         check(&back);
     }
@@ -2291,14 +2385,17 @@ mod tests {
         v.backup_gap = std::time::Duration::ZERO;
         for i in 0..n {
             let root = v.root_id();
-            v.create_entry(&root, &format!("edit {i}"), "", "", "", "").unwrap();
+            v.create_entry(&root, &format!("edit {i}"), "", "", "", "")
+                .unwrap();
             v.save().unwrap();
         }
         v
     }
 
     fn entries_in_file(path: &Path) -> usize {
-        Vault::open(path, "correct horse", None).unwrap().entry_count()
+        Vault::open(path, "correct horse", None)
+            .unwrap()
+            .entry_count()
     }
 
     // Autosave writes after every edit, so the backup is the file as it was opened.
@@ -2310,7 +2407,11 @@ mod tests {
         edit_session(&file, 3, 3);
         let found = backups_of(&file.backups, &file.path);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(entries_in_file(&found[0]), 1, "the backup is not the opened file");
+        assert_eq!(
+            entries_in_file(&found[0]),
+            1,
+            "the backup is not the opened file"
+        );
         assert_eq!(entries_in_file(&file.path), 4);
         let mode = std::fs::metadata(&found[0]).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -2322,7 +2423,12 @@ mod tests {
         let file = Temp::new("backup-away");
         saved_vault(&file);
         edit_session(&file, 3, 1);
-        let name = file.path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = file
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let beside: Vec<_> = std::fs::read_dir(file.path.parent().unwrap())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -2340,7 +2446,11 @@ mod tests {
         let a = backup_path(dir, Path::new("/one/vault.kdbx"), 1);
         let b = backup_path(dir, Path::new("/two/vault.kdbx"), 1);
         assert_ne!(a, b);
-        assert_eq!(a, backup_path(dir, Path::new("/one/vault.kdbx"), 1), "not stable");
+        assert_eq!(
+            a,
+            backup_path(dir, Path::new("/one/vault.kdbx"), 1),
+            "not stable"
+        );
     }
 
     // Every unlock is a new session, so a recent backup stands in for the next one.
@@ -2363,7 +2473,11 @@ mod tests {
         second.save().unwrap();
         let found = backups_of(&file.backups, &file.path);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(std::fs::read(&found[0]).unwrap(), kept, "the first backup was replaced");
+        assert_eq!(
+            std::fs::read(&found[0]).unwrap(),
+            kept,
+            "the first backup was replaced"
+        );
 
         // The `^s` overwrite is never skipped.
         second.save_over().unwrap();
@@ -2433,10 +2547,15 @@ mod tests {
         let (file, mut ours, mut theirs) = two_writers("backup-overwrite");
         ours.set_backups(3, &file.backups);
         let root = theirs.root_id();
-        theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "theirs", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
         assert_eq!(ours.save(), Err(VaultError::ChangedOnDisk));
-        assert!(backups_of(&file.backups, &file.path).is_empty(), "a refused save took a backup");
+        assert!(
+            backups_of(&file.backups, &file.path).is_empty(),
+            "a refused save took a backup"
+        );
 
         ours.save_over().unwrap();
         let found = backups_of(&file.backups, &file.path);
@@ -2478,7 +2597,10 @@ mod tests {
     // Everything dated 2020 so an edit made now is clearly newer. Timestamps are whole seconds, and two
     // edits in one second to one entry cannot be ordered.
     fn age(v: &mut Vault) {
-        let past = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+        let past = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
         let (mut groups, mut entries) = (Vec::new(), Vec::new());
         v.collect_subtree(&v.root_id(), &mut groups, &mut entries);
         for id in entries {
@@ -2494,7 +2616,10 @@ mod tests {
     }
 
     fn stamp_entry(v: &mut Vault, id: &EntryId, year: i32) {
-        let at = chrono::NaiveDate::from_ymd_opt(year, 6, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+        let at = chrono::NaiveDate::from_ymd_opt(year, 6, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
         v.db.entry_mut(*id).unwrap().times.last_modification = Some(at);
     }
 
@@ -2505,7 +2630,10 @@ mod tests {
         let banks = v.create_group(&root, "Banks").unwrap();
         v.create_group(&root, "Other").unwrap();
         let ids = (1..=6)
-            .map(|i| v.create_entry(&banks, &format!("e{i}"), "u", "p", "", "").unwrap())
+            .map(|i| {
+                v.create_entry(&banks, &format!("e{i}"), "u", "p", "", "")
+                    .unwrap()
+            })
             .collect();
         age(&mut v);
         v.save_as(&file.path, "pw", None).unwrap();
@@ -2513,22 +2641,33 @@ mod tests {
     }
 
     fn titles(v: &Vault) -> Vec<String> {
-        let mut out: Vec<String> = v.entry_refs().iter().map(|e| e.title().to_string()).collect();
+        let mut out: Vec<String> = v
+            .entry_refs()
+            .iter()
+            .map(|e| e.title().to_string())
+            .collect();
         out.sort();
         out
     }
 
     fn group_of(v: &Vault, title: &str) -> String {
-        let id = v.entry_refs().iter().find(|e| e.title() == title).unwrap().id();
+        let id = v
+            .entry_refs()
+            .iter()
+            .find(|e| e.title() == title)
+            .unwrap()
+            .id();
         let group = v.parent_group_of_entry(&id).unwrap();
         v.get_group(&group).unwrap().name.clone()
     }
 
     fn note(v: &Vault, id: &EntryId) -> Option<String> {
-        extra_rows(&v.get_entry(id).unwrap()).iter().find_map(|x| match x {
-            Extra::Field { name, value, .. } if name == "note" => Some(value.clone()),
-            _ => None,
-        })
+        extra_rows(&v.get_entry(id).unwrap())
+            .iter()
+            .find_map(|x| match x {
+                Extra::Field { name, value, .. } if name == "note" => Some(value.clone()),
+                _ => None,
+            })
     }
 
     // Each side adds, edits, moves and deletes a different entry.
@@ -2541,12 +2680,15 @@ mod tests {
         let root = ours.root_id();
         let (banks, other) = (ours.groups_in(&root)[0].id(), ours.groups_in(&root)[1].id());
 
-        ours.create_entry(&banks, "ours-added", "", "", "", "").unwrap();
+        ours.create_entry(&banks, "ours-added", "", "", "", "")
+            .unwrap();
         ours.set_field(&ids[0], "note", "ours", false).unwrap();
         ours.move_entry(&ids[1], &other).unwrap();
         ours.expunge_entry(&ids[2]).unwrap();
 
-        theirs.create_entry(&banks, "theirs-added", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&banks, "theirs-added", "", "", "", "")
+            .unwrap();
         theirs.set_field(&ids[3], "note", "theirs", false).unwrap();
         theirs.move_entry(&ids[4], &other).unwrap();
         theirs.expunge_entry(&ids[5]).unwrap();
@@ -2556,13 +2698,22 @@ mod tests {
         let summary = ours.merge_from_disk().unwrap();
         assert_eq!(
             summary,
-            MergeSummary { added: 1, updated: 1, moved: 1, deleted: 1, warnings: 0 },
+            MergeSummary {
+                added: 1,
+                updated: 1,
+                moved: 1,
+                deleted: 1,
+                warnings: 0
+            },
             "{}",
             summary.describe()
         );
 
         let check = |v: &Vault| {
-            assert_eq!(titles(v), ["e1", "e2", "e4", "e5", "ours-added", "theirs-added"]);
+            assert_eq!(
+                titles(v),
+                ["e1", "e2", "e4", "e5", "ours-added", "theirs-added"]
+            );
             assert_eq!(group_of(v, "e2"), "Other");
             assert_eq!(group_of(v, "e5"), "Other");
             assert_eq!(group_of(v, "e1"), "Banks");
@@ -2570,7 +2721,10 @@ mod tests {
             assert_eq!(note(v, &ids[3]).as_deref(), Some("theirs"));
         };
         check(&ours);
-        assert!(!ours.changed_on_disk(), "the merge did not re-agree with the file");
+        assert!(
+            !ours.changed_on_disk(),
+            "the merge did not re-agree with the file"
+        );
         check(&Vault::open(&file.path, "pw", None).unwrap());
     }
 
@@ -2584,7 +2738,11 @@ mod tests {
             let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
             ours.set_field(&ids[0], "note", "ours", false).unwrap();
             theirs.set_field(&ids[0], "note", "theirs", false).unwrap();
-            let (mine, yours) = if ours_is_newer { (2022, 2021) } else { (2021, 2022) };
+            let (mine, yours) = if ours_is_newer {
+                (2022, 2021)
+            } else {
+                (2021, 2022)
+            };
             stamp_entry(&mut ours, &ids[0], mine);
             stamp_entry(&mut theirs, &ids[0], yours);
             theirs.save().unwrap();
@@ -2615,9 +2773,20 @@ mod tests {
         let err = ours.merge_from_disk().unwrap_err();
         assert!(matches!(err, VaultError::Merge(_)), "{err:?}");
         assert!(err.to_string().starts_with("cannot merge"), "{err}");
-        assert!(err.to_string().contains("\"e1\""), "the entry was not named: {err}");
-        assert_eq!(std::fs::read(&file.path).unwrap(), on_disk, "the file was written");
-        assert_eq!(note(&ours, &ids[0]).as_deref(), Some("ours"), "the session was changed");
+        assert!(
+            err.to_string().contains("\"e1\""),
+            "the entry was not named: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&file.path).unwrap(),
+            on_disk,
+            "the file was written"
+        );
+        assert_eq!(
+            note(&ours, &ids[0]).as_deref(),
+            Some("ours"),
+            "the session was changed"
+        );
         assert!(ours.changed_on_disk());
         assert_eq!(ours.save(), Err(VaultError::ChangedOnDisk));
         ours.save_over().unwrap();
@@ -2641,8 +2810,15 @@ mod tests {
         ours.merge_from_disk().unwrap();
         assert_eq!(note(&ours, &ids[0]).as_deref(), Some("theirs"));
         let back = Vault::open(&file.path, "pw", None).unwrap();
-        assert_eq!(back.parent_group(&other), Some(banks), "our group move was lost");
-        assert!(!back.get_group(&banks).unwrap().is_expanded, "our fold was lost");
+        assert_eq!(
+            back.parent_group(&other),
+            Some(banks),
+            "our group move was lost"
+        );
+        assert!(
+            !back.get_group(&banks).unwrap().is_expanded,
+            "our fold was lost"
+        );
     }
 
     // Files cannot be carried across a merge safely (see `attachment_hazard`), so each case is a refusal.
@@ -2651,7 +2827,9 @@ mod tests {
         let file = Temp::new("merge-files");
         let ids = merge_base(&file);
         let mut setup = Vault::open(&file.path, "pw", None).unwrap();
-        setup.add_attachment(&ids[1], "kept.txt", b"old".to_vec()).unwrap();
+        setup
+            .add_attachment(&ids[1], "kept.txt", b"old".to_vec())
+            .unwrap();
         age(&mut setup);
         setup.save().unwrap();
 
@@ -2673,20 +2851,31 @@ mod tests {
         let (result, untouched) = attempt(&|t| {
             let root = t.root_id();
             let fresh = t.create_entry(&root, "fresh", "", "", "", "").unwrap();
-            t.add_attachment(&fresh, "f.txt", b"fresh".to_vec()).unwrap();
+            t.add_attachment(&fresh, "f.txt", b"fresh".to_vec())
+                .unwrap();
         });
-        assert!(matches!(result, Err(VaultError::Merge(_))) && untouched, "{result:?}");
+        assert!(
+            matches!(result, Err(VaultError::Merge(_))) && untouched,
+            "{result:?}"
+        );
 
         // A newer entry whose file changed.
         let (result, untouched) = attempt(&|t| {
             t.remove_attachment(&ids[1], "kept.txt").unwrap();
-            t.add_attachment(&ids[1], "kept.txt", b"new".to_vec()).unwrap();
+            t.add_attachment(&ids[1], "kept.txt", b"new".to_vec())
+                .unwrap();
         });
-        assert!(matches!(result, Err(VaultError::Merge(_))) && untouched, "{result:?}");
+        assert!(
+            matches!(result, Err(VaultError::Merge(_))) && untouched,
+            "{result:?}"
+        );
 
         // A newer entry whose file the other side removed, which would otherwise not carry over.
         let (result, untouched) = attempt(&|t| t.remove_attachment(&ids[1], "kept.txt").unwrap());
-        assert!(matches!(result, Err(VaultError::Merge(_))) && untouched, "{result:?}");
+        assert!(
+            matches!(result, Err(VaultError::Merge(_))) && untouched,
+            "{result:?}"
+        );
     }
 
     // An edit to an entry that has a file, with the other side leaving it alone, is fine.
@@ -2695,7 +2884,9 @@ mod tests {
         let file = Temp::new("merge-files-ok");
         let ids = merge_base(&file);
         let mut setup = Vault::open(&file.path, "pw", None).unwrap();
-        setup.add_attachment(&ids[1], "kept.txt", b"data".to_vec()).unwrap();
+        setup
+            .add_attachment(&ids[1], "kept.txt", b"data".to_vec())
+            .unwrap();
         age(&mut setup);
         setup.save().unwrap();
 
@@ -2707,7 +2898,10 @@ mod tests {
 
         ours.merge_from_disk().unwrap();
         for v in [&ours, &Vault::open(&file.path, "pw", None).unwrap()] {
-            assert_eq!(v.attachment_bytes(&ids[1], "kept.txt").map(|b| b.to_vec()), Some(b"data".to_vec()));
+            assert_eq!(
+                v.attachment_bytes(&ids[1], "kept.txt").map(|b| b.to_vec()),
+                Some(b"data".to_vec())
+            );
             assert_eq!(note(v, &ids[1]).as_deref(), Some("ours"));
             assert_eq!(note(v, &ids[3]).as_deref(), Some("theirs"));
         }
@@ -2725,9 +2919,17 @@ mod tests {
         theirs.save().unwrap();
 
         ours.merge_from_disk().unwrap();
-        let before = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap().and_hms_opt(0, 0, 0);
-        assert_eq!(ours.get_entry(&ids[0]).unwrap().times.last_modification, before);
-        assert_eq!(ours.get_entry(&ids[2]).unwrap().times.last_modification, before);
+        let before = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0);
+        assert_eq!(
+            ours.get_entry(&ids[0]).unwrap().times.last_modification,
+            before
+        );
+        assert_eq!(
+            ours.get_entry(&ids[2]).unwrap().times.last_modification,
+            before
+        );
     }
 
     // The file a merge replaces is somebody else's, so it is backed up first.
@@ -2764,7 +2966,9 @@ mod tests {
         let banks = ours.groups_in(&root)[0].id();
         ours.recycle_group(&banks).unwrap();
         ours.delete_group_tree(&banks).unwrap();
-        theirs.set_field(&ids[5], "note", "elsewhere", false).unwrap();
+        theirs
+            .set_field(&ids[5], "note", "elsewhere", false)
+            .unwrap();
         stamp_entry(&mut theirs, &ids[5], 2019);
         theirs.save().unwrap();
 
@@ -2782,13 +2986,20 @@ mod tests {
         let mut theirs = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         let root = ours.root_id();
         ours.create_entry(&root, "ours", "", "", "", "").unwrap();
-        theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "theirs", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
 
         ours.merge_from_disk().unwrap();
         let back = Vault::open(&file.path, "sennel-fixture", None).unwrap();
         assert_eq!(titles(&back), ["checking", "ours", "theirs"]);
-        let checking = back.entry_refs().iter().find(|e| e.title() == "checking").unwrap().id();
+        let checking = back
+            .entry_refs()
+            .iter()
+            .find(|e| e.title() == "checking")
+            .unwrap()
+            .id();
         assert_eq!(history(&back.get_entry(&checking).unwrap()).len(), 3);
         assert!(back.attachment_bytes(&checking, "blob.txt").is_some());
         assert_eq!(back.recycled().len(), 1);
@@ -2806,7 +3017,9 @@ mod tests {
         let mut theirs = Vault::open(out, "sennel-fixture", None).unwrap();
         let root = ours.root_id();
         ours.create_entry(&root, "ours", "", "", "", "").unwrap();
-        theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "theirs", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
         ours.merge_from_disk().unwrap();
     }
@@ -2825,10 +3038,19 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         v.create_entry(&root, "first", "", "", "", "").unwrap();
-        v.save_as_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        v.save_as_keyed(&file.path, "pw", None, local(SECRET))
+            .unwrap();
 
-        assert_eq!(Vault::open(&file.path, "pw", None).err(), Some(VaultError::WrongPassword));
-        let other = Vault::open_keyed(&file.path, "pw", None, local("ff112233445566778899aabbccddeeff00112233"));
+        assert_eq!(
+            Vault::open(&file.path, "pw", None).err(),
+            Some(VaultError::WrongPassword)
+        );
+        let other = Vault::open_keyed(
+            &file.path,
+            "pw",
+            None,
+            local("ff112233445566778899aabbccddeeff00112233"),
+        );
         assert_eq!(other.err(), Some(VaultError::WrongPassword));
 
         let mut back = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
@@ -2845,7 +3067,8 @@ mod tests {
     fn a_challenge_key_works_beside_a_key_file() {
         let file = Temp::new("challenge-keyfile");
         let mut v = vault();
-        v.save_as_keyed(&file.path, "pw", Some(KEY_FILE), local(SECRET)).unwrap();
+        v.save_as_keyed(&file.path, "pw", Some(KEY_FILE), local(SECRET))
+            .unwrap();
         assert!(Vault::open_keyed(&file.path, "pw", Some(KEY_FILE), local(SECRET)).is_ok());
         assert!(Vault::open_keyed(&file.path, "pw", None, local(SECRET)).is_err());
         assert!(Vault::open_keyed(&file.path, "pw", Some(KEY_FILE), None).is_err());
@@ -2855,11 +3078,15 @@ mod tests {
     fn a_rekey_and_a_reload_keep_the_challenge_key() {
         let file = Temp::new("challenge-rekey");
         let mut v = vault();
-        v.save_as_keyed(&file.path, "old", None, local(SECRET)).unwrap();
+        v.save_as_keyed(&file.path, "old", None, local(SECRET))
+            .unwrap();
         v.challenge = local(SECRET);
         v.rekey("new", None).unwrap();
         assert!(Vault::open_keyed(&file.path, "new", None, local(SECRET)).is_ok());
-        assert!(Vault::open(&file.path, "new", None).is_err(), "the rekey dropped the key");
+        assert!(
+            Vault::open(&file.path, "new", None).is_err(),
+            "the rekey dropped the key"
+        );
         v.reload().unwrap();
     }
 
@@ -2867,14 +3094,22 @@ mod tests {
     fn a_merge_keeps_the_challenge_key() {
         let file = Temp::new("challenge-merge");
         let mut base = vault();
-        base.save_as_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
+        base.save_as_keyed(&file.path, "pw", None, local(SECRET))
+            .unwrap();
         let mut ours = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
         let mut theirs = Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap();
         let root = theirs.root_id();
-        theirs.create_entry(&root, "theirs", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "theirs", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
         ours.merge_from_disk().unwrap();
-        assert_eq!(Vault::open_keyed(&file.path, "pw", None, local(SECRET)).unwrap().entry_count(), 1);
+        assert_eq!(
+            Vault::open_keyed(&file.path, "pw", None, local(SECRET))
+                .unwrap()
+                .entry_count(),
+            1
+        );
     }
 
     // No key connected must not read as a wrong password, or the user retypes a correct one. Serial 1 is
@@ -2883,20 +3118,44 @@ mod tests {
     fn a_missing_hardware_key_is_named_not_reported_as_a_wrong_password() {
         let file = Temp::new("challenge-missing");
         saved_vault(&file);
-        let spec = YubiSpec { slot: 2, serial: Some(1) };
-        let err = Vault::open_with(&file.path, "correct horse", None, Some(&spec)).err().unwrap();
+        let spec = YubiSpec {
+            slot: 2,
+            serial: Some(1),
+        };
+        let err = Vault::open_with(&file.path, "correct horse", None, Some(&spec))
+            .err()
+            .unwrap();
         assert!(matches!(err, VaultError::Challenge(_)), "{err:?}");
         assert!(err.to_string().starts_with("YubiKey"), "{err}");
     }
 
     #[test]
     fn a_yubikey_setting_is_a_slot_and_maybe_a_serial() {
-        assert_eq!("2".parse::<YubiSpec>(), Ok(YubiSpec { slot: 2, serial: None }));
-        assert_eq!("1:7370001".parse::<YubiSpec>(), Ok(YubiSpec { slot: 1, serial: Some(7370001) }));
+        assert_eq!(
+            "2".parse::<YubiSpec>(),
+            Ok(YubiSpec {
+                slot: 2,
+                serial: None
+            })
+        );
+        assert_eq!(
+            "1:7370001".parse::<YubiSpec>(),
+            Ok(YubiSpec {
+                slot: 1,
+                serial: Some(7370001)
+            })
+        );
         assert!("3".parse::<YubiSpec>().is_err());
         assert!("2:abc".parse::<YubiSpec>().is_err());
         assert!("".parse::<YubiSpec>().is_err());
-        assert_eq!(YubiSpec { slot: 2, serial: Some(5) }.to_string(), "slot 2 of key 5");
+        assert_eq!(
+            YubiSpec {
+                slot: 2,
+                serial: Some(5)
+            }
+            .to_string(),
+            "slot 2 of key 5"
+        );
     }
 
     const KEY_FILE: &[u8] = b"not a keepass key file, just bytes the vault is keyed on";
@@ -2910,13 +3169,17 @@ mod tests {
         v.create_entry(&root, "first", "u", "p", "", "").unwrap();
         v.save_as(&file.path, "pw", Some(KEY_FILE)).unwrap();
 
-        assert_eq!(Vault::open(&file.path, "pw", None).err(), Some(VaultError::WrongPassword));
+        assert_eq!(
+            Vault::open(&file.path, "pw", None).err(),
+            Some(VaultError::WrongPassword)
+        );
         let wrong = Vault::open(&file.path, "pw", Some(b"another file"));
         assert_eq!(wrong.err(), Some(VaultError::WrongPassword));
 
         let mut back = Vault::open(&file.path, "pw", Some(KEY_FILE)).unwrap();
         let root = back.root_id();
-        back.create_entry(&root, "second", "u", "p", "", "").unwrap();
+        back.create_entry(&root, "second", "u", "p", "", "")
+            .unwrap();
         back.save().unwrap();
         let again = Vault::open(&file.path, "pw", Some(KEY_FILE)).unwrap();
         assert_eq!(again.entry_count(), 2);
@@ -2944,35 +3207,52 @@ mod tests {
         let _ = std::fs::remove_file(dir.join("keyfile4.kdbx"));
         let mut v = vault();
         let root = v.root_id();
-        v.create_entry(&root, "kf entry", "octo", "keyfile-entry-pw", "", "").unwrap();
-        v.save_as(&dir.join("keyfile4.kdbx"), "sennel-fixture", Some(KEY_FILE)).unwrap();
+        v.create_entry(&root, "kf entry", "octo", "keyfile-entry-pw", "", "")
+            .unwrap();
+        v.save_as(&dir.join("keyfile4.kdbx"), "sennel-fixture", Some(KEY_FILE))
+            .unwrap();
     }
 
     /* Not a test: a way to get a real KDBX 4 file to point the binary at,
-       since the only vault in the repo is a 3.1 fixture that cannot be
-       written. `cargo test -- --ignored make_a_vault_to_smoke_test_against`
-       then `sennel import ... --db /tmp/sennel-smoke.kdbx`, password
-       `smoke-pw`. Ignored, so it never runs in a normal pass. */
+    since the only vault in the repo is a 3.1 fixture that cannot be
+    written. `cargo test -- --ignored make_a_vault_to_smoke_test_against`
+    then `sennel import ... --db /tmp/sennel-smoke.kdbx`, password
+    `smoke-pw`. Ignored, so it never runs in a normal pass. */
     #[test]
     #[ignore]
     fn make_a_vault_to_smoke_test_against() {
         let mut v = Vault::new();
         let root = v.root_id();
         /* One of each thing that only shows up on a real screen: an expired
-           entry, a live one, and a code. */
-        let stale = v.create_entry(&root, "old-cert", "octo", "Xq7!vm2Zt4pLr9Wd6Ks1", "", "").unwrap();
-        v.set_expiry(&stale, Some((chrono::Utc::now() - chrono::Duration::days(3)).naive_utc()))
+        entry, a live one, and a code. */
+        let stale = v
+            .create_entry(&root, "old-cert", "octo", "Xq7!vm2Zt4pLr9Wd6Ks1", "", "")
             .unwrap();
-        let soon = v.create_entry(&root, "renews-soon", "octo", "Zt4pLr9Wd6Ks1Xq7vm2A", "", "").unwrap();
-        v.set_expiry(&soon, Some((chrono::Utc::now() + chrono::Duration::days(30)).naive_utc()))
+        v.set_expiry(
+            &stale,
+            Some((chrono::Utc::now() - chrono::Duration::days(3)).naive_utc()),
+        )
+        .unwrap();
+        let soon = v
+            .create_entry(&root, "renews-soon", "octo", "Zt4pLr9Wd6Ks1Xq7vm2A", "", "")
             .unwrap();
-        v.save_as(std::path::Path::new("/tmp/sennel-smoke.kdbx"), "smoke-pw", None).unwrap();
+        v.set_expiry(
+            &soon,
+            Some((chrono::Utc::now() + chrono::Duration::days(30)).naive_utc()),
+        )
+        .unwrap();
+        v.save_as(
+            std::path::Path::new("/tmp/sennel-smoke.kdbx"),
+            "smoke-pw",
+            None,
+        )
+        .unwrap();
     }
 
     /* The two pieces `convert` leans on. A conversion is the one operation
-       where a bug costs the whole vault, so "it worked" has to mean the file
-       was read back and matched — and both halves of that are tested here,
-       where a mismatch can actually be constructed. */
+    where a bug costs the whole vault, so "it worked" has to mean the file
+    was read back and matched — and both halves of that are tested here,
+    where a mismatch can actually be constructed. */
     #[test]
     fn a_copy_opens_with_the_original_key_and_nothing_else() {
         let dir = std::env::temp_dir().join(format!("sennel-copy-{}", std::process::id()));
@@ -2987,7 +3267,7 @@ mod tests {
         v.save_as(&home, "master", None).unwrap();
 
         /* No password argument: the copy carries the key the original was
-           opened with, which is what lets `convert` avoid asking twice. */
+        opened with, which is what lets `convert` avoid asking twice. */
         v.save_copy(&copy).unwrap();
         let back = v.open_copy(&copy).expect("the copy did not open");
         assert_eq!(inventory(&back), inventory(&v));
@@ -2996,7 +3276,7 @@ mod tests {
         assert!(Vault::open(&copy, "wrong", None).is_err());
 
         /* `open_copy` is a real decrypt, so a file written under a different
-           key is refused rather than waved through. */
+        key is refused rather than waved through. */
         let other = dir.join("other.kdbx");
         std::fs::remove_file(&other).ok();
         let mut stranger = vault();
@@ -3011,12 +3291,14 @@ mod tests {
     }
 
     /* The comparison has to notice a difference, or "verified" means nothing.
-       Every field that goes into a line, one at a time, there and back. */
+    Every field that goes into a line, one at a time, there and back. */
     #[test]
     fn the_inventory_notices_anything_that_changed() {
         let mut v = vault();
         let root = v.root_id();
-        let id = v.create_entry(&root, "mail", "octo", "pw", "http://x", "note").unwrap();
+        let id = v
+            .create_entry(&root, "mail", "octo", "pw", "http://x", "note")
+            .unwrap();
         let base = inventory(&v);
         assert_eq!(base.len(), 1);
         // The same vault twice is the same answer, or a good convert would fail.
@@ -3031,9 +3313,15 @@ mod tests {
             ("mail", "octo", "pw", "http://x", "other"),
         ];
         for (title, user, password, url, notes) in variants {
-            v.update_entry(&id, title, user, Some(password), url, notes).unwrap();
-            assert_ne!(inventory(&v), base, "a changed {title}/{user}/{url} went unnoticed");
-            v.update_entry(&id, "mail", "octo", Some("pw"), "http://x", "note").unwrap();
+            v.update_entry(&id, title, user, Some(password), url, notes)
+                .unwrap();
+            assert_ne!(
+                inventory(&v),
+                base,
+                "a changed {title}/{user}/{url} went unnoticed"
+            );
+            v.update_entry(&id, "mail", "octo", Some("pw"), "http://x", "note")
+                .unwrap();
             assert_eq!(inventory(&v), base, "the revert did not land");
         }
 
@@ -3050,8 +3338,8 @@ mod tests {
     }
 
     /* Sennel writes no history, so the only way to get one in a test is the
-       way KeePassXC gets one: edit through the crate's tracking API, which
-       pushes the pre-edit state into the entry's history. */
+    way KeePassXC gets one: edit through the crate's tracking API, which
+    pushes the pre-edit state into the entry's history. */
     fn with_history(v: &mut Vault, id: &EntryId, passwords: &[&str]) {
         for pw in passwords {
             let mut entry = v.db.entry_mut(*id).expect("no entry");
@@ -3061,13 +3349,15 @@ mod tests {
     }
 
     /* An entry imported from KeePassXC arrives holding every password it ever
-       had. Invisible is the wrong way to hold that: you cannot decide whether
-       to keep something you cannot see. */
+    had. Invisible is the wrong way to hold that: you cannot decide whether
+    to keep something you cannot see. */
     #[test]
     fn history_reads_newest_first_and_clears_in_one_go() {
         let mut v = vault();
         let root = v.root_id();
-        let id = v.create_entry(&root, "mail", "octo", "first-pw", "", "").unwrap();
+        let id = v
+            .create_entry(&root, "mail", "octo", "first-pw", "", "")
+            .unwrap();
         with_history(&mut v, &id, &["second-pw", "third-pw"]);
 
         let versions = crate::vault::history(&v.get_entry(&id).unwrap());
@@ -3080,20 +3370,25 @@ mod tests {
         assert_eq!(v.get_entry(&id).unwrap().password(), "third-pw");
 
         /* And Sennel's own edits add none: that is the promise the security
-           page makes, so it is the one worth a test. */
-        v.update_entry(&id, "mail", "octo", Some("fourth-pw"), "", "").unwrap();
+        page makes, so it is the one worth a test. */
+        v.update_entry(&id, "mail", "octo", Some("fourth-pw"), "", "")
+            .unwrap();
         assert_eq!(crate::vault::history(&v.get_entry(&id).unwrap()).len(), 2);
 
         let gone = v.clear_history(&id).unwrap();
         assert_eq!(gone, 2);
         assert!(crate::vault::history(&v.get_entry(&id).unwrap()).is_empty());
-        assert_eq!(v.get_entry(&id).unwrap().password(), "fourth-pw", "the live entry changed");
+        assert_eq!(
+            v.get_entry(&id).unwrap().password(),
+            "fourth-pw",
+            "the live entry changed"
+        );
         // Clearing an entry with nothing to clear is not an error.
         assert_eq!(v.clear_history(&id), Ok(0));
     }
 
     /* Cleared has to mean cleared in the file, or the old passwords are still
-       there for anyone who opens it with another client. */
+    there for anyone who opens it with another client. */
     #[test]
     fn cleared_history_stays_cleared_through_a_save() {
         let dir = std::env::temp_dir().join(format!("sennel-hist-{}", std::process::id()));
@@ -3101,13 +3396,18 @@ mod tests {
         let path = dir.join("hist.kdbx");
         let mut v = vault();
         let root = v.root_id();
-        let id = v.create_entry(&root, "mail", "octo", "old-pw", "", "").unwrap();
+        let id = v
+            .create_entry(&root, "mail", "octo", "old-pw", "", "")
+            .unwrap();
         with_history(&mut v, &id, &["new-pw"]);
         v.save_as(&path, "pw", None).unwrap();
 
         // It survives a round trip while it is there...
         let back = Vault::open(&path, "pw", None).unwrap();
-        assert_eq!(crate::vault::history(&back.get_entry(&id).unwrap()).len(), 1);
+        assert_eq!(
+            crate::vault::history(&back.get_entry(&id).unwrap()).len(),
+            1
+        );
 
         let mut back = back;
         back.clear_history(&id).unwrap();
@@ -3121,14 +3421,14 @@ mod tests {
     }
 
     /* These two carry decrypted secrets out of the vault — a custom field's
-       value and an old password — so they wipe like the typed boxes do.
+    value and an old password — so they wipe like the typed boxes do.
 
-       Checked on a live value, not a freed one. Reading a freed allocation
-       proves nothing either way: the allocator writes its own bookkeeping
-       into the block, so the secret is usually gone from it whether or not
-       anybody wiped it. (The older zeroize tests in app.rs do read freed
-       memory, and pass with `zeroize` swapped for `clear` — they are not
-       measuring what they claim to.) */
+    Checked on a live value, not a freed one. Reading a freed allocation
+    proves nothing either way: the allocator writes its own bookkeeping
+    into the block, so the secret is usually gone from it whether or not
+    anybody wiped it. (The older zeroize tests in app.rs do read freed
+    memory, and pass with `zeroize` swapped for `clear` — they are not
+    measuring what they claim to.) */
     #[test]
     fn the_screens_that_hold_secrets_wipe_them() {
         let mut field = Extra::Field {
@@ -3168,8 +3468,8 @@ mod tests {
     }
 
     /* Both halves of the expiry matter: `expires` is the switch and `expiry`
-       is the date, and a date with the switch off is one somebody set and
-       then turned off. Reading only the date would mark those expired. */
+    is the date, and a date with the switch off is one somebody set and
+    then turned off. Reading only the date would mark those expired. */
     #[test]
     fn an_expiry_needs_both_the_switch_and_the_date() {
         use chrono::{Duration, Utc};
@@ -3177,7 +3477,7 @@ mod tests {
         let root = v.root_id();
         let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
         /* A fn, not a closure: an inferred closure return ties the borrow of
-           `v` to the closure itself, and each call here wants its own. */
+        `v` to the closure itself, and each call here wants its own. */
         fn entry<'a>(v: &'a Vault, id: &EntryId) -> EntryRef<'a> {
             v.get_entry(id).expect("the entry went missing")
         }
@@ -3189,18 +3489,25 @@ mod tests {
         let yesterday = (Utc::now() - Duration::days(1)).naive_utc();
         v.set_expiry(&id, Some(yesterday)).unwrap();
         assert_eq!(expires_at(&entry(&v, &id)), Some(yesterday));
-        assert!(expired(&entry(&v, &id)), "a past date did not read as expired");
+        assert!(
+            expired(&entry(&v, &id)),
+            "a past date did not read as expired"
+        );
 
         let tomorrow = (Utc::now() + Duration::days(1)).naive_utc();
         v.set_expiry(&id, Some(tomorrow)).unwrap();
         assert!(!expired(&entry(&v, &id)), "a future date read as expired");
 
         /* Turning it off keeps the date, the way KeePassXC does: unticking
-           the box should not throw away what you would tick it back on with. */
+        the box should not throw away what you would tick it back on with. */
         v.set_expiry(&id, None).unwrap();
         assert_eq!(expires_at(&entry(&v, &id)), None, "the switch was ignored");
         assert!(!expired(&entry(&v, &id)));
-        assert_eq!(entry(&v, &id).times.expiry, Some(tomorrow), "the date was thrown away");
+        assert_eq!(
+            entry(&v, &id).times.expiry,
+            Some(tomorrow),
+            "the date was thrown away"
+        );
 
         // A date with the switch never set is not an expiry either.
         let mut bare = vault();
@@ -3214,7 +3521,7 @@ mod tests {
     }
 
     /* The whole point is that KeePassXC and Sennel agree about which entries
-       have gone stale, so it has to survive the file. */
+    have gone stale, so it has to survive the file. */
     #[test]
     fn an_expiry_round_trips_through_the_file() {
         use chrono::{Duration, Utc};
@@ -3225,8 +3532,8 @@ mod tests {
         let root = v.root_id();
         let id = v.create_entry(&root, "cert", "u", "p", "", "").unwrap();
         /* Whole seconds: KDBX stores a second-resolution timestamp, so a
-           sub-second value would not survive and the test would be asserting
-           something the format cannot do. */
+        sub-second value would not survive and the test would be asserting
+        something the format cannot do. */
         use chrono::Timelike;
         let when = (Utc::now() - Duration::days(2))
             .naive_utc()
@@ -3242,7 +3549,7 @@ mod tests {
     }
 
     /* Custom fields and attachments used to be a count and nothing else.
-       These are the reads the `F` screen is built on. */
+    These are the reads the `F` screen is built on. */
     #[test]
     fn the_extras_list_holds_fields_and_files_with_their_values() {
         let mut v = vault();
@@ -3250,12 +3557,13 @@ mod tests {
         let id = v.create_entry(&root, "vpn", "u", "p", "", "notes").unwrap();
         v.set_field(&id, "recovery", "8888-4444", true).unwrap();
         v.set_field(&id, "account", "AC-9", false).unwrap();
-        v.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec()).unwrap();
+        v.add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec())
+            .unwrap();
 
         let rows = crate::vault::extra_rows(&v.get_entry(&id).unwrap());
         assert_eq!(rows.len(), 3, "{rows:?}");
         /* Fields first, then files, each alphabetical: a list that is read
-           cannot reorder itself between openings. */
+        cannot reorder itself between openings. */
         assert_eq!(rows[0].name(), "account");
         assert_eq!(rows[1].name(), "recovery");
         assert_eq!(rows[2].name(), "key.pem");
@@ -3268,18 +3576,33 @@ mod tests {
             }
         );
         // A field added by hand goes in protected; one asked for plainly does not.
-        assert!(matches!(&rows[0], crate::vault::Extra::Field { secret: false, .. }));
-        assert_eq!(rows[2], crate::vault::Extra::File { name: "key.pem".into(), bytes: 15 });
+        assert!(matches!(
+            &rows[0],
+            crate::vault::Extra::Field { secret: false, .. }
+        ));
+        assert_eq!(
+            rows[2],
+            crate::vault::Extra::File {
+                name: "key.pem".into(),
+                bytes: 15
+            }
+        );
 
         // The five fixed rows keep their own editor and never appear here.
         for standard in crate::vault::STANDARD {
-            assert!(rows.iter().all(|r| r.name() != standard), "{standard} leaked in");
-            assert!(v.set_field(&id, standard, "x", false).is_err(), "{standard} was writable");
+            assert!(
+                rows.iter().all(|r| r.name() != standard),
+                "{standard} leaked in"
+            );
+            assert!(
+                v.set_field(&id, standard, "x", false).is_err(),
+                "{standard} was writable"
+            );
         }
     }
 
     /* The bytes have to survive the file, or "attachment" is a label on
-       something nobody can get back. */
+    something nobody can get back. */
     #[test]
     fn attachments_round_trip_through_the_file() {
         let dir = std::env::temp_dir().join(format!("sennel-att-{}", std::process::id()));
@@ -3294,7 +3617,10 @@ mod tests {
         v.save_as(&path, "pw", None).unwrap();
 
         let back = Vault::open(&path, "pw", None).unwrap();
-        assert_eq!(back.attachment_bytes(&id, "blob.bin").as_deref(), Some(&data));
+        assert_eq!(
+            back.attachment_bytes(&id, "blob.bin").as_deref(),
+            Some(&data)
+        );
         let rows = crate::vault::extra_rows(&back.get_entry(&id).unwrap());
         assert!(rows.iter().any(|r| r.name() == "recovery"));
         // Twice under one name would be two files nobody can tell apart.
@@ -3308,7 +3634,7 @@ mod tests {
     }
 
     /* A file leaving the vault loses every protection the vault gave it, so
-       the least the write can do is not hand it to the rest of the machine. */
+    the least the write can do is not hand it to the rest of the machine. */
     #[test]
     fn an_extracted_attachment_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -3325,7 +3651,7 @@ mod tests {
     }
 
     /* Reuse is the finding a person cannot possibly spot themselves, and the
-       one that costs more than one account when it bites. */
+    one that costs more than one account when it bites. */
     #[test]
     fn the_audit_finds_reused_weak_and_empty_passwords() {
         let mut v = vault();
@@ -3333,7 +3659,9 @@ mod tests {
         let shared = "correct-horse";
         let a = v.create_entry(&root, "aaa", "u", shared, "", "").unwrap();
         let b = v.create_entry(&root, "bbb", "u", shared, "", "").unwrap();
-        let weak = v.create_entry(&root, "ccc", "u", "hunter2", "", "").unwrap();
+        let weak = v
+            .create_entry(&root, "ccc", "u", "hunter2", "", "")
+            .unwrap();
         let empty = v.create_entry(&root, "ddd", "u", "", "", "").unwrap();
         // Long, mixed and unique: nothing to say about it.
         let fine = v
@@ -3350,7 +3678,7 @@ mod tests {
         assert_eq!(issue(&fine), None, "a good password was flagged");
 
         /* Worst first, and stable: a to-do list that reshuffles itself
-           between openings is one nobody works through. */
+        between openings is one nobody works through. */
         let order: Vec<u8> = found.iter().map(|(_, i)| i.rank()).collect();
         let mut sorted = order.clone();
         sorted.sort_unstable();
@@ -3360,7 +3688,10 @@ mod tests {
         // An empty password is not "reused" with every other empty one.
         v.create_entry(&root, "fff", "u", "", "", "").unwrap();
         assert_eq!(
-            audit(&v).iter().filter(|(_, i)| matches!(i, Issue::Reused(_))).count(),
+            audit(&v)
+                .iter()
+                .filter(|(_, i)| matches!(i, Issue::Reused(_)))
+                .count(),
             2,
             "empty passwords were counted as reuse"
         );
@@ -3371,13 +3702,16 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         let strong = "Xq7!vm2Zt4&pLr9Wd6*Ks1";
-        let years_ago = |years: i64| chrono::Utc::now().naive_utc() - chrono::Duration::days(365 * years + 1);
+        let years_ago =
+            |years: i64| chrono::Utc::now().naive_utc() - chrono::Duration::days(365 * years + 1);
         let stamp = |v: &mut Vault, id: &EntryId, years: i64| {
             v.db.entry_mut(*id).unwrap().times.last_modification = Some(years_ago(years));
         };
         let old = v.create_entry(&root, "old", "u", strong, "", "").unwrap();
         stamp(&mut v, &old, 4);
-        let recent = v.create_entry(&root, "recent", "u", "Pz8@kd3Lw9#tQe5Rm2!Vb7", "", "").unwrap();
+        let recent = v
+            .create_entry(&root, "recent", "u", "Pz8@kd3Lw9#tQe5Rm2!Vb7", "", "")
+            .unwrap();
         stamp(&mut v, &recent, 2);
 
         let found = audit(&v);
@@ -3400,23 +3734,36 @@ mod tests {
         with_history(&mut v, &kept, &[strong]);
         let now = chrono::Utc::now().naive_utc();
         v.db.entry_mut(kept).unwrap().times.last_modification = Some(now);
-        assert_eq!(password_set_at(&v.get_entry(&kept).unwrap()), Some(long_ago));
+        assert_eq!(
+            password_set_at(&v.get_entry(&kept).unwrap()),
+            Some(long_ago)
+        );
 
-        let changed = v.create_entry(&root, "changed", "u", "first-pw", "", "").unwrap();
+        let changed = v
+            .create_entry(&root, "changed", "u", "first-pw", "", "")
+            .unwrap();
         v.db.entry_mut(changed).unwrap().times.last_modification = Some(long_ago);
         with_history(&mut v, &changed, &[strong]);
         v.db.entry_mut(changed).unwrap().times.last_modification = Some(now);
-        assert_eq!(password_set_at(&v.get_entry(&changed).unwrap()), Some(now), "an older, different password counted");
+        assert_eq!(
+            password_set_at(&v.get_entry(&changed).unwrap()),
+            Some(now),
+            "an older, different password counted"
+        );
     }
 
     /* A deleted entry is not a password worth changing, and telling somebody
-       to go fix one is how an audit loses their trust. */
+    to go fix one is how an audit loses their trust. */
     #[test]
     fn the_audit_leaves_the_recycle_bin_out() {
         let mut v = vault();
         let root = v.root_id();
-        let live = v.create_entry(&root, "live", "u", "hunter2", "", "").unwrap();
-        let dead = v.create_entry(&root, "dead", "u", "hunter2", "", "").unwrap();
+        let live = v
+            .create_entry(&root, "live", "u", "hunter2", "", "")
+            .unwrap();
+        let dead = v
+            .create_entry(&root, "dead", "u", "hunter2", "", "")
+            .unwrap();
         // Two entries share it, so both are reuse while both are live.
         assert_eq!(audit(&v).len(), 2);
 
@@ -3425,25 +3772,31 @@ mod tests {
         assert_eq!(found.len(), 1, "the bin is still being audited");
         assert_eq!(found[0].0, live);
         /* And the survivor stops being "reused": the only other copy was the
-           one that was thrown away. */
+        one that was thrown away. */
         assert!(matches!(found[0].1, Issue::Weak(_)), "{:?}", found[0].1);
     }
 
     /* `get` has one shot and nobody to ask, so the rules have to be ones a
-       user can predict before they type. */
+    user can predict before they type. */
     #[test]
     fn a_needle_resolves_to_one_entry_or_says_why_not() {
         let mut v = vault();
         let root = v.root_id();
         let mail = v.create_entry(&root, "mail", "u", "p", "", "").unwrap();
-        let chimp = v.create_entry(&root, "mailchimp-api-key", "u", "p", "", "").unwrap();
+        let chimp = v
+            .create_entry(&root, "mailchimp-api-key", "u", "p", "", "")
+            .unwrap();
         let mut s = crate::search::Searcher::new();
 
         /* An exact title wins outright, even though "mail" fuzzy-matches the
-           longer one too — otherwise the entry actually called "mail" would
-           be unreachable by its own name. */
+        longer one too — otherwise the entry actually called "mail" would
+        be unreachable by its own name. */
         assert_eq!(resolve(&v, &mut s, "mail"), Found::One(mail));
-        assert_eq!(resolve(&v, &mut s, "MAIL"), Found::One(mail), "case mattered");
+        assert_eq!(
+            resolve(&v, &mut s, "MAIL"),
+            Found::One(mail),
+            "case mattered"
+        );
         // A single fuzzy hit is unambiguous even without an exact title.
         assert_eq!(resolve(&v, &mut s, "chimp"), Found::One(chimp));
         assert_eq!(resolve(&v, &mut s, "nothinglikethis"), Found::None);
@@ -3456,7 +3809,7 @@ mod tests {
         assert!(ids.contains(&mail) && ids.contains(&chimp));
 
         /* Two entries with the same title stay ambiguous: the score that
-           separates them is not something the user can see. */
+        separates them is not something the user can see. */
         let twin = v.create_entry(&root, "mail", "other", "p", "", "").unwrap();
         let Found::Many(ids) = resolve(&v, &mut s, "mail") else {
             panic!("two entries named mail resolved to one");
@@ -3465,13 +3818,17 @@ mod tests {
     }
 
     /* Copying the password of something deleted last week is the outcome
-       worth engineering against, so the bin is not a candidate. */
+    worth engineering against, so the bin is not a candidate. */
     #[test]
     fn a_needle_never_resolves_into_the_recycle_bin() {
         let mut v = vault();
         let root = v.root_id();
-        let live = v.create_entry(&root, "mail", "u", "live-pw", "", "").unwrap();
-        let dead = v.create_entry(&root, "mail-old", "u", "dead-pw", "", "").unwrap();
+        let live = v
+            .create_entry(&root, "mail", "u", "live-pw", "", "")
+            .unwrap();
+        let dead = v
+            .create_entry(&root, "mail-old", "u", "dead-pw", "", "")
+            .unwrap();
         v.recycle_entry(&dead).unwrap();
         let mut s = crate::search::Searcher::new();
 
@@ -3489,12 +3846,12 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         let other = v.create_group(&root, "Other").unwrap();
-        assert_eq!(v.delete_group_tree(&root), Err(VaultError::CannotDeleteRoot));
-        assert_eq!(v.recycle_group(&root), Err(VaultError::CannotDeleteRoot));
         assert_eq!(
-            v.move_group(&root, &other),
-            Err(VaultError::CannotMoveRoot)
+            v.delete_group_tree(&root),
+            Err(VaultError::CannotDeleteRoot)
         );
+        assert_eq!(v.recycle_group(&root), Err(VaultError::CannotDeleteRoot));
+        assert_eq!(v.move_group(&root, &other), Err(VaultError::CannotMoveRoot));
     }
 
     #[test]
@@ -3526,7 +3883,9 @@ mod tests {
         let mut v = vault();
         let root = v.root_id();
         let g = v.create_group(&root, "g").unwrap();
-        let e = v.create_entry(&g, "github", "octo", "s3cret", "https://x", "n").unwrap();
+        let e = v
+            .create_entry(&g, "github", "octo", "s3cret", "https://x", "n")
+            .unwrap();
 
         v.update_entry(&e, "github", "octo2", None, "https://x", "n")
             .unwrap();
@@ -3550,12 +3909,15 @@ mod tests {
         let ghost_entry = EntryId::new();
         let root = v.root_id();
         assert_eq!(v.rename_group(&ghost, "x"), Err(VaultError::GroupNotFound));
-        assert_eq!(v.move_entry(&ghost_entry, &root), Err(VaultError::EntryNotFound));
+        assert_eq!(
+            v.move_entry(&ghost_entry, &root),
+            Err(VaultError::EntryNotFound)
+        );
         assert!(v.group_path(&ghost).is_empty());
     }
 
     /* Unique per call, not just per process: the harness runs tests in
-       parallel, and two sharing a path would delete each other's file. */
+    parallel, and two sharing a path would delete each other's file. */
     struct Temp {
         path: std::path::PathBuf,
         // Where this test's backups go: never beside the vault.
@@ -3564,8 +3926,7 @@ mod tests {
 
     impl Temp {
         fn new(tag: &str) -> Self {
-            static NEXT: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let id = format!("{tag}-{}-{n}", std::process::id());
             Temp {
@@ -3632,10 +3993,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_an_io_error() {
-        let missing = std::env::temp_dir().join(format!(
-            "sennel-test-absent-{}.kdbx",
-            std::process::id()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("sennel-test-absent-{}.kdbx", std::process::id()));
         let _ = std::fs::remove_file(&missing);
         assert!(matches!(
             Vault::open(&missing, "pw", None),
@@ -3650,23 +4009,32 @@ mod tests {
     }
 
     /* Sennel autosaves after every change, so a vault that has moved on under
-       us must refuse the write: the alternative is this session silently
-       winning every race with KeePassXC or a sync client. */
+    us must refuse the write: the alternative is this session silently
+    winning every race with KeePassXC or a sync client. */
     /* What a site hands over is either the long url behind its QR code or a
-       run of base32 with spaces in it. Both have to reach the same stored
-       url, and anything that cannot mint a code has to be refused before it
-       is written. */
+    run of base32 with spaces in it. Both have to reach the same stored
+    url, and anything that cannot mint a code has to be refused before it
+    is written. */
     #[test]
     fn a_seed_is_taken_as_a_url_or_as_the_printed_secret() {
         /* A url that leaves `digits` out gets it spelled in: the crate would
-           otherwise mint eight digits where the site expects six. */
+        otherwise mint eight digits where the site expects six. */
         let url = totp_url("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP", "x", "y").unwrap();
-        assert_eq!(url, "otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&digits=6");
+        assert_eq!(
+            url,
+            "otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&digits=6"
+        );
 
         // Printed with groupings, lowercase, hyphenated: all the same secret.
         let from_print = totp_url("jbsw y3dp-ehpk 3pxp", "Bank", "me").unwrap();
-        assert!(from_print.starts_with("otpauth://totp/Bank:me?secret="), "{from_print}");
-        assert!(from_print.contains("secret=JBSWY3DPEHPK3PXP"), "{from_print}");
+        assert!(
+            from_print.starts_with("otpauth://totp/Bank:me?secret="),
+            "{from_print}"
+        );
+        assert!(
+            from_print.contains("secret=JBSWY3DPEHPK3PXP"),
+            "{from_print}"
+        );
         assert!(from_print.contains("digits=6"), "{from_print}");
 
         // And both produce the same six digits.
@@ -3683,14 +4051,21 @@ mod tests {
 
     #[test]
     fn only_time_based_urls_are_taken() {
-        let hotp = totp_url("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1", "x", "");
-        assert_eq!(hotp.unwrap_err(), "only time-based codes (totp) are supported");
+        let hotp = totp_url(
+            "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1",
+            "x",
+            "",
+        );
+        assert_eq!(
+            hotp.unwrap_err(),
+            "only time-based codes (totp) are supported"
+        );
         assert!(totp_url("otpauth://TOTP/x?secret=JBSWY3DPEHPK3PXP", "x", "").is_ok());
         assert!(totp_url("otpauth://totp?secret=JBSWY3DPEHPK3PXP", "x", "").is_ok());
     }
 
     /* An entry written by something that left `digits` out still reads as six
-       digits here, without rewriting what is in the file. */
+    digits here, without rewriting what is in the file. */
     #[test]
     fn a_url_without_digits_still_reads_as_six() {
         let mut v = vault();
@@ -3709,9 +4084,9 @@ mod tests {
     }
 
     /* A "secret" that carries its own url parameters must not reach the
-       stored url: base32 decoding never sees them, so the alphabet check is
-       the only thing between a phishing setup key and a code that quietly
-       uses somebody else's algorithm. */
+    stored url: base32 decoding never sees them, so the alphabet check is
+    the only thing between a phishing setup key and a code that quietly
+    uses somebody else's algorithm. */
     #[test]
     fn a_seed_cannot_smuggle_url_parameters() {
         assert!(totp_url("JBSWY3DPEHPK3PXP&algorithm=SHA512", "x", "").is_err());
@@ -3722,16 +4097,19 @@ mod tests {
     }
 
     /* Vault text on its way to a terminal keeps its characters and loses its
-       control codes: the TUI is safe by construction, `--list` is not. */
+    control codes: the TUI is safe by construction, `--list` is not. */
     #[test]
     fn printable_strips_escapes_but_keeps_the_text() {
         assert_eq!(printable("ev\u{1b}]0;pwned\u{7}il"), "ev·]0;pwned·il");
-        assert_eq!(printable("Commonwealth Bank — 银行"), "Commonwealth Bank — 银行");
+        assert_eq!(
+            printable("Commonwealth Bank — 银行"),
+            "Commonwealth Bank — 银行"
+        );
         assert_eq!(printable("a\nb\tc"), "a·b·c");
     }
 
     /* Set, read back, and cleared — stored protected, because the seed mints
-       codes forever while a code is worth thirty seconds. */
+    codes forever while a code is worth thirty seconds. */
     #[test]
     fn an_entry_takes_and_drops_its_one_time_secret() {
         let mut v = vault();
@@ -3747,7 +4125,10 @@ mod tests {
         assert_eq!(code.len(), 6);
         assert!(left <= 30 && left > 0, "{left}");
         assert!(
-            entry.fields.get("otp").is_some_and(keepass::db::Value::is_protected),
+            entry
+                .fields
+                .get("otp")
+                .is_some_and(keepass::db::Value::is_protected),
             "the seed was stored in the clear"
         );
 
@@ -3761,9 +4142,11 @@ mod tests {
 
         // Another program writes the same vault, from its own copy.
         let root = theirs.root_id();
-        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "added elsewhere", "", "", "", "")
+            .unwrap();
         /* Stamps are seconds-granular on some filesystems, so make the length
-           differ too — which a real edit does anyway. */
+        differ too — which a real edit does anyway. */
         theirs.save().unwrap();
 
         assert!(ours.changed_on_disk(), "the change went unnoticed");
@@ -3775,11 +4158,14 @@ mod tests {
         // Deliberately overriding writes ours and re-agrees with the file.
         ours.save_over().unwrap();
         assert!(!ours.changed_on_disk());
-        assert_eq!(Vault::open(&file.path, "pw", None).unwrap().entry_count(), 0);
+        assert_eq!(
+            Vault::open(&file.path, "pw", None).unwrap().entry_count(),
+            0
+        );
     }
 
     /* The other way out of a conflict: take theirs, using the key already
-       held so nobody retypes a master password to resolve a race. */
+    held so nobody retypes a master password to resolve a race. */
     #[test]
     fn reload_takes_the_copy_on_disk() {
         let file = Temp::new("reload");
@@ -3787,7 +4173,9 @@ mod tests {
         ours.save_as(&file.path, "pw", None).unwrap();
         let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
         let root = theirs.root_id();
-        theirs.create_entry(&root, "added elsewhere", "", "", "", "").unwrap();
+        theirs
+            .create_entry(&root, "added elsewhere", "", "", "", "")
+            .unwrap();
         theirs.save().unwrap();
 
         assert_eq!(ours.entry_count(), 0);
@@ -3814,28 +4202,24 @@ mod tests {
     }
 
     /* The file holds every secret at once: group-readable is a leak, and the
-       temp-file dance must not be what widens it. */
+    temp-file dance must not be what widens it. */
     #[test]
     #[cfg(unix)]
     fn the_saved_file_is_readable_by_its_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let file = Temp::new("mode");
         saved_vault(&file);
-        let mode = std::fs::metadata(&file.path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the save widened who can read the vault");
     }
 
     /* The file this whole migration exists for: a vault written by
-       KeePassXC, not by our own library. keepass-rs 0.2 round-tripped
-       perfectly with itself and still could not open these — every test
-       passed while the real thing failed. This fixture is generated by
-       keepassxc-cli (see the git history of this test) with a known
-       password, so it pins the third-party-writer class of bug for good.
-       Synthetic vault only: real .kdbx files must never enter the repo. */
+    KeePassXC, not by our own library. keepass-rs 0.2 round-tripped
+    perfectly with itself and still could not open these — every test
+    passed while the real thing failed. This fixture is generated by
+    keepassxc-cli (see the git history of this test) with a known
+    password, so it pins the third-party-writer class of bug for good.
+    Synthetic vault only: real .kdbx files must never enter the repo. */
     #[test]
     fn a_keepassxc_written_vault_opens_with_the_right_password() {
         let path = fixture("keepassxc3.kdbx");
@@ -3849,7 +4233,7 @@ mod tests {
     }
 
     /* And the failure mode has to stay honest: wrong key on a real-world
-       file says the key was wrong, not that the file is broken. */
+    file says the key was wrong, not that the file is broken. */
     #[test]
     fn a_keepassxc_written_vault_names_a_wrong_password_honestly() {
         let path = fixture("keepassxc3.kdbx");

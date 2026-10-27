@@ -54,7 +54,9 @@ fn url(account: &[u8]) -> Result<Zeroizing<String>, String> {
         return Err("the account in the export link has no secret".to_string());
     }
     if kind == 1 {
-        return Err("only time-based codes (totp) are supported, and this one counts uses".to_string());
+        return Err(
+            "only time-based codes (totp) are supported, and this one counts uses".to_string(),
+        );
     }
     let algorithm = match algorithm {
         0 | 1 => "SHA1",
@@ -222,22 +224,48 @@ mod tests {
         const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut text = String::new();
         for chunk in payload.chunks(3) {
-            let n = chunk.iter().fold(0u32, |n, b| n << 8 | u32::from(*b)) << (8 * (3 - chunk.len()));
+            let n =
+                chunk.iter().fold(0u32, |n, b| n << 8 | u32::from(*b)) << (8 * (3 - chunk.len()));
             for i in 0..=chunk.len() {
                 text.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
             }
             text.push_str(&"=".repeat(3 - chunk.len()));
         }
-        let escaped = text.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
+        let escaped = text
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D");
         format!("offline?data={escaped}")
     }
 
     #[test]
     fn one_account_becomes_an_otpauth_url_that_makes_codes() {
-        let url = account(&link(&[account_bytes("Example:alice@example.com", "Example", 1, 1, 2)])).unwrap();
-        assert!(url.starts_with("otpauth://totp/Example:alice%40example.com?secret=JBSWY3DPEHPK3PXP"), "{}", *url);
-        assert!(url.contains("&algorithm=SHA1&digits=6&period=30&issuer=Example"), "{}", *url);
-        let code = crate::vault::totp_url(&format!("otpauth-migration://{}", link(&[account_bytes("a", "B", 1, 1, 2)])), "t", "u");
+        let url = account(&link(&[account_bytes(
+            "Example:alice@example.com",
+            "Example",
+            1,
+            1,
+            2,
+        )]))
+        .unwrap();
+        assert!(
+            url.starts_with("otpauth://totp/Example:alice%40example.com?secret=JBSWY3DPEHPK3PXP"),
+            "{}",
+            *url
+        );
+        assert!(
+            url.contains("&algorithm=SHA1&digits=6&period=30&issuer=Example"),
+            "{}",
+            *url
+        );
+        let code = crate::vault::totp_url(
+            &format!(
+                "otpauth-migration://{}",
+                link(&[account_bytes("a", "B", 1, 1, 2)])
+            ),
+            "t",
+            "u",
+        );
         let stored = code.unwrap();
         let totp: keepass::db::TOTP = stored.parse().unwrap();
         assert_eq!(totp.value_now().unwrap().code.len(), 6);
@@ -252,20 +280,41 @@ mod tests {
 
     #[test]
     fn several_accounts_hotp_and_md5_are_refused_by_name() {
-        let two = link(&[account_bytes("a", "A", 1, 1, 2), account_bytes("b", "B", 1, 1, 2)]);
+        let two = link(&[
+            account_bytes("a", "A", 1, 1, 2),
+            account_bytes("b", "B", 1, 1, 2),
+        ]);
         assert!(account(&two).unwrap_err().contains("2 accounts"));
-        assert!(account(&link(&[account_bytes("a", "A", 1, 1, 1)])).unwrap_err().contains("totp"));
-        assert!(account(&link(&[account_bytes("a", "A", 4, 1, 2)])).unwrap_err().contains("MD5"));
+        assert!(
+            account(&link(&[account_bytes("a", "A", 1, 1, 1)]))
+                .unwrap_err()
+                .contains("totp")
+        );
+        assert!(
+            account(&link(&[account_bytes("a", "A", 4, 1, 2)]))
+                .unwrap_err()
+                .contains("MD5")
+        );
     }
 
     #[test]
     fn damaged_links_are_errors_not_panics() {
-        for bad in ["", "offline", "offline?data=", "offline?data=%ZZ", "offline?data=!!!!", "offline?data=AAAA"] {
+        for bad in [
+            "",
+            "offline",
+            "offline?data=",
+            "offline?data=%ZZ",
+            "offline?data=!!!!",
+            "offline?data=AAAA",
+        ] {
             assert!(account(bad).is_err(), "{bad}");
         }
         assert!(walk(&[0x0a, 0x7f, 0x01]).is_none(), "a length past the end");
         assert!(walk(&[0x0f]).is_none(), "an unknown wire type");
-        assert!(varint(&mut &[0x80u8; 11][..]).is_none(), "an endless varint");
+        assert!(
+            varint(&mut &[0x80u8; 11][..]).is_none(),
+            "an endless varint"
+        );
     }
 
     #[test]
@@ -281,7 +330,10 @@ mod tests {
     fn base64_reads_both_alphabets_with_or_without_padding() {
         assert_eq!(&**base64_decode(b"Zm9vYg==").unwrap(), b"foob");
         assert_eq!(&**base64_decode(b"Zm9vYg").unwrap(), b"foob");
-        assert_eq!(&**base64_decode(b"-_-_").unwrap(), &**base64_decode(b"+/+/").unwrap());
+        assert_eq!(
+            &**base64_decode(b"-_-_").unwrap(),
+            &**base64_decode(b"+/+/").unwrap()
+        );
         assert!(base64_decode(b"Zm9v*g").is_none());
     }
 }
