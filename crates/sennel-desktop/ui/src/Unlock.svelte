@@ -66,7 +66,23 @@
 <main>
   <HexField />
   <form onsubmit={submit}>
-    <h1>Sennel</h1>
+    <h1>
+      <!-- The app icon's mark without its tile, so it sits on the page in either theme. -->
+      <svg class="mark" viewBox="230 192 564 640" aria-hidden="true">
+        <defs>
+          <radialGradient id="mark-glow" cx=".5" cy=".58" r=".5">
+            <stop offset="0" stop-opacity=".45" />
+            <stop offset="1" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <polygon points="512,232 754.5,372 754.5,652 512,792 269.5,652 269.5,372" class="body" />
+        <ellipse cx="512" cy="560" rx="200" ry="230" fill="url(#mark-glow)" />
+        <polygon points="512,232 754.5,372 754.5,652 512,792 269.5,652 269.5,372" class="edge" />
+        <circle cx="512" cy="468" r="62" class="hole" />
+        <path d="M482 500 H542 L566 652 H458 Z" class="hole" />
+      </svg>
+      Sennel
+    </h1>
 
     <label>
       <span>Vault file</span>
@@ -155,11 +171,39 @@
   }
 
   h1 {
+    display: flex;
+    align-items: center;
+    gap: 14px;
     margin: 0 0 6px;
     font-size: 34px;
     font-family: var(--action);
     font-weight: 600;
     color: var(--accent);
+  }
+
+  .mark {
+    width: 40px;
+    height: 46px;
+    flex: none;
+  }
+
+  .mark stop {
+    stop-color: var(--accent);
+  }
+
+  .mark .body {
+    fill: var(--panel);
+  }
+
+  .mark .edge {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 34;
+    stroke-linejoin: round;
+  }
+
+  .mark .hole {
+    fill: var(--accent);
   }
 
   h2 {
