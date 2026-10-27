@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-scan-clipboard"
+description = "Enables the scan_clipboard command without any pre-configured scope."
+commands.allow = ["scan_clipboard"]
+
+[[permission]]
+identifier = "deny-scan-clipboard"
+description = "Denies the scan_clipboard command without any pre-configured scope."
+commands.deny = ["scan_clipboard"]

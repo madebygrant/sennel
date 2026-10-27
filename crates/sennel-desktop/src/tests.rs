@@ -145,6 +145,58 @@ fn an_entry_carries_its_code_timing_and_never_the_code() {
 }
 
 #[test]
+fn a_qr_image_fills_in_a_seed_with_its_timing() {
+    let desk = open_with(vault());
+    let qr = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/otp-qr.png"
+    );
+    let scanned = desk.scan_file(qr, "Example", "ada").unwrap();
+    assert!(
+        scanned.url.contains("secret=JBSWY3DPEHPK3PXP"),
+        "{}",
+        scanned.url.as_str()
+    );
+    assert_eq!(
+        scanned.otp,
+        Some(OtpShape {
+            period: 30,
+            digits: 6
+        })
+    );
+    assert_eq!(scanned.label.as_deref(), Some("Example:ada@example.com"));
+    let why = desk.scan_file("/nowhere/qr.png", "", "").unwrap_err();
+    assert!(why.starts_with("cannot read"), "{why}");
+}
+
+// A command missing from build.rs or the capability file is refused at run time, and the
+// webview mocks used to check the page never see that.
+#[test]
+fn every_command_is_declared_and_granted() {
+    let lib = include_str!("lib.rs");
+    let build = include_str!("../build.rs");
+    let granted = include_str!("../capabilities/default.json");
+    let handler = lib
+        .split("generate_handler![")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    for name in handler.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        assert!(
+            build.contains(&format!("\"{name}\"")),
+            "{name} is not in build.rs COMMANDS"
+        );
+        let permission = format!("\"allow-{}\"", name.replace('_', "-"));
+        assert!(
+            granted.contains(&permission),
+            "{name} is not granted in capabilities/default.json"
+        );
+    }
+}
+
+#[test]
 fn an_idle_vault_locks_on_the_rust_timer() {
     let desk = Desk::new(
         Settings {

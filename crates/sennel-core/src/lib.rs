@@ -10,6 +10,7 @@ pub mod harden;
 pub mod import;
 pub mod migration;
 pub mod pwned;
+pub mod qr;
 pub mod search;
 pub mod session;
 pub mod sort;

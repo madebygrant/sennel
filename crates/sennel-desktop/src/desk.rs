@@ -8,6 +8,7 @@ use std::time::Instant;
 use keepass::db::{EntryId, GroupId};
 use sennel_core::clipboard::Board;
 use sennel_core::config;
+use sennel_core::qr;
 use sennel_core::search::Searcher;
 use sennel_core::session::{
     Cut, Delete, EntryError, EntryInput, EntryTarget, Extract, Paste, QuickError, Reparent,
@@ -121,6 +122,15 @@ pub struct EntryView {
 pub struct OtpShape {
     pub period: u64,
     pub digits: u32,
+}
+
+/// A seed read from a QR, with its timing so the form can count down before it is saved.
+#[derive(Serialize, Debug)]
+pub struct Scanned {
+    pub url: Zeroizing<String>,
+    pub otp: Option<OtpShape>,
+    /// The account the QR names, so the user can see it is the right one.
+    pub label: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -1097,6 +1107,21 @@ impl Desk {
         })
     }
 
+    // Cleared only once it holds a one-time code: any other image on the clipboard is left alone.
+    pub fn scan_clipboard(&self, title: &str, username: &str) -> Result<Scanned, String> {
+        let found = scanned(Zeroizing::new(qr::from_clipboard()?), title, username)?;
+        qr::clear_clipboard();
+        Ok(found)
+    }
+
+    pub fn scan_file(&self, path: &str, title: &str, username: &str) -> Result<Scanned, String> {
+        scanned(
+            Zeroizing::new(qr::from_file(Path::new(path))?),
+            title,
+            username,
+        )
+    }
+
     pub fn clear_clipboard(&self) {
         if let Some(board) = &self.board {
             board.clear_now();
@@ -1110,6 +1135,14 @@ impl Desk {
         }
         self.session().lock();
     }
+}
+
+fn scanned(text: Zeroizing<String>, title: &str, username: &str) -> Result<Scanned, String> {
+    let url = Zeroizing::new(qr::seed(&text, title, username)?);
+    let otp =
+        sennel_core::vault::totp_shape_of(&url).map(|(period, digits)| OtpShape { period, digits });
+    let label = sennel_core::vault::totp_label_of(&url);
+    Ok(Scanned { url, otp, label })
 }
 
 enum Field<'a> {

@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use desk::{
-    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Status,
-    VersionRow,
+    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, GroupRow, Note, Reply, Scanned,
+    Status, VersionRow,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -108,6 +108,25 @@ async fn copy_field(desk: Shared<'_>, id: String, name: String) -> Result<Note, 
 #[tauri::command]
 async fn copy_text(desk: Shared<'_>, label: String, text: String) -> Result<Note, String> {
     off_main(&desk, move |d| d.copy_text(&label, text)).await
+}
+
+#[tauri::command]
+async fn scan_clipboard(
+    desk: Shared<'_>,
+    title: String,
+    username: String,
+) -> Result<Scanned, String> {
+    off_main(&desk, move |d| d.scan_clipboard(&title, &username)).await?
+}
+
+#[tauri::command]
+async fn scan_file(
+    desk: Shared<'_>,
+    path: String,
+    title: String,
+    username: String,
+) -> Result<Scanned, String> {
+    off_main(&desk, move |d| d.scan_file(&path, &title, &username)).await?
 }
 
 #[tauri::command]
@@ -313,6 +332,8 @@ pub fn run(context: tauri::Context) {
             copy_field,
             copy_text,
             clear_clipboard,
+            scan_clipboard,
+            scan_file,
             generate,
             save_entry,
             delete_entry,

@@ -1,8 +1,10 @@
 <script>
   import { onMount, untrack } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { call, secretCopy } from "./api.js";
   import { copyFeedback } from "./copied.svelte.js";
   import Modal from "./Modal.svelte";
+  import OtpCells from "./OtpCells.svelte";
 
   // `form.id` edits that entry; otherwise a new one goes in `form.group`.
   let { form, say, close } = $props();
@@ -20,11 +22,43 @@
   let passwordTouched = $state(untrack(() => !form.id));
   let otp = $state("");
   let otpTouched = $state(false);
+  // The timing and account of a seed read from a QR, so it is clear which code was read.
+  let scanned = $state(null);
+  let dropping = $state(false);
   let reveal = $state(false);
   let busy = $state(false);
   let titleBox;
 
-  onMount(() => titleBox?.focus());
+  onMount(() => {
+    titleBox?.focus();
+    // Tauri hands over a dropped file's path; the page itself never sees the file.
+    const stop = getCurrentWebview().onDragDropEvent(({ payload }) => {
+      dropping = payload.type === "enter" || payload.type === "over";
+      if (payload.type === "drop" && payload.paths?.length) scan("scan_file", { path: payload.paths[0] });
+    });
+    return () => stop.then((f) => f());
+  });
+
+  async function scan(cmd, args = {}) {
+    try {
+      const found = await call(cmd, { ...args, title, username });
+      otp = found.url;
+      otpTouched = true;
+      scanned = found.otp && { ...found.otp, label: found.label };
+      say([{ level: "info", text: cmd === "scan_clipboard" ? "read the QR code · clipboard cleared" : "read the QR code" }]);
+    } catch (why) {
+      say([{ level: "warn", text: String(why) }]);
+    }
+  }
+
+  // ⌘V of a screenshot into the seed box reads it like Paste QR; pasted text goes in as usual.
+  function pasteSeed(event) {
+    const types = [...(event.clipboardData?.types ?? [])];
+    // Chrome reports a pasted screenshot as Files, WebKit may report its image type instead.
+    if (types.includes("text/plain") || !types.some((t) => t === "Files" || t.startsWith("image/"))) return;
+    event.preventDefault();
+    scan("scan_clipboard");
+  }
 
   async function generate() {
     try {
@@ -130,18 +164,28 @@
       <label>Tags <input bind:value={tags} placeholder="work, banking" /></label>
       <label>Expires <input bind:value={expires} placeholder="YYYY-MM-DD" /></label>
     </div>
-    <label>
-      One-time code seed
+    <label class:dropping>
+      <span class="split">
+        One-time code seed
+        <span><button type="button" class="small" onclick={() => scan("scan_clipboard")} title="Reads a screenshot of the QR code from the clipboard">Paste QR</button></span>
+      </span>
       <input
         class="mono"
         type="password"
         bind:value={otp}
-        oninput={() => (otpTouched = true)}
+        oninput={() => {
+          otpTouched = true;
+          scanned = null;
+        }}
+        onpaste={pasteSeed}
         oncopy={secretCopy("the seed", say)}
         oncut={secretCopy("the seed", say)}
-        placeholder={form.detail?.hasOtp ? "unchanged · clear it to remove" : "base32 or otpauth:// URL"}
+        placeholder={dropping ? "drop the QR image to read it" : form.detail?.hasOtp ? "unchanged · clear it to remove" : "base32, otpauth:// URL, or a QR screenshot"}
         autocomplete="off"
       />
+      {#if scanned}
+        <span class="scanned"><OtpCells period={scanned.period} digits={scanned.digits} />{scanned.label ? `for ${scanned.label}` : "read from the QR"}</span>
+      {/if}
     </label>
     <label>Notes <textarea rows="4" bind:value={notes}></textarea></label>
     {#if confirming}
@@ -208,6 +252,19 @@
     padding: 1px 8px;
     font-size: 12px;
     color: var(--text);
+  }
+
+  label.dropping :global(input) {
+    border-color: var(--accent-text);
+    outline: 1px dashed var(--accent-text);
+  }
+
+  .scanned {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--faint);
+    font-size: 12px;
   }
 
   .confirm {

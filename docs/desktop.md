@@ -88,6 +88,11 @@ Show lays the password out one character per numbered cell, with digits and symb
 colours, so it can be read out or typed elsewhere without counting. Entries that the audit flags
 (reused, weak, expired, empty or old) carry a red mark, and **Needs attention** lists them all.
 
+A site's two-factor QR code goes straight into an entry. Copy a screenshot of it (⌘⇧⌃4 on a Mac), then
+press **Paste QR** in the entry form or paste into the seed box, or drop a saved image of it onto the
+form. The code is read in Rust, the clipboard is cleared afterwards since the screenshot is the secret,
+and the form names the account the code is for. Only time-based codes are taken.
+
 Every change saves at once, as in the terminal. If somebody else wrote the file meanwhile, a bar
 offers to merge both, overwrite theirs, or reload theirs. Closing the window with changes that could
 not be saved asks first.

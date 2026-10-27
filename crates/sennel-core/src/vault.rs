@@ -199,8 +199,19 @@ pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
 /// Seconds each code lasts, and its digits. Codes roll over on multiples of the period since the
 /// Unix epoch, so a countdown to the next one needs only the clock, never the code.
 pub fn totp_shape(entry: &EntryRef<'_>) -> Option<(u64, u32)> {
-    let totp: keepass::db::TOTP = with_digits(entry.get_raw_otp_value()?).parse().ok()?;
+    totp_shape_of(entry.get_raw_otp_value()?)
+}
+
+/// The same, for a URL not yet saved on an entry.
+pub fn totp_shape_of(url: &str) -> Option<(u64, u32)> {
+    let totp: keepass::db::TOTP = with_digits(url).parse().ok()?;
     Some((totp.period, totp.digits))
+}
+
+/// Who a code is for, as the URL names it: usually `Issuer:account`.
+pub fn totp_label_of(url: &str) -> Option<String> {
+    let totp: keepass::db::TOTP = with_digits(url).parse().ok()?;
+    Some(totp.label.clone()).filter(|l| !l.is_empty())
 }
 
 /* KDBX carries an expiry on every entry and Sennel read neither half of it,

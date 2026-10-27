@@ -36,6 +36,8 @@ zeroize.workspace = true
 getrandom = "0.4"
 # Two calls only: no core dumps, and no ptrace by the rest of this user's software.
 libc = "0.2"
+rqrr = { version = "0.11.0", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 # Touch ID quick unlock: an ephemeral Secure Enclave key, which needs no
 # keychain entitlement, so an unsigned build can create one.

@@ -66,7 +66,7 @@
     place-items: center;
     overflow: hidden;
     border-radius: 3px;
-    background: var(--panel);
+    background: color-mix(in oklab, var(--text) 8%, transparent);
     color: var(--faint);
     font: 400 13px var(--mono);
   }
