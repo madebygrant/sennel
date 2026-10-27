@@ -33,6 +33,12 @@ impl SortOrder {
         }
     }
 
+    /// A config or flag value, with the message both apps give for a name nobody knows.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        Self::from_name(name)
+            .ok_or_else(|| format!("unknown sort {name:?} · stored, name, recent or updated"))
+    }
+
     /// One word for the pane header, where "by name" would read as part of
     /// the breadcrumb beside it.
     pub fn short(self) -> &'static str {

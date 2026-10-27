@@ -45,7 +45,7 @@ notarisation are on the roadmap, and only matter for sharing a build.
 The desktop binary embeds the built page, so `cargo build --workspace` and `cargo clippy --workspace`
 need `crates/sennel-desktop/ui/dist` to exist. Run `npm --prefix crates/sennel-desktop/ui run build`
 once after a fresh clone. `cargo test` does not need it: the tests cover the library, which builds
-without the page.
+without the page. The page's own tests run with `npm --prefix crates/sennel-desktop/ui test`.
 
 ## Using it
 
@@ -65,7 +65,8 @@ them all, and `single_keys = false` in the config file turns the one-letter keys
 | Key       | Does                                                           |
 | --------- | -------------------------------------------------------------- |
 | j k ↑ ↓   | move through the focused pane; g G jump to the top, bottom     |
-| ← → tab   | switch between the groups and the entries                      |
+| tab       | switch between the groups and the entries                      |
+| ← →       | fold, unfold a group; ← on an unfolded one climbs to its parent, and from the entries hops to the groups |
 | y p U t   | copy the username, password, website, one-time code           |
 | ⏎         | on a group, go to its entries; on an entry, copy the password  |
 | \*        | show the password                                              |
@@ -75,9 +76,11 @@ them all, and `single_keys = false` in the config file turns the one-letter keys
 | P         | generate a password                                            |
 | / ⌘F      | search; in the box, ↑ ↓ pick, ⏎ copies the password, esc clears |
 | u         | undo the last change to the vault                              |
+| o         | order the entries: file order, name, newest, recently changed  |
 | ! F H     | needs attention, fields and attachments, history               |
 | esc       | drop a cut entry, then clear the search                        |
 | ⌘S ⌘L     | save, lock                                                     |
+| ⌘P        | change the master password                                     |
 | h ?       | list the keys                                                  |
 
 In a text box ⌘C, ⌘Z and the rest keep their usual meaning. Double-clicking an entry copies its
@@ -103,5 +106,7 @@ not be saved asks first.
   library instead.
 - There is no theme switcher. The window follows the system's light or dark setting.
 - Settings come from the config file only. There are no command-line flags.
+- A config file the terminal app would refuse still opens the window. The unlock screen names the
+  problem, and the window runs on defaults until it is fixed, without writing to the file.
 
 [Security](security.md#the-desktop-app) covers what the window can and cannot keep from a password.

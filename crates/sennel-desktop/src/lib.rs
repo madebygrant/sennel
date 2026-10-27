@@ -130,6 +130,17 @@ async fn scan_file(
 }
 
 #[tauri::command]
+async fn cycle_sort(desk: Shared<'_>) -> Result<Note, String> {
+    off_main(&desk, Desk::cycle_sort).await
+}
+
+// The password arrives as a JS string, which cannot be wiped on that side; Rust wipes its copies.
+#[tauri::command]
+async fn rekey(desk: Shared<'_>, password: String, confirm: String) -> Result<Reply, String> {
+    off_main(&desk, move |d| d.rekey(password, confirm)).await
+}
+
+#[tauri::command]
 async fn clear_clipboard(desk: Shared<'_>) -> Result<(), String> {
     off_main(&desk, Desk::clear_clipboard).await
 }
@@ -275,14 +286,10 @@ fn must_ask(app: &AppHandle) -> bool {
 }
 
 pub fn run(context: tauri::Context) {
-    let settings = match settings::Settings::load() {
-        Ok(settings) => settings,
-        // A broken config stops the terminal app at startup too.
-        Err(why) => {
-            eprintln!("sennel-desktop: {why}");
-            std::process::exit(1);
-        }
-    };
+    let settings = settings::Settings::load().unwrap_or_else(|why| {
+        eprintln!("sennel-desktop: {why}");
+        settings::Settings::fallback(why)
+    });
     let board = sennel_core::clipboard::Board::new(settings.clipboard_timeout);
     let handle: Arc<OnceLock<AppHandle>> = Arc::default();
     let prompt_to = Arc::clone(&handle);
@@ -332,6 +339,8 @@ pub fn run(context: tauri::Context) {
             copy_field,
             copy_text,
             clear_clipboard,
+            cycle_sort,
+            rekey,
             scan_clipboard,
             scan_file,
             generate,

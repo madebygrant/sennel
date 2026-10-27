@@ -234,6 +234,107 @@ fn a_vault_is_created_then_unlocked_from_its_file() {
 }
 
 #[test]
+fn a_new_master_password_opens_the_file_and_the_old_one_does_not() {
+    let path = std::env::temp_dir().join(format!("sennel-rekey-{}.kdbx", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let desk = Desk::new(Settings::default(), None);
+    desk.choose(&path.display().to_string()).unwrap();
+    desk.unlock("old".into(), None, Some("old".into()));
+    assert!(desk.status().open);
+
+    let empty = desk.rekey(String::new(), String::new());
+    assert!(!empty.ok, "an empty password was taken");
+    let differ = desk.rekey("new".into(), "neu".into());
+    assert!(
+        !differ.ok && differ.notes[0].text.contains("differ"),
+        "{:?}",
+        differ.notes
+    );
+
+    let done = desk.rekey("new".into(), "new".into());
+    assert!(
+        done.ok && done.notes[0].text.contains("master password changed"),
+        "{:?}",
+        done.notes
+    );
+    desk.lock();
+    let old = desk.unlock("old".into(), None, None);
+    assert_eq!(
+        old.notes[0].level,
+        Level::Error,
+        "the old password still opens it"
+    );
+    desk.unlock("new".into(), None, None);
+    assert!(desk.status().open);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_new_master_password_keeps_the_key_file_in_the_key() {
+    let path = std::env::temp_dir().join(format!("sennel-rekey-kf-{}.kdbx", std::process::id()));
+    let key = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/keyfile4.key"
+    );
+    let _ = std::fs::remove_file(&path);
+    let desk = Desk::new(Settings::default(), None);
+    desk.choose(&path.display().to_string()).unwrap();
+    desk.unlock("old".into(), Some(key.into()), Some("old".into()));
+    assert!(desk.status().open);
+    let done = desk.rekey("new".into(), "new".into());
+    assert!(done.notes[0].text.contains("key file"), "{:?}", done.notes);
+    desk.lock();
+    let without = desk.unlock("new".into(), None, None);
+    assert_eq!(
+        without.notes[0].level,
+        Level::Error,
+        "the key file fell out of the key"
+    );
+    desk.unlock("new".into(), Some(key.into()), None);
+    assert!(desk.status().open);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_broken_config_opens_on_defaults_and_says_why() {
+    let settings = Settings::fallback("unknown sort \"nmae\"".into());
+    assert!(
+        settings.config_file.is_none(),
+        "a fallback must not write the broken file"
+    );
+    assert!(settings.backups > 0, "backups went quiet on a typo");
+    let desk = Desk::new(settings, None);
+    let why = desk.status().config_error.unwrap();
+    assert!(why.contains("nmae") && why.contains("defaults"), "{why}");
+}
+
+#[test]
+fn o_walks_the_entries_through_each_order() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    for title in ["alpha", "Zulu"] {
+        desk.save_entry(None, Some(&banks), &form(title, Some("pw")))
+            .unwrap();
+    }
+    let titles = |desk: &Desk| -> Vec<String> {
+        desk.entries(Some(&banks), None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect()
+    };
+    assert_eq!(desk.status().sort, "stored");
+    assert_eq!(titles(&desk), ["checking", "alpha", "Zulu"]);
+    assert!(desk.cycle_sort().text.contains("by name"));
+    assert_eq!(desk.status().sort, "name");
+    assert_eq!(titles(&desk), ["alpha", "checking", "Zulu"]);
+    for _ in 0..3 {
+        desk.cycle_sort();
+    }
+    assert_eq!(desk.status().sort, "stored", "the walk did not wrap");
+}
+
+#[test]
 fn a_custom_field_named_like_a_fixed_one_copies_itself() {
     let desk = open_with(vault());
     let banks = group(&desk, "Banks");

@@ -22,6 +22,8 @@
     "allow-copy-field",
     "allow-copy-text",
     "allow-clear-clipboard",
+    "allow-cycle-sort",
+    "allow-rekey",
     "allow-scan-clipboard",
     "allow-scan-file",
     "allow-generate",

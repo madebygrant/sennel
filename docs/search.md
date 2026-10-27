@@ -34,8 +34,9 @@ owner already made.
 ## Order
 
 `o` cycles the entries list through four orders: as stored in the file, by name, newest added
-first, and most recently changed first. `sort = "name"` in the [config file](configuration.md)
-sets the order the list opens in.
+first, and most recently changed first. The desktop app shows the order above the list, and a click
+on it does the same. `sort = "name"` in the [config file](configuration.md) sets the order both
+apps open with.
 
 ## From a script
 

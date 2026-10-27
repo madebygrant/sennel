@@ -15,6 +15,8 @@ const COMMANDS: &[&str] = &[
     "copy_field",
     "copy_text",
     "clear_clipboard",
+    "cycle_sort",
+    "rekey",
     "scan_clipboard",
     "scan_file",
     "generate",

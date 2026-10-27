@@ -3,12 +3,15 @@
   import {
     CalendarClock,
     Check,
+    ChevronDown,
+    ChevronRight,
     Copy,
     CornerDownRight,
     CornerLeftUp,
     Eye,
     EyeOff,
     Folder,
+    KeyRound,
     FolderOpen,
     FolderPlus,
     Globe,
@@ -38,6 +41,8 @@
   import HexField from "./HexField.svelte";
   import Modal from "./Modal.svelte";
   import OtpCells from "./OtpCells.svelte";
+  import Rekey from "./Rekey.svelte";
+  import { hasKids, parentOf, visibleGroups } from "./tree.js";
   import Sheet from "./Sheet.svelte";
 
   let { status, say, refresh, clears, hints = $bindable() } = $props();
@@ -62,6 +67,10 @@
   // An entry picked up with X, waiting for V in another group.
   let cut = $state(null);
   let help = $state(false);
+  let rekeying = $state(false);
+  // Folded groups hide what is under them, for this session.
+  let folded = $state(new Set());
+  const ORDERS = { stored: "File order", name: "Name", recent: "Newest", updated: "Recently changed" };
 
   const fb = copyFeedback();
 
@@ -201,8 +210,34 @@
     loadRows();
   }
 
+  const visible = $derived(visibleGroups(groups, folded));
+
+  function fold(id, shut) {
+    const next = new Set(folded);
+    if (shut) next.add(id);
+    else next.delete(id);
+    folded = next;
+    // A folded group's own child cannot stay selected out of sight.
+    if (shut && !visible.some((at) => groups[at].id === group)) selectGroup(id);
+  }
+
+  // ← in the groups pane folds an open group, or climbs to its parent.
+  function foldOrClimb() {
+    const at = groups.findIndex((g) => g.id === group);
+    if (at < 0) return;
+    if (hasKids(groups, at) && !folded.has(group)) return fold(group, true);
+    const parent = parentOf(groups, at);
+    if (parent) selectGroup(parent.id);
+  }
+
+  async function cycleSort() {
+    say([await call("cycle_sort")]);
+    await refresh();
+    await loadRows();
+  }
+
   function step(by) {
-    const list = pane === "groups" ? groups : rows;
+    const list = pane === "groups" ? visible.map((at) => groups[at]) : rows;
     if (!list.length) return;
     const at = list.findIndex((r) => r.id === (pane === "groups" ? group : selected));
     const to = list[Math.min(list.length - 1, Math.max(0, at + by))].id;
@@ -229,13 +264,27 @@
     { name: "ends", keys: "g G", what: "top, bottom of the pane", on: ["g", "G"], run: (k) => step(k === "g" ? -Infinity : Infinity) },
     {
       name: "panes",
-      keys: "← →  tab",
+      keys: "tab",
       what: "groups, entries",
-      on: ["ArrowLeft", "ArrowRight", "Tab"],
+      on: ["Tab"],
+      run: () => {
+        // Only while nothing but a row has focus, so Tab still walks the buttons for keyboard users.
+        if (document.activeElement !== document.body && !isRow(document.activeElement)) return false;
+        pane = pane === "groups" ? "entries" : "groups";
+      },
+    },
+    {
+      name: "fold",
+      keys: "← →",
+      what: "collapse, expand group · ← hops from entries",
+      on: ["ArrowLeft", "ArrowRight"],
       run: (k) => {
-        // Tab only while nothing but a row has focus, so it still walks the buttons for keyboard users.
-        if (k === "Tab" && document.activeElement !== document.body && !isRow(document.activeElement)) return false;
-        pane = k === "ArrowLeft" ? "groups" : k === "ArrowRight" ? "entries" : pane === "groups" ? "entries" : "groups";
+        if (pane === "entries") {
+          if (k === "ArrowRight") return false;
+          pane = "groups";
+        } else if (k === "ArrowLeft") foldOrClimb();
+        else if (folded.has(group)) fold(group, false);
+        else pane = "entries";
       },
     },
     { name: "open", keys: "enter", what: "group: its entries · entry: copy the password", on: ["Enter"], run: () => (pane === "groups" ? (pane = "entries") : selected ? copy("password") : false) },
@@ -293,8 +342,10 @@
     },
     { name: "find", keys: "/  ^f", what: "search the vault", on: ["/", "^f"], run: () => searchBox?.focus() },
     { name: "undo", keys: "u", what: "one level", on: ["u"], run: () => act("undo") },
+    { name: "order", keys: "o", what: "entries: file order, name, newest, recently changed", on: ["o"], run: cycleSort },
     { name: "save", keys: "^s", what: "save now", on: ["^s"], run: () => act("save") },
     { name: "lock", keys: "^l", what: "lock now", on: ["^l"], run: () => act("lock") },
+    { name: "master", keys: "^p", what: "change the master password", on: ["^p"], run: () => (rekeying = true) },
     { name: "audit", keys: "!", what: "reused, weak, expired and empty passwords", on: ["!"], run: () => (sheet = { kind: "audit" }) },
     { name: "fields", keys: "F", what: "custom fields and attachments", on: ["F"], when: () => detail, run: () => (sheet = { kind: "fields", id: detail.id }) },
     { name: "history", keys: "H", what: "old versions", on: ["H"], when: () => detail, run: () => (sheet = { kind: "history", id: detail.id }) },
@@ -318,7 +369,7 @@
     const bar = cut
       ? [["V", `paste ${cut.title} here`], ["esc", "keep it where it is"]]
       : pane === "groups"
-        ? [["j k", "move"], ["→", "entries"], ["A", "add group"], ...(current?.depth ? [["E", "rename"]] : [])]
+        ? [["j k", "move"], ["← →", "fold"], ["A", "add group"], ...(current?.depth ? [["E", "rename"]] : [])]
         : selected
           ? [["p", "password"], ["y", "user"], ...(detail?.hasOtp ? [["t", "code"]] : []), ["e", "edit"], ["/", "find"]]
           : [["a", "add"], ["/", "find"]];
@@ -326,7 +377,7 @@
   });
 
   function keys(event) {
-    if (form || sheet || prompt || event.altKey || event.defaultPrevented) return;
+    if (form || sheet || prompt || rekeying || event.altKey || event.defaultPrevented) return;
     if (help) {
       if (event.key === "h" || event.key === "?") help = false;
       return;
@@ -382,6 +433,7 @@
     <button class="tool" onclick={async () => (sheet = { kind: "generate", value: await call("generate") })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
     <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
     <button class="tool" onclick={() => act("save")} title="Save  ⌘S" aria-label="Save"><Save /></button>
+    <button class="tool" onclick={() => (rekeying = true)} title="Change master password  ⌘P" aria-label="Change master password"><KeyRound /></button>
     <button class="tool" onclick={() => act("lock")} title="Lock  ⌘L" aria-label="Lock"><Lock /></button>
   </header>
 
@@ -401,13 +453,15 @@
       <span class="count">{attention || ""}</span>
     </button>
     <ul>
-      {#each groups as g (g.id)}
+      {#each visible as at (groups[at].id)}
+        {@const g = groups[at]}
         <li>
           <button
             class="group depth-{Math.min(g.depth, 8)}"
             class:active={g.id === group}
             class:bin={g.bin}
             aria-current={g.id === group ? "true" : undefined}
+            aria-expanded={hasKids(groups, at) ? !folded.has(g.id) : undefined}
             onclick={() => {
               pane = "groups";
               selectGroup(g.id);
@@ -415,6 +469,10 @@
             ondragover={(e) => e.preventDefault()}
             ondrop={(e) => dropOn(g.id, e)}
           >
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span class="chevron" onclick={(e) => { e.stopPropagation(); if (hasKids(groups, at)) fold(g.id, !folded.has(g.id)); }}>
+              {#if hasKids(groups, at)}{#if folded.has(g.id)}<ChevronRight />{:else}<ChevronDown />{/if}{/if}
+            </span>
             {#if g.bin}<Trash2 />{:else if g.depth === 0}<Vault />{:else if g.id === group}<FolderOpen />{:else}<Folder />{/if}
             <span class="name">{g.name}</span>
             <span class="count">{g.entries || ""}</span>
@@ -433,6 +491,9 @@
   </nav>
 
   <section class="list" aria-label="Entries" class:focused={pane === "entries"} bind:this={listBox}>
+    <div class="listbar">
+      <button class="order" onclick={cycleSort} title="Change the order  o">{ORDERS[status.sort] ?? "File order"}</button>
+    </div>
     <ul>
       {#each rows as r (r.id)}
         <li>
@@ -560,6 +621,10 @@
 
 {#if sheet}
   <Sheet {sheet} {say} {reload} {refresh} close={() => (sheet = null)} open={(id) => { sheet = null; group = null; needle = ""; pick(id); }} />
+{/if}
+
+{#if rekeying}
+  <Rekey {say} close={async () => { rekeying = false; await refresh(); }} />
 {/if}
 
 {#if help}
@@ -760,6 +825,37 @@
   .smart,
   .group-actions {
     position: relative;
+  }
+
+  .chevron {
+    width: 14px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    margin-right: -4px;
+    color: var(--faint);
+  }
+
+  .chevron > :global(svg) {
+    width: 13px;
+    height: 13px;
+  }
+
+  .listbar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 4px 6px;
+  }
+
+  .order {
+    padding: 2px 8px;
+    background: none;
+    color: var(--faint);
+    font: 12px var(--font);
+  }
+
+  .order:hover {
+    color: var(--text);
   }
 
   ul {

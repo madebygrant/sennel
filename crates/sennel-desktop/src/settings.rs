@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use sennel_core::config::{self, FileConfig, Generator};
+use sennel_core::sort::SortOrder;
 use sennel_core::vault::YubiSpec;
 
 #[derive(Clone, Debug)]
@@ -21,7 +22,11 @@ pub struct Settings {
     pub ssh_lifetime: u32,
     pub touch_id: bool,
     pub single_keys: bool,
+    /// The order the entries list opens in; `o` changes it for the session.
+    pub sort: SortOrder,
     pub generator: Generator,
+    /// Why the config file was not used, when it could not be read.
+    pub config_error: Option<String>,
 }
 
 impl Default for Settings {
@@ -39,12 +44,28 @@ impl Default for Settings {
             ssh_lifetime: 3600,
             touch_id: false,
             single_keys: true,
+            sort: SortOrder::Stored,
             generator: Generator::default(),
+            config_error: None,
         }
     }
 }
 
 impl Settings {
+    // The window opens on defaults rather than not at all: launched from Finder or a menu, an exit
+    // message on stderr is never seen. No config path, so nothing writes over the broken file.
+    pub fn fallback(why: String) -> Self {
+        Settings {
+            backups: config::backups(None).unwrap_or(0),
+            backup_dir: config::default_backup_dir(),
+            config_error: Some(format!(
+                "{} · {why} · running on defaults until it is fixed",
+                config::config_path().display()
+            )),
+            ..Settings::default()
+        }
+    }
+
     // The same checks and defaults as the terminal app, from core, so one config file is accepted
     // or refused by both.
     pub fn load() -> Result<Self, String> {
@@ -74,6 +95,11 @@ impl Settings {
             ssh_lifetime: config::lifetime(file.ssh_agent_lifetime).map_err(fail)?,
             touch_id: file.touch_id.unwrap_or(false) && cfg!(target_os = "macos"),
             single_keys: file.single_keys.unwrap_or(true),
+            sort: file
+                .sort
+                .as_deref()
+                .map_or(Ok(SortOrder::Stored), SortOrder::parse)?,
+            config_error: None,
             generator: config::generator(file.generator.as_ref()).map_err(fail)?,
         })
     }

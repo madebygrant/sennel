@@ -73,6 +73,10 @@
       Sennel
     </h1>
 
+    {#if status.configError}
+      <p class="error" role="alert">Config file not used: {status.configError}</p>
+    {/if}
+
     <label>
       <span>Vault file</span>
       <input class="mono" bind:value={path} onchange={() => choose(path)} placeholder="~/vault.kdbx" spellcheck="false" />

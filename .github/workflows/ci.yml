@@ -51,10 +51,11 @@ jobs:
           cache-dependency-path: crates/sennel-desktop/ui/package-lock.json
 
       # The desktop binary embeds the built page, so clippy needs it before it runs.
-      - name: Build the desktop page
+      - name: Build and test the desktop page
         working-directory: crates/sennel-desktop/ui
         run: |
           npm ci
+          npm test
           npm run build
 
       # The version comes from rust-toolchain.toml.
@@ -105,10 +106,11 @@ jobs:
           cache: npm
           cache-dependency-path: crates/sennel-desktop/ui/package-lock.json
 
-      - name: Build the desktop page
+      - name: Build and test the desktop page
         working-directory: crates/sennel-desktop/ui
         run: |
           npm ci
+          npm test
           npm run build
 
       # The `rust-version` in each Cargo.toml: 1.88 for core and the terminal app, 1.90 for the desktop.

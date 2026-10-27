@@ -76,6 +76,9 @@ pub struct Status {
     pub locks_in: Option<u64>,
     pub lock_after: Option<u64>,
     pub single_keys: bool,
+    pub config_error: Option<String>,
+    /// The entries order, as the config file spells it.
+    pub sort: &'static str,
     pub undo: Option<String>,
 }
 
@@ -214,8 +217,8 @@ impl Reply {
     }
 }
 
-// The last rows asked for: revision, group and needle, then the answer.
-type RowsKey = (u64, Option<String>, Option<String>);
+// The last rows asked for: revision, group, needle and order, then the answer.
+type RowsKey = (u64, Option<String>, Option<String>, SortOrder);
 
 pub struct Desk {
     session: Mutex<Session<Sealed>>,
@@ -224,6 +227,9 @@ pub struct Desk {
     /// None in tests, which must not touch the system clipboard.
     board: Option<Board>,
     held: Mutex<Option<String>>,
+    // The key file the open vault was unlocked with, so a re-key keeps it in the key.
+    key_file: Mutex<Option<String>>,
+    sort: Mutex<SortOrder>,
     settings: Settings,
     rows: Mutex<(Option<RowsKey>, Vec<EntryId>, Searcher)>,
     // Says "touch your key" before a write that blocks on one, since nothing else would.
@@ -268,6 +274,8 @@ impl Desk {
             recent: Mutex::new(settings.recent.clone()),
             board,
             held: Mutex::new(None),
+            key_file: Mutex::new(None),
+            sort: Mutex::new(settings.sort),
             settings,
             rows: Mutex::new((None, Vec::new(), Searcher::new())),
             prompt: None,
@@ -346,6 +354,8 @@ impl Desk {
                 .map(|left| left.as_secs() + u64::from(left.subsec_millis() > 0)),
             lock_after: (self.settings.lock_timeout > 0).then_some(self.settings.lock_timeout),
             single_keys: self.settings.single_keys,
+            config_error: self.settings.config_error.clone(),
+            sort: self.sort().short(),
             undo,
         }
     }
@@ -375,6 +385,7 @@ impl Desk {
     ) -> Reply {
         let mut bytes = password.as_bytes().to_vec();
         password.zeroize();
+        *self.key_file.lock().unwrap_or_else(|e| e.into_inner()) = key_file.clone();
         let confirm = confirm.map(Zeroizing::new);
         let Some(path) = self.db() else {
             bytes.zeroize();
@@ -410,6 +421,7 @@ impl Desk {
     }
 
     pub fn quick_unlock(&self, key_file: Option<String>) -> Reply {
+        *self.key_file.lock().unwrap_or_else(|e| e.into_inner()) = key_file.clone();
         let Some(path) = self.db() else {
             return Reply::one(warn("choose a vault file first"));
         };
@@ -579,10 +591,12 @@ impl Desk {
             Some(g) => group_id(g)?,
             None => vault.root_id(),
         };
+        let order = self.sort();
         let key = (
             s.revision(),
             Some(group.to_string()),
             needle.map(String::from),
+            order,
         );
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         if rows.0.as_ref() != Some(&key) {
@@ -591,7 +605,7 @@ impl Desk {
                 needle.is_some(),
                 Some(group),
                 needle,
-                SortOrder::Stored,
+                order,
                 &mut rows.2,
             );
             *rows = (Some(key), ids, std::mem::take(&mut rows.2));
@@ -1120,6 +1134,86 @@ impl Desk {
             title,
             username,
         )
+    }
+
+    fn sort(&self) -> SortOrder {
+        *self.sort.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `o`: the next entries order, for this session.
+    pub fn cycle_sort(&self) -> Note {
+        let mut sort = self.sort.lock().unwrap_or_else(|e| e.into_inner());
+        *sort = sort.next();
+        info(format!("entries {}", sort.label()))
+    }
+
+    // Both boxes must agree: nothing else can ever tell the user what the new password was. The key
+    // file the vault was unlocked with stays part of the key, or the vault would not open again.
+    pub fn rekey(&self, mut password: String, mut confirm: String) -> Reply {
+        let same = password == confirm;
+        confirm.zeroize();
+        let refuse = |password: &mut String, text: &str| {
+            password.zeroize();
+            Reply {
+                notes: vec![warn(text)],
+                select: None,
+                ok: false,
+            }
+        };
+        if password.is_empty() {
+            return refuse(&mut password, "type a new password");
+        }
+        if !same {
+            return refuse(&mut password, "the passwords differ · type them again");
+        }
+        let key_path = self
+            .key_file
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let key = match self.read_key(key_path.as_deref()) {
+            Ok(key) => key,
+            Err(_) => {
+                let path = key_path.unwrap_or_default();
+                return refuse(
+                    &mut password,
+                    &format!("cannot read key file {path} · password unchanged"),
+                );
+            }
+        };
+        let mut s = self.session();
+        self.ask_for_key(&s, "to save");
+        let done = s.rekey(&password, key.as_deref().map(|k| k.as_slice()));
+        password.zeroize();
+        match done {
+            Ok(rekeyed) => {
+                let mut said = "master password changed".to_string();
+                if let Some(path) = key_path.filter(|p| !p.trim().is_empty()) {
+                    said.push_str(&format!(" · key file {path} kept"));
+                }
+                if rekeyed.removed > 0 {
+                    let plural = if rekeyed.removed == 1 {
+                        "backup"
+                    } else {
+                        "backups"
+                    };
+                    said.push_str(&format!(
+                        " · {} {plural} under the old password deleted",
+                        rekeyed.removed
+                    ));
+                }
+                if let Some(why) = rekeyed.touch_id_off {
+                    said.push_str(&format!(" · Touch ID off until a typed unlock · {why}"));
+                }
+                Reply::one(info(said))
+            }
+            // The write comes before the swap, so the old password still opens the file.
+            Err(e) => Reply {
+                notes: vec![error(format!("password unchanged · {e}"))],
+                select: None,
+                ok: false,
+            },
+        }
     }
 
     pub fn clear_clipboard(&self) {

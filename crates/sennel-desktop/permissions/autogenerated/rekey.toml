@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rekey"
+description = "Enables the rekey command without any pre-configured scope."
+commands.allow = ["rekey"]
+
+[[permission]]
+identifier = "deny-rekey"
+description = "Denies the rekey command without any pre-configured scope."
+commands.deny = ["rekey"]

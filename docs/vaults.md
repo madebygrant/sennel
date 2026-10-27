@@ -59,9 +59,10 @@ or to `ssh-agent` as a key. [The keys](keys.md#the-fields-screen-f).
 
 ## Changing the master password
 
-`^p` in the terminal app re-keys the vault in place. Sennel writes the file under the new password
-before switching to it, so a failed write leaves a vault that still opens with the old one. Nothing
-can recover the new password if you forget it.
+`^p` in the terminal app, or `⌘P` and the key button in the desktop app, re-keys the vault in
+place. Sennel writes the file under the new password before switching to it, so a failed write
+leaves a vault that still opens with the old one. A key file you unlocked with stays part of the
+key. Nothing can recover the new password if you forget it.
 
 ## Unlocking with more than a password
 

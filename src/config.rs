@@ -384,8 +384,7 @@ fn order(name: Option<&str>) -> Result<crate::app::SortOrder> {
     let Some(name) = name else {
         return Ok(crate::app::SortOrder::default());
     };
-    crate::app::SortOrder::from_name(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown sort {name:?} · stored, name, recent or updated"))
+    crate::app::SortOrder::parse(name).map_err(anyhow::Error::msg)
 }
 
 /* A name nobody ships is a startup error naming the ones that exist, not a

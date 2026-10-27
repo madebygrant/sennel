@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cycle-sort"
+description = "Enables the cycle_sort command without any pre-configured scope."
+commands.allow = ["cycle_sort"]
+
+[[permission]]
+identifier = "deny-cycle-sort"
+description = "Denies the cycle_sort command without any pre-configured scope."
+commands.deny = ["cycle_sort"]
