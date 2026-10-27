@@ -2,6 +2,7 @@
 name = "sennel-core"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "The vault, generator, search, clipboard and config file behind Sennel"
 license = "MIT OR Apache-2.0"
 

@@ -148,7 +148,7 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-Rust 1.88+, 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
+Rust 1.88+ (1.90+ for the desktop app), 2024 edition. `sennel --check` prints what the app sees and needs no TTY.
 
 ```sh
 sennel completions zsh > ~/.zfunc/_sennel    # bash, zsh, fish, elvish

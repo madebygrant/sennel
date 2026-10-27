@@ -2,6 +2,8 @@
 name = "sennel-desktop"
 version = "0.1.0"
 edition = "2024"
+# Tauri 2.12 needs 1.90; the terminal app and core build on 1.88.
+rust-version = "1.90"
 description = "Sennel in a native window: the same vaults as the terminal app"
 license = "MIT OR Apache-2.0"
 

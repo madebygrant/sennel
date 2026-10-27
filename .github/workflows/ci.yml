@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its run; every commit to main keeps one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Test, lint and bundle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: app,dmg
+            artifacts: |
+              target/release/bundle/dmg/*.dmg
+          # Linux is the platform nobody builds locally.
+          - os: ubuntu-24.04
+            bundles: deb,appimage
+            artifacts: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/appimage/*.AppImage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Linux packages for the webview and the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/sennel-desktop/ui/package-lock.json
+
+      # The desktop binary embeds the built page, so clippy needs it before it runs.
+      - name: Build the desktop page
+        working-directory: crates/sennel-desktop/ui
+        run: |
+          npm ci
+          npm run build
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Bundle the desktop app
+        working-directory: crates/sennel-desktop
+        # The AppImage tools are themselves AppImages, and runners have no FUSE to mount them.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: ui/node_modules/.bin/tauri build --bundles ${{ matrix.bundles }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sennel-desktop-${{ runner.os }}
+          path: ${{ matrix.artifacts }}
+          retention-days: 7
+          if-no-files-found: error
+
+  msrv:
+    name: Minimum Rust versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Linux packages for the webview
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/sennel-desktop/ui/package-lock.json
+
+      - name: Build the desktop page
+        working-directory: crates/sennel-desktop/ui
+        run: |
+          npm ci
+          npm run build
+
+      # The `rust-version` in each Cargo.toml: 1.88 for core and the terminal app, 1.90 for the desktop.
+      - name: Install Rust 1.88 and 1.90
+        run: rustup toolchain install 1.88 1.90 --profile minimal
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Core and terminal app on 1.88
+        run: cargo +1.88 check -p sennel-core -p sennel-tui --all-targets
+
+      - name: Desktop app on 1.90
+        run: cargo +1.90 check -p sennel-desktop --all-targets

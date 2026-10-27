@@ -1,0 +1,5 @@
+# The toolchain CI and local builds share, so a new Rust release cannot change clippy's verdict
+# without a commit that says so. The minimum each crate supports is its `rust-version`.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

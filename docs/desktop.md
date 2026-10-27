@@ -13,7 +13,7 @@ no port. The page talks to the Rust side over Tauri's in-process IPC.
 
 ## Building
 
-You need Rust 1.88 or later and Node.js. On Linux, install WebKitGTK and its companions first, as
+You need Rust 1.90 or later and Node.js. On Linux, install WebKitGTK and its companions first, as
 listed in [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/#linux) (on Debian or
 Ubuntu, `libwebkit2gtk-4.1-dev`, `libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev` and
 `librsvg2-dev`). Windows is not supported, the same as the terminal app.

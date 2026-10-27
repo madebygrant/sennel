@@ -1,0 +1,7 @@
+# The workflow's actions are pinned by commit, so this is what moves them forward.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
