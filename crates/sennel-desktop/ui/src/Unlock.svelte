@@ -209,8 +209,8 @@
   }
 
   .row.current {
-    color: var(--accent);
-    background: color-mix(in oklab, var(--accent) 14%, var(--panel));
+    color: var(--text);
+    background: var(--raised);
   }
 
   p {

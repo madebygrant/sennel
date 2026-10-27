@@ -521,7 +521,7 @@
     gap: 10px;
     padding: 5px 12px;
     margin-right: 6px;
-    background: color-mix(in oklab, var(--accent) 14%, var(--bg));
+    background: var(--panel);
     border-radius: var(--radius);
     font-size: 12.5px;
     font-variant-numeric: tabular-nums;
@@ -622,8 +622,12 @@
   }
 
   .group.active {
+    color: var(--text);
+    background: var(--raised);
+  }
+
+  .group.active > :global(svg) {
     color: var(--accent);
-    background: color-mix(in oklab, var(--accent) 14%, transparent);
   }
 
   .group.bin {
@@ -651,10 +655,6 @@
     flex: none;
     background: var(--error);
     transform: rotate(45deg);
-  }
-
-  .entry.active .flag {
-    background: var(--accent-ink);
   }
 
   .group-actions {
@@ -694,8 +694,7 @@
   }
 
   .entry.active {
-    background: var(--accent);
-    color: var(--accent-ink);
+    background: var(--raised);
   }
 
   .names {
@@ -722,7 +721,7 @@
   }
 
   .entry.active .names span {
-    color: color-mix(in oklab, var(--accent-ink) 65%, var(--accent));
+    color: var(--dim);
   }
 
   .initial {
@@ -737,16 +736,16 @@
   }
 
   .entry.active .initial {
-    background: var(--accent-ink);
-    color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
   }
 
   .initial.big {
     width: 48px;
     height: 48px;
     font-size: 22px;
-    background: var(--accent);
-    color: var(--accent-ink);
+    background: var(--raised);
+    color: var(--accent);
   }
 
   .empty {
