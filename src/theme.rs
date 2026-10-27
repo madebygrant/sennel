@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use ratatui::style::Color;
 
 /* A palette is a set of roles, not a set of pigments. The names used to be
@@ -365,8 +363,9 @@ pub fn depth_from(no_color: Option<&str>, colorterm: &str, term: &str) -> Depth 
     Depth::Ansi256
 }
 
+#[cfg(not(test))]
 pub fn depth() -> Depth {
-    static DEPTH: OnceLock<Depth> = OnceLock::new();
+    static DEPTH: std::sync::OnceLock<Depth> = std::sync::OnceLock::new();
     *DEPTH.get_or_init(|| {
         let var = |name: &str| std::env::var(name).unwrap_or_default();
         depth_from(
@@ -375,6 +374,13 @@ pub fn depth() -> Depth {
             &var("TERM"),
         )
     })
+}
+
+// Tests assert exact palette colours, so they can't depend on the terminal running them:
+// CI sets no COLORTERM and would get the 256-colour cube. `depth_from` covers the detection.
+#[cfg(test)]
+pub fn depth() -> Depth {
+    Depth::Full
 }
 
 /// Whether colour is switched off altogether, which the widgets that paint a
