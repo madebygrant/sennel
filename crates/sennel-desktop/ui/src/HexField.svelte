@@ -34,7 +34,7 @@
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.globalAlpha = 0.07;
-      g.strokeStyle = tone("--accent");
+      g.strokeStyle = tone("--accent-text");
       cells = [];
       const step = Math.sqrt(3) * R;
       for (let row = 0; row * R * 1.5 < h + R; row++) {
@@ -70,7 +70,7 @@
       if (document.hidden || t - last < 50) return;
       last = t;
       if (t > next && low.length) {
-        const color = tone(Math.random() < 0.25 ? "--data" : "--accent");
+        const color = tone(Math.random() < 0.25 ? "--data" : "--accent-text");
         lit.push({ i: low[(Math.random() * low.length) | 0], t0: t, color });
         next = t + 1400 + Math.random() * 1200;
       }

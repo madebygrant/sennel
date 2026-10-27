@@ -178,7 +178,7 @@
     font-size: 34px;
     font-family: var(--action);
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .mark {
@@ -197,13 +197,13 @@
 
   .mark .edge {
     fill: none;
-    stroke: var(--accent);
+    stroke: var(--accent-text);
     stroke-width: 34;
     stroke-linejoin: round;
   }
 
   .mark .hole {
-    fill: var(--accent);
+    fill: var(--accent-text);
   }
 
   h2 {

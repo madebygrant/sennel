@@ -8,6 +8,7 @@
   --faint: #747472;
   --accent: #e2a65a;
   --accent-ink: #1a1714;
+  --accent-text: #e2a65a;
   --data: #6fc2a8;
   --warn: #e8c15a;
   --error: #ff5a4e;
@@ -30,10 +31,11 @@
     --text: #20201f;
     --dim: #5f5f5c;
     --faint: #71716d;
-    --accent: #a8601c;
-    --accent-ink: #fffaf0;
+    --accent: #e2a65a;
+    --accent-ink: #1a1714;
+    --accent-text: #8a5a00;
     --data: #2e7d68;
-    --warn: #8a6a00;
+    --warn: #b4500a;
     --error: #b23a2a;
     --ok: #3d7a2c;
     color-scheme: light;
@@ -88,9 +90,9 @@ textarea {
 
 input:focus,
 textarea:focus {
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--accent-text);
   outline-offset: -1px;
-  border-color: var(--accent);
+  border-color: var(--accent-text);
 }
 
 button {
@@ -113,7 +115,7 @@ button:hover {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
 }
 
@@ -209,7 +211,7 @@ button:disabled {
 
 @keyframes ink {
   from {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 }
 

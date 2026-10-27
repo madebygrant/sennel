@@ -490,7 +490,7 @@
   }
 
   .search:focus-within {
-    box-shadow: inset 0 -2px var(--accent);
+    box-shadow: inset 0 -2px var(--accent-text);
   }
 
   kbd {
@@ -543,7 +543,7 @@
   .segs i {
     width: 4px;
     height: 12px;
-    background: var(--accent);
+    background: var(--accent-text);
     transition: opacity 300ms;
   }
 
@@ -630,7 +630,7 @@
   }
 
   .group.active > :global(svg) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .group.bin {
@@ -748,7 +748,7 @@
     height: 48px;
     font-size: 22px;
     background: var(--raised);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .empty {

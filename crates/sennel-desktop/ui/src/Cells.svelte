@@ -95,7 +95,7 @@
   }
 
   .open b.digit {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .open b.symbol {
