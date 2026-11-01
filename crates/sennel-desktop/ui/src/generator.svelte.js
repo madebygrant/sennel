@@ -1,5 +1,6 @@
 import { call } from "./api.js";
 import { latestOnly } from "./latest.js";
+import { resized as resizedFrom, restyled as restyledFrom } from "./picks.js";
 
 // The config's [generator] is only the default: picks last until Sennel quits, and the entry form follows them.
 export const KINDS = [
@@ -40,3 +41,6 @@ export async function generate(kind = chosen.kind, size, style = chosen.style) {
   chosen.style = made.style;
   return made;
 }
+
+export const resized = (by) => resizedFrom(chosen, by);
+export const restyled = (key) => restyledFrom(chosen, key);

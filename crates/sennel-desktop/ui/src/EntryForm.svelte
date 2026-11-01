@@ -4,6 +4,7 @@
   import { call, secretCopy } from "./api.js";
   import { copyFeedback } from "./copied.svelte.js";
   import { generate as makePassword } from "./generator.svelte.js";
+  import GeneratorControls from "./GeneratorControls.svelte";
   import Modal from "./Modal.svelte";
   import OtpCells from "./OtpCells.svelte";
 
@@ -21,6 +22,10 @@
   // On an edit an untouched password or seed box keeps what is stored, so neither is prefilled.
   let password = $state("");
   let passwordTouched = $state(untrack(() => !form.id));
+  // The last generated password, which shows the generator's options until the box is typed in.
+  let made = $state(null);
+  // Bumped by typing, so a generate reply that lands after a keystroke doesn't overwrite it.
+  let typed = 0;
   let otp = $state("");
   let otpTouched = $state(false);
   // The timing and account of a seed read from a QR, so it is clear which code was read.
@@ -61,11 +66,13 @@
     scan("scan_clipboard");
   }
 
-  async function generate() {
+  async function generate(kind, size, style) {
+    const at = typed;
     try {
-      const made = await makePassword();
-      if (!made) return;
-      password = made.value;
+      const next = await makePassword(kind, size, style);
+      if (!next || at !== typed) return;
+      made = next;
+      password = next.value;
       passwordTouched = true;
       reveal = true;
     } catch (why) {
@@ -147,7 +154,7 @@
         Password
         <span>
           <button type="button" class="small" onclick={() => (reveal = !reveal)}>{reveal ? "Hide" : "Show"}</button>
-          <button type="button" class="small" onclick={generate}>Generate</button>
+          <button type="button" class="small" onclick={() => generate()}>{made ? "Another" : "Generate"}</button>
           <button type="button" class="small" onclick={copyPassword}>{fb.copied === "password" ? "Copied" : "Copy"}</button>
         </span>
       </span>
@@ -155,13 +162,22 @@
         class="mono"
         type={reveal ? "text" : "password"}
         bind:value={password}
-        oninput={() => (passwordTouched = true)}
+        oninput={() => {
+          passwordTouched = true;
+          typed++;
+          made = null;
+        }}
         oncopy={secretCopy("password", say)}
         oncut={secretCopy("password", say)}
         placeholder={form.id && !passwordTouched ? "unchanged" : ""}
         autocomplete="off"
       />
     </label>
+    {#if made}
+      <div class="generator">
+        <GeneratorControls {made} pick={generate} />
+      </div>
+    {/if}
     <label>URL <input bind:value={url} spellcheck="false" /></label>
     <div class="pair">
       <label>Tags <input bind:value={tags} placeholder="work, banking" /></label>
@@ -273,6 +289,12 @@
   .confirm {
     align-items: center;
     color: var(--warn);
+  }
+
+  .generator {
+    display: grid;
+    gap: 6px;
+    margin-top: -4px;
   }
 
   .pair {

@@ -8,8 +8,9 @@ could not honour. Three shapes: `complex` (characters from classes, the default)
 
 - `P` in the browser opens the generator on its own, with no entry to store the result in.
   `t` walks the three kinds. `kind` in the config is only where it starts. The desktop app's
-  generator has the same `t`, `-` `+` and `u` `d` `s` `a`, plus buttons for each, and its
-  Generate button in the entry form makes whatever you last picked there.
+  generator has the same `t`, `-` `+` and `u` `d` `s` `a`, plus buttons for each. Generate in
+  the entry form starts from whatever you last picked there and shows the same buttons under the
+  password box; picks made in either place carry over to the other.
 
 - `^s` inside the add or edit form writes one straight into the password box.
   `^y` copies the password box, on the same wipe timer as every other copy, so it can go into
