@@ -57,6 +57,46 @@ entry arrived with, and clears them for good.
 files. Sennel stores the fields you add as protected. An attachment can go out beside the vault,
 or to `ssh-agent` as a key. [The keys](keys.md#the-fields-screen-f).
 
+## Field references
+
+KeePass and KeePassXC let one entry borrow another's field, so a shared password lives in one place.
+KeePassXC writes references when you clone an entry and choose to reference its username and
+password rather than copy them. The field then holds a placeholder such as `{REF:P@I:46C9B1FFBD4ABC4BBB260C6190BAD20C}`, meaning "the
+password of the entry with this ID".
+
+Sennel resolves them wherever it hands out or shows a value: copying, `sennel get`, `sennel run`, the
+detail pane and the fields screen, the desktop app, and export. Editing shows the placeholder itself, so saving an
+entry keeps the reference instead of replacing it with a copy.
+
+| Code | Field     |
+| ---- | --------- |
+| `T`  | title     |
+| `U`  | username  |
+| `P`  | password  |
+| `A`  | url       |
+| `N`  | notes     |
+| `I`  | the entry's ID. Wanted: gives the ID. Searched: names one entry exactly |
+| `O`  | other fields, searched only                                             |
+
+- **One match or none.** KeePass takes the first entry when a search such as `{REF:P@T:mail}` matches
+  several. Sennel refuses instead and says so, the same rule `get` follows, so a guess never picks a
+  password. A reference by `I`, which KeePassXC writes, always names one entry.
+- **Inside other text.** A reference can sit inside a field, such as
+  `https://forum.example.com/?user={REF:U@T:Example}`, and can point at a field that holds a
+  reference of its own. A loop is refused rather than followed forever.
+- **Broken references.** A reference to an entry that is gone, or one Sennel cannot read, is an error
+  when copying, `get` or `run` asks for it, never its raw text passed off as the value. The detail
+  pane shows the raw text, so you can see what is stored. Export writes it as stored.
+- **Passwords stay masked in views.** A reference to a password inside a field Sennel shows openly,
+  such as `https://ada:{REF:P@I:...}@bank.example` in the url, shows the password as `••••••`. It
+  resolves in full only when you copy the field, reveal it, or ask `get`, `run` or export for it.
+  In the desktop app the password does not reach the window until then.
+- **Limits.** A chain stops after ten steps, and one value follows at most 64 references in all, so
+  an entry built to fan out cannot freeze the screen. Past either limit it is an error.
+- **The recycle bin.** A reference by ID still reaches an entry in the bin. A search never does.
+- **The audit.** An entry whose password is a reference is skipped. Its target is checked in its own
+  right, and sharing on purpose is not reuse.
+
 ## Changing the master password
 
 `^p` in the terminal app, or `⌘P` and the key button in the desktop app, re-keys the vault in

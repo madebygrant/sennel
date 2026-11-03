@@ -14,9 +14,10 @@
   // The boxes are seeded once and then belong to the user.
   const d = untrack(() => form.detail ?? {});
   let title = $state(d.title ?? "");
-  let username = $state(d.username ?? "");
-  let url = $state(d.url ?? "");
-  let notes = $state(d.notes ?? "");
+  // The stored text, not the shown one, so saving keeps a field reference as a reference.
+  let username = $state(d.raw?.username ?? d.username ?? "");
+  let url = $state(d.raw?.url ?? d.url ?? "");
+  let notes = $state(d.raw?.notes ?? d.notes ?? "");
   let tags = $state(d.tags ?? "");
   let expires = $state(d.expires ?? "");
   // On an edit an untouched password or seed box keeps what is stored, so neither is prefilled.

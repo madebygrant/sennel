@@ -4,7 +4,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::vault::{EntryExt, Extra, Vault, extra_rows, raw_otp};
+use crate::vault::{EntryExt, Extra, Vault, extra_rows, raw_otp, resolve_text};
 
 /// What `export` writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -20,6 +20,12 @@ pub struct Exported {
     /// Custom fields and attachments the chosen format has no room for.
     pub left_out_fields: usize,
     pub left_out_files: usize,
+}
+
+// Exported with references resolved, since the app reading the export may not resolve them and a
+// raw `{REF:...}` would import as the password. A broken reference exports as stored.
+fn exported(vault: &Vault, raw: &str) -> Zeroizing<String> {
+    resolve_text(vault, raw).unwrap_or_else(|_| Zeroizing::new(raw.to_string()))
 }
 
 struct Row<'a> {
@@ -74,13 +80,19 @@ pub fn render(
             for row in &rows {
                 let e = &row.entry;
                 let otp = Zeroizing::new(raw_otp(e).unwrap_or_default());
+                let (username, password, url, notes) = (
+                    exported(vault, e.username()),
+                    exported(vault, e.password()),
+                    exported(vault, e.url()),
+                    exported(vault, e.notes()),
+                );
                 for (i, cell) in [
                     row.group.as_str(),
                     e.title(),
-                    e.username(),
-                    e.password(),
-                    e.url(),
-                    e.notes(),
+                    username.as_str(),
+                    password.as_str(),
+                    url.as_str(),
+                    notes.as_str(),
                     otp.as_str(),
                 ]
                 .into_iter()
@@ -115,13 +127,19 @@ pub fn render(
                     push_json(out, name);
                     out.push_str(": ");
                 };
+                let (username, password, url, notes) = (
+                    exported(vault, e.username()),
+                    exported(vault, e.password()),
+                    exported(vault, e.url()),
+                    exported(vault, e.notes()),
+                );
                 for (name, value) in [
                     ("group", row.group.as_str()),
                     ("title", e.title()),
-                    ("username", e.username()),
-                    ("password", e.password()),
-                    ("url", e.url()),
-                    ("notes", e.notes()),
+                    ("username", username.as_str()),
+                    ("password", password.as_str()),
+                    ("url", url.as_str()),
+                    ("notes", notes.as_str()),
                 ] {
                     key(&mut out, name);
                     push_json(&mut out, value);
@@ -161,7 +179,7 @@ pub fn render(
                         wrote = true;
                         push_json(&mut out, name);
                         out.push_str(", \"value\": ");
-                        push_json(&mut out, value);
+                        push_json(&mut out, &exported(vault, value));
                         out.push('}');
                     }
                 }
@@ -305,6 +323,36 @@ mod tests {
             "a prefix is not a group"
         );
         assert!(render(&Vault::new(), ExportFormat::Csv, None).is_err());
+    }
+
+    // Another app reading the export may not resolve references, so a raw `{REF:...}` would import
+    // as the password. A broken one exports as stored, since there is nothing else to write.
+    #[test]
+    fn references_export_as_what_they_point_at() {
+        let mut v = Vault::new();
+        let root = v.root_id();
+        let mail = v
+            .create_entry(&root, "mail", "ada", "s3cret", "", "")
+            .unwrap();
+        let hex = v
+            .get_entry(&mail)
+            .unwrap()
+            .id()
+            .uuid()
+            .simple()
+            .to_string()
+            .to_uppercase();
+        v.create_entry(&root, "alias", "", &format!("{{REF:P@I:{hex}}}"), "", "")
+            .unwrap();
+        v.create_entry(&root, "broken", "", "{REF:P@T:nobody}", "", "")
+            .unwrap();
+        for format in [ExportFormat::Csv, ExportFormat::Json] {
+            let out = render(&v, format, None).unwrap().text;
+            let out = out.as_str();
+            assert_eq!(out.matches("s3cret").count(), 2, "{out}");
+            assert!(!out.contains(&hex), "{out}");
+            assert!(out.contains("{REF:P@T:nobody}"), "{out}");
+        }
     }
 
     #[test]

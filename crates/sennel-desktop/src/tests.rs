@@ -477,6 +477,90 @@ fn unprotecting_a_field_warns_and_an_unchanged_save_says_so() {
 }
 
 #[test]
+fn a_reference_shows_and_copies_its_target_but_edits_as_stored() {
+    let mut v = vault();
+    let banks = v
+        .groups_in(&v.root_id())
+        .iter()
+        .find(|g| g.name == "Banks")
+        .unwrap()
+        .id();
+    let target = v.entries_in(&banks)[0].id();
+    let hex = v
+        .get_entry(&target)
+        .unwrap()
+        .id()
+        .uuid()
+        .simple()
+        .to_string()
+        .to_uppercase();
+    let user_ref = format!("{{REF:U@I:{hex}}}");
+    v.create_entry(
+        &banks,
+        "alias",
+        &user_ref,
+        &format!("{{REF:P@I:{hex}}}"),
+        "",
+        "",
+    )
+    .unwrap();
+    let desk = open_with(v);
+    let alias = desk
+        .entries(Some(&group(&desk, "Banks")), None)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.title == "alias")
+        .unwrap();
+    assert_eq!(alias.username, "octo", "the list showed the raw reference");
+
+    let view = desk.entry(&alias.id).unwrap();
+    assert_eq!(view.username, "octo");
+    assert_eq!(view.password_length, "hunter2".len());
+    // The edit form gets the stored text, so saving keeps the reference.
+    assert_eq!(view.raw.username, user_ref);
+    assert_eq!(*desk.reveal(&alias.id).unwrap(), "hunter2");
+    assert!(
+        desk.copy(&alias.id, "password")
+            .text
+            .contains("copied password")
+    );
+
+    // A password reference inside a visible field never crosses to the window without a reveal.
+    desk.add_field(
+        &alias.id,
+        "dsn",
+        &format!("pg://octo:{{REF:P@I:{hex}}}@db"),
+        "text",
+    )
+    .unwrap();
+    let dsn = desk
+        .entry(&alias.id)
+        .unwrap()
+        .fields
+        .into_iter()
+        .find(|f| f.name == "dsn")
+        .unwrap();
+    let shown = dsn.shown.unwrap();
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert_eq!(
+        shown,
+        format!("pg://octo:{}@db", sennel_core::vault::MASKED)
+    );
+    assert!(
+        desk.copy_field(&alias.id, "dsn")
+            .text
+            .contains("copied dsn")
+    );
+    desk.remove_field(&alias.id, "dsn", false).unwrap();
+
+    desk.add_field(&alias.id, "login", &user_ref, "text")
+        .unwrap();
+    let field = &desk.entry(&alias.id).unwrap().fields[0];
+    assert_eq!(field.value.as_deref(), Some(user_ref.as_str()));
+    assert_eq!(field.shown.as_deref(), Some("octo"));
+}
+
+#[test]
 fn a_tag_needle_filters_instead_of_ranking() {
     let desk = open_with(vault());
     let banks = group(&desk, "Banks");

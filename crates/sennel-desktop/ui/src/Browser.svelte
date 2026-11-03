@@ -650,7 +650,7 @@
           {:else}
             <button class="field" class:done={fb.copied === key} class:held={holding(key)} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={key} onclick={() => copyField(f.name)}>
               <span class="label" title={f.name}><Icon /><span class="name">{f.name}</span></span>
-              <span class="value lit" class:multi={f.kind === "textarea"} class:num={f.kind === "number"}>{f.value}</span>
+              <span class="value lit" class:multi={f.kind === "textarea"} class:num={f.kind === "number"}>{f.shown ?? f.value}</span>
               <span class="hint">{#if fb.copied === key}<Check />Copied{:else}<Copy />{/if}</span>
             </button>
           {/if}

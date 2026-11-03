@@ -1104,6 +1104,14 @@ impl App {
     entry: the fields screen has its own selection, and a custom field is
     as much a secret as a password, so it goes through the same board and
     the same auto-clear. */
+    /// A field's value with its KeePass field references resolved, for copying or showing.
+    pub fn referenced(&self, raw: &str) -> Result<zeroize::Zeroizing<String>, String> {
+        match self.session.vault() {
+            Some(vault) => crate::vault::resolve_text(vault, raw),
+            None => Ok(zeroize::Zeroizing::new(raw.to_string())),
+        }
+    }
+
     pub fn copy_named(&mut self, label: &str, text: &str) {
         if text.is_empty() {
             self.say(format!("{label} is empty"));
@@ -1128,7 +1136,14 @@ impl App {
             return;
         };
         // Wiped when this frame returns, like every other secret here.
-        let text = zeroize::Zeroizing::new(take(&entry));
+        let raw = zeroize::Zeroizing::new(take(&entry));
+        let text = match self.referenced(&raw) {
+            Ok(text) => text,
+            Err(why) => {
+                self.error(why);
+                return;
+            }
+        };
         if text.is_empty() {
             self.say(format!("no {label} on this entry"));
             return;
@@ -3940,7 +3955,10 @@ impl App {
             None => return,
         };
         match what {
-            Some((name, value)) => self.copy_named(&name, &value),
+            Some((name, value)) => match self.referenced(&value) {
+                Ok(text) => self.copy_named(&name, &text),
+                Err(why) => self.error(why),
+            },
             // A file is bytes; `s` writes it out, the clipboard is for text.
             None => self.say("that is a file  ·  s writes it out"),
         }
@@ -4708,6 +4726,43 @@ pub mod tests {
         app.step_group(true);
         app.copy_password();
         assert!(app.stage.contains("no password"), "{}", app.stage);
+    }
+
+    // A broken reference is refused before the clipboard, so its raw `{REF:...}` is never copied.
+    #[test]
+    fn a_broken_reference_is_not_copied_and_a_working_one_resolves() {
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        let mail = vault
+            .create_entry(&banks, "mail", "ada", "s3cret", "", "")
+            .unwrap();
+        let hex = vault
+            .get_entry(&mail)
+            .unwrap()
+            .id()
+            .uuid()
+            .simple()
+            .to_string();
+        vault
+            .create_entry(&banks, "broken", "", "{REF:P@T:nobody}", "", "")
+            .unwrap();
+        let mut app = App::new();
+        app.open_vault(vault);
+        assert_eq!(
+            *app.referenced(&format!("{{REF:P@I:{hex}}}")).unwrap(),
+            "s3cret"
+        );
+        app.step_group(true);
+        app.search = Some("broken".into());
+        app.entry_cursor = app.session.vault().and_then(|v| {
+            v.entry_refs()
+                .iter()
+                .find(|e| e.title() == "broken")
+                .map(|e| e.id())
+        });
+        app.copy_password();
+        assert!(app.stage.contains("matches no entry"), "{}", app.stage);
     }
 
     /* Tests never touch the OS clipboard, so with no board wired the copy

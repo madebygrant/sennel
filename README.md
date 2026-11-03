@@ -74,8 +74,9 @@ both at once if you like. [The desktop app](docs/desktop.md)
 
 ### Works with what you have
 
-- **KeePassXC opens what Sennel writes, and the other way round.** KDBX 4 throughout. Older KDBX 3.1
-  vaults open read-only and convert in one command. [Older files](docs/kdbx3.md)
+- **KeePassXC opens what Sennel writes, and the other way round.** KDBX 4 throughout, with KeePass
+  field references resolved. Older KDBX 3.1 vaults open read-only and convert in one command.
+  [Field references](docs/vaults.md#field-references) · [Older files](docs/kdbx3.md)
 - **Bring your passwords along.** Import from KeePassXC, Bitwarden or 1Password, and export to CSV
   or JSON whenever you want to leave. [Importing](docs/import.md) · [Exporting](docs/export.md)
 - **Hardware keys and fingerprints.** YubiKey challenge-response slots and key files, plus Touch ID

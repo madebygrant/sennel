@@ -355,6 +355,194 @@ pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
     fields
 }
 
+/// Whether a field holds a KeePass field reference, such as `{REF:P@I:<uuid>}`. Case-insensitive,
+/// like KeePass's own placeholders.
+pub fn has_reference(text: &str) -> bool {
+    find_ref(text).is_some()
+}
+
+// Where the next `{REF:` starts, in any case, without copying the text: this runs on every list
+// row and every redraw.
+fn find_ref(text: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(5)
+        .position(|w| w.eq_ignore_ascii_case(b"{REF:"))
+}
+
+// KeePass's own limit on nested references is not documented; ten is deeper than any real chain.
+const REF_DEPTH: usize = 10;
+// Depth alone does not bound the work: a field with several references, each pointing at another
+// such field, multiplies at every level. One budget for the whole resolution keeps a crafted vault
+// from freezing a screen that resolves on every redraw.
+const REF_BUDGET: usize = 64;
+
+/// What a password reference becomes in a view.
+pub const MASKED: &str = "••••••";
+
+struct Refs<'v> {
+    vault: &'v Vault,
+    budget: usize,
+    // For views: a reference to a password, at any depth, shows as `MASKED`, so a password pulled
+    // into a visible field such as a url is not shown or sent anywhere without a reveal.
+    masked: bool,
+}
+
+/// A field's value with every field reference replaced by what it points at. An error, never the
+/// raw `{REF:...}` text, when one cannot be resolved, so a caller cannot copy it as the value.
+pub fn resolved(
+    vault: &Vault,
+    entry: &EntryRef<'_>,
+    field: &str,
+) -> Result<Zeroizing<String>, String> {
+    let raw = entry
+        .fields
+        .get(field)
+        .map(|v| v.get().as_str())
+        .unwrap_or("");
+    resolve_text(vault, raw)
+}
+
+/// Text with its field references replaced, for copying or handing out. KeePass takes the first
+/// of several matches; Sennel refuses instead, the same rule `get` follows, so a guess never picks
+/// a password.
+pub fn resolve_text(vault: &Vault, text: &str) -> Result<Zeroizing<String>, String> {
+    Refs::new(vault, false).text(text, 0)
+}
+
+/// `resolve_text` for showing: a password reference reads as `MASKED`. Copying and reveals use
+/// `resolve_text`, since those ask for the value.
+pub fn resolve_shown(vault: &Vault, text: &str) -> Result<Zeroizing<String>, String> {
+    Refs::new(vault, true).text(text, 0)
+}
+
+impl<'v> Refs<'v> {
+    fn new(vault: &'v Vault, masked: bool) -> Self {
+        Refs {
+            vault,
+            budget: REF_BUDGET,
+            masked,
+        }
+    }
+
+    fn text(&mut self, text: &str, depth: usize) -> Result<Zeroizing<String>, String> {
+        if !has_reference(text) {
+            return Ok(Zeroizing::new(text.to_string()));
+        }
+        if depth >= REF_DEPTH {
+            return Err("a field reference points back at itself or nests too deep".into());
+        }
+        let mut out = Zeroizing::new(String::with_capacity(text.len()));
+        let mut rest = text;
+        while let Some(start) = find_ref(rest) {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 5..];
+            let Some(end) = after.find('}') else {
+                return Err("a field reference has no closing }".into());
+            };
+            let value = self.one(&after[..end], depth)?;
+            out.push_str(&value);
+            rest = &after[end + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    // One `<Wanted>@<SearchIn>:<Text>` body, as KeePass documents it.
+    fn one(&mut self, body: &str, depth: usize) -> Result<Zeroizing<String>, String> {
+        if self.budget == 0 {
+            return Err("too many field references to follow".into());
+        }
+        self.budget -= 1;
+        let vault = self.vault;
+        let unreadable = || format!("{{REF:{body}}} is not a field reference Sennel can read");
+        let mut chars = body.chars();
+        let (Some(wanted), Some('@'), Some(search_in), Some(':')) =
+            (chars.next(), chars.next(), chars.next(), chars.next())
+        else {
+            return Err(unreadable());
+        };
+        let needle = chars.as_str();
+        let code = |c: char| match c.to_ascii_uppercase() {
+            'T' => Some(TITLE),
+            'U' => Some(USERNAME),
+            'P' => Some(PASSWORD),
+            'A' => Some(URL),
+            'N' => Some(NOTES),
+            _ => None,
+        };
+        if code(wanted).is_none() && !wanted.eq_ignore_ascii_case(&'I') {
+            return Err(unreadable());
+        }
+        let target: EntryId = match search_in.to_ascii_uppercase() {
+            // By ID, recycle bin included: it names one entry exactly, wherever it now sits.
+            'I' => {
+                let missing =
+                    || format!("{{REF:{body}}} points at an entry that is not in this vault");
+                let wanted_id = (needle.len() == 32
+                    && needle.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| u128::from_str_radix(needle, 16).ok())
+                .flatten()
+                .ok_or_else(missing)?;
+                vault
+                    .db
+                    .iter_all_entries()
+                    .find(|e| e.id().uuid().as_u128() == wanted_id)
+                    .map(|e| e.id())
+                    .ok_or_else(missing)?
+            }
+            other => {
+                if code(other).is_none() && other != 'O' {
+                    return Err(unreadable());
+                }
+                let lower = needle.to_lowercase();
+                let matches = |e: &EntryRef<'_>| match code(other) {
+                    Some(name) => e
+                        .fields
+                        .get(name)
+                        .is_some_and(|v| v.get().to_lowercase().contains(&lower)),
+                    None => e
+                        .fields
+                        .iter()
+                        .filter(|(name, _)| !STANDARD.contains(&name.as_str()))
+                        .any(|(_, v)| v.get().to_lowercase().contains(&lower)),
+                };
+                let hits: Vec<EntryId> = vault
+                    .entry_refs()
+                    .iter()
+                    .filter(|e| matches(e))
+                    .map(|e| e.id())
+                    .collect();
+                match hits.as_slice() {
+                    [one] => *one,
+                    [] => return Err(format!("{{REF:{body}}} matches no entry")),
+                    many => {
+                        return Err(format!(
+                            "{{REF:{body}}} matches {} entries · KeePassXC can rewrite it to name one by ID",
+                            many.len()
+                        ));
+                    }
+                }
+            }
+        };
+        let entry = vault.get_entry(&target).ok_or_else(unreadable)?;
+        match wanted.to_ascii_uppercase() {
+            'I' => Ok(Zeroizing::new(
+                entry.id().uuid().simple().to_string().to_uppercase(),
+            )),
+            'P' if self.masked => Ok(Zeroizing::new(MASKED.to_string())),
+            w => {
+                let name = code(w).ok_or_else(unreadable)?;
+                let raw = entry
+                    .fields
+                    .get(name)
+                    .map(|v| v.get().as_str())
+                    .unwrap_or("");
+                self.text(raw, depth + 1)
+            }
+        }
+    }
+}
+
 /// How a custom field is shown and edited. KDBX has no field types, so a password is the
 /// format's own protected flag and the rest live in the entry's custom data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2276,9 +2464,11 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     /* Positions, not passwords: the plaintext stays where it already is, on
     the entries, and a bucket is a handful of indices to compare against. */
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    // A reference shares its target's password on purpose and is not a password of its own, so
+    // it is neither reuse nor strength to judge. The target is audited in its own right.
     for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
-        if !password.is_empty() {
+        if !password.is_empty() && !has_reference(password) {
             buckets.entry(digest(password)).or_default().push(at);
         }
     }
@@ -2286,6 +2476,9 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     let now = chrono::Utc::now().naive_utc();
     for (at, entry) in entries.iter().enumerate() {
         let password = entry.password();
+        if has_reference(password) {
+            continue;
+        }
         let shared = buckets.get(&digest(password)).map_or(0, |bucket| {
             bucket
                 .iter()
@@ -4063,6 +4256,204 @@ mod tests {
         assert!(v.find_group("Twice").unwrap_err().contains("more than one"));
         assert!(v.find_group("").is_err());
         assert!(v.find_group(&root_name).is_err(), "the root is not a scope");
+    }
+
+    // The shape KeePassXC writes: `{REF:P@I:<uuid>}`, uppercase hex, no dashes.
+    fn by_id(field: char, v: &Vault, id: &EntryId) -> String {
+        let hex = v
+            .get_entry(id)
+            .unwrap()
+            .id()
+            .uuid()
+            .simple()
+            .to_string()
+            .to_uppercase();
+        format!("{{REF:{field}@I:{hex}}}")
+    }
+
+    #[test]
+    fn a_reference_by_id_reads_the_other_entry() {
+        use crate::vault::{PASSWORD, USERNAME, resolved};
+        let mut v = vault();
+        let root = v.root_id();
+        let main = v
+            .create_entry(&root, "mail", "ada", "s3cret", "", "")
+            .unwrap();
+        let alias = v
+            .create_entry(
+                &root,
+                "mail alias",
+                &by_id('U', &v, &main),
+                &by_id('P', &v, &main),
+                "",
+                "",
+            )
+            .unwrap();
+        let e = v.get_entry(&alias).unwrap();
+        assert_eq!(*resolved(&v, &e, PASSWORD).unwrap(), "s3cret");
+        assert_eq!(*resolved(&v, &e, USERNAME).unwrap(), "ada");
+        // Lower case works too, as KeePass's placeholders are case-insensitive.
+        let lower = by_id('p', &v, &main).to_lowercase();
+        assert_eq!(*crate::vault::resolve_text(&v, &lower).unwrap(), "s3cret");
+    }
+
+    #[test]
+    fn a_reference_can_sit_inside_text_and_point_at_another_reference() {
+        use crate::vault::{PASSWORD, URL, resolved};
+        let mut v = vault();
+        let root = v.root_id();
+        let base = v
+            .create_entry(&root, "Example Website", "ada", "pw", "", "")
+            .unwrap();
+        let middle = v
+            .create_entry(
+                &root,
+                "middle",
+                &by_id('U', &v, &base),
+                &by_id('P', &v, &base),
+                "",
+                "",
+            )
+            .unwrap();
+        let top = v
+            .create_entry(
+                &root,
+                "top",
+                "",
+                &by_id('P', &v, &middle),
+                "https://forum.example.com/?user={REF:U@T:Example Website}&x=1",
+                "",
+            )
+            .unwrap();
+        let e = v.get_entry(&top).unwrap();
+        assert_eq!(*resolved(&v, &e, PASSWORD).unwrap(), "pw");
+        assert_eq!(
+            *resolved(&v, &e, URL).unwrap(),
+            "https://forum.example.com/?user=ada&x=1"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_cannot_be_resolved_is_an_error_not_its_raw_text() {
+        use crate::vault::{PASSWORD, resolve_text, resolved};
+        let mut v = vault();
+        let root = v.root_id();
+        v.create_entry(&root, "mail one", "", "a", "", "").unwrap();
+        v.create_entry(&root, "mail two", "", "b", "", "").unwrap();
+        let looped = v.create_entry(&root, "loop", "", "", "", "").unwrap();
+        let self_ref = by_id('P', &v, &looped);
+        v.update_entry(&looped, "loop", "", Some(&self_ref), "", "")
+            .unwrap();
+
+        let refused = [
+            ("{REF:P@T:mail}", "matches 2 entries"),
+            ("{REF:P@T:nothing like it}", "matches no entry"),
+            (
+                "{REF:P@I:00000000000000000000000000000000}",
+                "not in this vault",
+            ),
+            ("{REF:Q@T:mail}", "not a field reference Sennel can read"),
+            ("{REF:P@I:abc", "no closing }"),
+        ];
+        for (text, said) in refused {
+            let why = resolve_text(&v, text).unwrap_err();
+            assert!(why.contains(said), "{text}: {why}");
+        }
+        let e = v.get_entry(&looped).unwrap();
+        assert!(
+            resolved(&v, &e, PASSWORD)
+                .unwrap_err()
+                .contains("points back at itself")
+        );
+        // Text with no reference passes through untouched.
+        assert_eq!(
+            *resolve_text(&v, "{not a ref} plain").unwrap(),
+            "{not a ref} plain"
+        );
+    }
+
+    #[test]
+    fn a_reference_by_id_survives_the_recycle_bin_and_others_search_live_entries() {
+        use crate::vault::{FieldKind, resolve_text};
+        let mut v = vault();
+        let root = v.root_id();
+        let gone = v
+            .create_entry(&root, "old db", "", "binned-pw", "", "")
+            .unwrap();
+        let by_hex = by_id('P', &v, &gone);
+        v.recycle_entry(&gone).unwrap();
+        assert_eq!(*resolve_text(&v, &by_hex).unwrap(), "binned-pw");
+        assert!(
+            resolve_text(&v, "{REF:P@T:old db}")
+                .unwrap_err()
+                .contains("matches no entry")
+        );
+
+        // `O` searches custom fields, and `I` as the wanted field gives the ID itself.
+        let keyed = v.create_entry(&root, "stripe", "", "", "", "").unwrap();
+        v.add_typed_field(&keyed, "account", "acct_42", FieldKind::Text)
+            .unwrap();
+        let hex = v
+            .get_entry(&keyed)
+            .unwrap()
+            .id()
+            .uuid()
+            .simple()
+            .to_string()
+            .to_uppercase();
+        assert_eq!(*resolve_text(&v, "{REF:I@O:acct_42}").unwrap(), hex);
+    }
+
+    // A password pulled into a visible field shows as dots in a view, at any depth, and in full
+    // only when asked for.
+    #[test]
+    fn a_view_masks_a_password_reference_and_a_copy_does_not() {
+        use crate::vault::{MASKED, resolve_shown, resolve_text};
+        let mut v = vault();
+        let root = v.root_id();
+        let bank = v
+            .create_entry(&root, "bank", "ada", "s3cret", "", "")
+            .unwrap();
+        let url = format!("https://ada:{}@bank.example", by_id('P', &v, &bank));
+        assert_eq!(
+            *resolve_text(&v, &url).unwrap(),
+            "https://ada:s3cret@bank.example"
+        );
+        assert_eq!(
+            *resolve_shown(&v, &url).unwrap(),
+            format!("https://ada:{MASKED}@bank.example")
+        );
+        // Through a username that itself borrows the password.
+        let middle = v
+            .create_entry(&root, "middle", &by_id('P', &v, &bank), "", "", "")
+            .unwrap();
+        let shown = resolve_shown(&v, &by_id('U', &v, &middle)).unwrap();
+        assert_eq!(*shown, MASKED);
+        // Usernames are not secret, so they still resolve in a view.
+        assert_eq!(*resolve_shown(&v, &by_id('U', &v, &bank)).unwrap(), "ada");
+    }
+
+    // Depth bounds a chain; the budget bounds a field that fans out at every level.
+    #[test]
+    fn a_reference_that_fans_out_runs_out_of_budget_instead_of_hanging() {
+        use crate::vault::resolve_text;
+        let mut v = vault();
+        let root = v.root_id();
+        let mut levels = vec![v.create_entry(&root, "leaf", "", "x", "", "").unwrap()];
+        for level in 0..4 {
+            let fan = by_id('P', &v, levels.last().unwrap()).repeat(10);
+            let id = v
+                .create_entry(&root, &format!("level {level}"), "", &fan, "", "")
+                .unwrap();
+            levels.push(id);
+        }
+        let started = std::time::Instant::now();
+        let why = resolve_text(&v, &by_id('P', &v, &levels[4])).unwrap_err();
+        assert!(why.contains("too many field references"), "{why}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // One level of ten fits the budget.
+        let one = resolve_text(&v, &by_id('P', &v, &levels[1])).unwrap();
+        assert_eq!(*one, "x".repeat(10));
     }
 
     #[test]

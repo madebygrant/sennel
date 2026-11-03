@@ -758,6 +758,25 @@ even the length is something the screen may not reveal. */
 move — url, notes, the code and the expiry are each optional — so the
 layout is the only thing that can know, and a click recomputing it would be
 a second copy of this function's decisions. */
+// A field as the detail pane shows it: references resolved with any password masked, or the raw
+// `{REF:...}` when one is broken, so the pane shows what is stored instead of hiding the problem.
+fn shown(app: &App, raw: &str) -> String {
+    let resolved = match app.session.vault() {
+        Some(vault) => crate::vault::resolve_shown(vault, raw),
+        None => Ok(zeroize::Zeroizing::new(raw.to_string())),
+    };
+    resolved
+        .map(|text| text.to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+// A secret the user asked to see, `*` on the password or a protected field: resolved in full.
+fn revealed(app: &App, raw: &str) -> String {
+    app.referenced(raw)
+        .map(|text| text.to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let block = Block::new()
@@ -815,7 +834,10 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     copy_rows.push((lines.len(), app::CopyRow::Username));
     lines.push(copyable(
         "user",
-        truncate(entry.username(), width.saturating_sub(LABEL + 1)),
+        truncate(
+            &shown(app, entry.username()),
+            width.saturating_sub(LABEL + 1),
+        ),
         cream,
         app::CopyRow::Username,
     ));
@@ -823,7 +845,10 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     lines.push(copyable(
         "pass",
         if app.show_password {
-            truncate(entry.password(), width.saturating_sub(LABEL + 1))
+            truncate(
+                &revealed(app, entry.password()),
+                width.saturating_sub(LABEL + 1),
+            )
         } else {
             "••••••••".to_string()
         },
@@ -834,14 +859,15 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
             "url",
-            truncate(entry.url(), width.saturating_sub(LABEL + 1)),
+            truncate(&shown(app, entry.url()), width.saturating_sub(LABEL + 1)),
             faint,
             app::CopyRow::Url,
         ));
     }
     /* First line only: the row is one row, and a note that wraps the pane is
     what Enter's popup is for. */
-    let notes = entry.notes().lines().next().unwrap_or("");
+    let notes = shown(app, entry.notes());
+    let notes = notes.lines().next().unwrap_or("");
     if !notes.is_empty() {
         lines.push(row(
             "notes",
@@ -991,7 +1017,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     copy_rows.push((lines.len(), app::CopyRow::Username));
     lines.push(copyable(
         "user",
-        truncate(entry.username(), value),
+        truncate(&shown(app, entry.username()), value),
         cream,
         app::CopyRow::Username,
     ));
@@ -999,7 +1025,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     lines.push(copyable(
         "password",
         if app.show_password {
-            truncate(entry.password(), value)
+            truncate(&revealed(app, entry.password()), value)
         } else {
             "••••••••".to_string()
         },
@@ -1010,14 +1036,15 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
             "url",
-            truncate(entry.url(), value),
+            truncate(&shown(app, entry.url()), value),
             faint,
             app::CopyRow::Url,
         ));
     }
     /* Notes get a block of their own: the pane's one-line form is most of
     why this popup exists. */
-    let notes: Vec<&str> = entry.notes().lines().take(NOTE_LINES).collect();
+    let notes = shown(app, entry.notes());
+    let notes: Vec<&str> = notes.lines().take(NOTE_LINES).collect();
     if !notes.is_empty() {
         lines.push(Line::default());
         for (n, note) in notes.iter().enumerate() {
@@ -2284,10 +2311,14 @@ fn draw_fields(frame: &mut Frame, app: &App) {
                 /* Masked to its own length, and only while it is a secret:
                 the same rule the password row follows, so `*` means one
                 thing everywhere. */
+                let resolved = match secret {
+                    true => revealed(app, value),
+                    false => shown(app, value),
+                };
                 let shown = if *secret && !fields.reveal {
-                    "•".repeat(value.chars().count().min(24))
+                    "•".repeat(resolved.chars().count().min(24))
                 } else {
-                    value.clone()
+                    resolved
                 };
                 (name.clone(), shown, if *secret { p.muted } else { p.text })
             }

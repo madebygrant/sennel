@@ -154,6 +154,16 @@ pub struct EntryView {
     /// Custom string fields, for the detail panel. Attachments stay behind the paperclip.
     pub fields: Vec<FieldRow>,
     pub recycled: bool,
+    /// The stored text behind the shown fields above, for the edit form. Editing a resolved value
+    /// and saving it would replace a field reference with a copy of what it pointed at.
+    pub raw: RawFields,
+}
+
+#[derive(Serialize, Debug)]
+pub struct RawFields {
+    pub username: String,
+    pub url: String,
+    pub notes: String,
 }
 
 // The timing of an entry's codes and never a code, so the window can count down without one.
@@ -180,8 +190,11 @@ pub struct FieldRow {
     pub secret: bool,
     /// text, textarea, number or password; file for an attachment.
     pub kind: &'static str,
-    /// Withheld when secret: a protected field crosses to the webview only on reveal.
+    /// Withheld when secret: a protected field crosses to the webview only on reveal. Stored text,
+    /// for editing.
     pub value: Option<String>,
+    /// `value` with its field references resolved, for showing. Withheld when `value` is.
+    pub shown: Option<String>,
     pub bytes: Option<usize>,
 }
 
@@ -655,8 +668,8 @@ impl Desk {
                 vault.get_entry(id).map(|e| EntryRow {
                     id: id.to_string(),
                     title: e.title().to_string(),
-                    username: e.username().to_string(),
-                    url: e.url().to_string(),
+                    username: shown(vault, e.username()),
+                    url: shown(vault, e.url()),
                 })
             })
             .collect())
@@ -678,26 +691,34 @@ impl Desk {
                     .join(" / ")
             })
             .unwrap_or_default();
-        let rows = field_rows(&e);
+        let rows = field_rows(vault, &e);
+        // Resolved in full for its length only; the text itself never leaves here.
+        let password = sennel_core::vault::resolve_text(vault, e.password())
+            .unwrap_or_else(|_| Zeroizing::new(e.password().to_string()));
         Ok(EntryView {
             id: id.to_string(),
             group,
             title: e.title().to_string(),
-            username: e.username().to_string(),
-            url: e.url().to_string(),
-            notes: e.notes().to_string(),
+            username: shown(vault, e.username()),
+            url: shown(vault, e.url()),
+            notes: shown(vault, e.notes()),
             tags: e.tags.join(", "),
             expires: sennel_core::vault::expires_at(&e)
                 .map(|at| at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default(),
-            has_password: !e.password().is_empty(),
-            password_length: e.password().chars().count(),
+            has_password: !password.is_empty(),
+            password_length: password.chars().count(),
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
             otp: sennel_core::vault::totp_shape(&e)
                 .map(|(period, digits)| OtpShape { period, digits }),
             extras: rows.len(),
             fields: rows.into_iter().filter(|r| !r.file).collect(),
             recycled: vault.is_recycled(&id),
+            raw: RawFields {
+                username: e.username().to_string(),
+                url: e.url().to_string(),
+                notes: e.notes().to_string(),
+            },
         })
     }
 
@@ -708,7 +729,7 @@ impl Desk {
         let s = self.session();
         let vault = s.vault().ok_or("locked")?;
         let e = vault.get_entry(&id).ok_or("that entry is gone")?;
-        Ok(Zeroizing::new(e.password().to_string()))
+        sennel_core::vault::resolved(vault, &e, sennel_core::vault::PASSWORD)
     }
 
     /// One of the fixed fields: password, username, url or otp.
@@ -762,10 +783,11 @@ impl Desk {
                 })
                 .ok_or_else(|| format!("no field {name}"))?,
         };
+        let text = sennel_core::vault::resolve_text(vault, &Zeroizing::new(text))?;
         if text.is_empty() {
             return Err(format!("no {label} on this entry"));
         }
-        Ok(Zeroizing::new(text))
+        Ok(text)
     }
 
     fn to_board(&self, label: &str, text: &str) -> Note {
@@ -1095,7 +1117,7 @@ impl Desk {
         let s = self.session();
         let vault = s.vault().ok_or("locked")?;
         let e = vault.get_entry(&id).ok_or("that entry is gone")?;
-        Ok(field_rows(&e))
+        Ok(field_rows(vault, &e))
     }
 
     /// A password-type custom field, shown because the user asked, like `reveal`.
@@ -1365,8 +1387,17 @@ fn resolve_note(e: Resolve) -> Note {
     }
 }
 
+// A field as a view shows it: references resolved with any password masked, since a protected
+// value crosses to the window only on reveal. The stored `{REF:...}` when one is broken, so the
+// window shows what is really there instead of hiding the problem.
+fn shown(vault: &sennel_core::vault::Vault, raw: &str) -> String {
+    sennel_core::vault::resolve_shown(vault, raw)
+        .map(|text| text.to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 // Protected values stay out: they cross to the webview only through `reveal_field`.
-fn field_rows(e: &keepass::db::EntryRef<'_>) -> Vec<FieldRow> {
+fn field_rows(vault: &sennel_core::vault::Vault, e: &keepass::db::EntryRef<'_>) -> Vec<FieldRow> {
     sennel_core::vault::extra_rows(e)
         .iter()
         .map(|row| match row {
@@ -1380,6 +1411,7 @@ fn field_rows(e: &keepass::db::EntryRef<'_>) -> Vec<FieldRow> {
                 secret: *secret,
                 kind: sennel_core::vault::field_kind(e, name).as_str(),
                 value: (!secret).then(|| value.clone()),
+                shown: (!secret).then(|| shown(vault, value)),
                 bytes: None,
             },
             Extra::File { name, bytes } => FieldRow {
@@ -1388,6 +1420,7 @@ fn field_rows(e: &keepass::db::EntryRef<'_>) -> Vec<FieldRow> {
                 secret: false,
                 kind: "file",
                 value: None,
+                shown: None,
                 bytes: Some(*bytes),
             },
         })

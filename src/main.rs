@@ -574,7 +574,8 @@ fn audit(cfg: &Config, pwned: bool) -> Result<()> {
     let mut breached = 0usize;
     for entry in vault.entry_refs() {
         let secret = entry.password();
-        if secret.is_empty() {
+        // A reference shares its target's password, and the target is checked in its own right.
+        if secret.is_empty() || vault::has_reference(secret) {
             continue;
         }
         let (prefix, suffix) = pwned::split_hash(secret);
@@ -840,10 +841,13 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     /* Wiped when this returns: the copy path below holds it across a
     clipboard-timeout sleep, and a `get -p` that leaves the password in a
     freed allocation undoes the point of every zeroize above it. */
+    let referenced = |name: &str| {
+        vault::resolved(&vault, &entry, name).map_err(|why| anyhow::anyhow!("{title}: {why}"))
+    };
     let value = zeroize::Zeroizing::new(match field {
-        Field::User => entry.username().to_string(),
-        Field::Password => entry.password().to_string(),
-        Field::Url => entry.url().to_string(),
+        Field::User => referenced(vault::USERNAME)?.to_string(),
+        Field::Password => referenced(vault::PASSWORD)?.to_string(),
+        Field::Url => referenced(vault::URL)?.to_string(),
         /* The code, never the seed: the same rule the TUI's `t` follows, and
         the reason `get` has no flag that would hand over the seed. */
         Field::Otp => match vault::totp_now(&entry) {
@@ -1100,17 +1104,20 @@ fn run_program(
         };
         let entry = vault.get_entry(&id).expect("resolve returned a live id");
         let title = printable(entry.title());
+        let referenced = |name: &str| {
+            vault::resolved(&vault, &entry, name).map_err(|why| anyhow::anyhow!("{title}: {why}"))
+        };
         let value = zeroize::Zeroizing::new(match &r.field {
-            RunField::Fixed(Field::User) => entry.username().to_string(),
-            RunField::Fixed(Field::Password) => entry.password().to_string(),
-            RunField::Fixed(Field::Url) => entry.url().to_string(),
+            RunField::Fixed(Field::User) => referenced(vault::USERNAME)?.to_string(),
+            RunField::Fixed(Field::Password) => referenced(vault::PASSWORD)?.to_string(),
+            RunField::Fixed(Field::Url) => referenced(vault::URL)?.to_string(),
             RunField::Fixed(Field::Otp) => match vault::totp_now(&entry) {
                 Some((code, _)) => code,
                 None => anyhow::bail!("{title} has no one-time code"),
             },
-            RunField::Custom(name) => match entry.fields.get(name.as_str()) {
-                Some(value) => value.get().to_string(),
-                None => anyhow::bail!("{title} has no field {name}"),
+            RunField::Custom(name) => match entry.fields.contains_key(name.as_str()) {
+                true => referenced(name)?.to_string(),
+                false => anyhow::bail!("{title} has no field {name}"),
             },
         });
         if value.is_empty() {

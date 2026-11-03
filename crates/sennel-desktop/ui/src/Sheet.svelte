@@ -161,7 +161,7 @@
           <div class="line" use:fb.spot={r.name}>
             <span>
               <strong>{r.name}</strong>
-              {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono lit">{r.secret ? "••••••" : r.value}</span>{/if}
+              {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono lit">{r.secret ? "••••••" : (r.shown ?? r.value)}</span>{/if}
             </span>
             <span class="actions">
               {#if r.file}
