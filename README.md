@@ -153,6 +153,7 @@ Sennel remembers the vault, so next time it is just `sennel`. The keys for day o
 | [Importing](docs/import.md) · [Exporting](docs/export.md) | moving between password managers              |
 | [Older KDBX files](docs/kdbx3.md)             | KDBX 3.1 and `sennel convert`                               |
 | [sennel get](docs/get.md)                     | secrets from the command line                               |
+| [The system keychain](docs/keychain.md)       | unlocking scripts without typing the master password        |
 | [Themes](docs/themes.md)                      | six palettes, and how their contrast is measured            |
 | [Configuration](docs/configuration.md)        | every setting in the config file                            |
 | [Security](docs/security.md)                  | what is wiped, when, and why                                |

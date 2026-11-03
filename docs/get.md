@@ -43,6 +43,8 @@ From a terminal, `get` prompts. From a pipe it reads the first line of stdin:
 pass sennel-master | sennel get github --stdout
 ```
 
+The system keychain can hold it. [Unlocking from the system keychain](keychain.md).
+
 ## Exit codes
 
 | Code | Meaning                               |
