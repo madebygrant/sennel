@@ -23,13 +23,20 @@ fn run(args: &[&str]) -> (String, String, i32) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("could not run sennel");
-    // The master password arrives down the pipe, which is how a script gives it.
-    child
+    // The master password arrives down the pipe, which is how a script gives it. A command that
+    // needs no vault, like `gen`, can exit before reading it, so a broken pipe is not a failure.
+    let wrote = child
         .stdin
         .as_mut()
         .expect("no stdin")
-        .write_all(PASSWORD.as_bytes())
-        .expect("could not write the password");
+        .write_all(PASSWORD.as_bytes());
+    if let Err(e) = wrote {
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "could not write the password: {e}"
+        );
+    }
     let out = child.wait_with_output().expect("sennel did not finish");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
