@@ -31,6 +31,13 @@ second copy re-arms the timer instead of being wiped early by the first one. Qui
 immediately, because the timer is a thread inside the process and cannot outlive it. The status bar
 counts the wipe down. `clipboard_timeout = 0` means leave it there, on the way out too.
 
+**Kept out of clipboard history.** The wipe clears the clipboard, not a clipboard manager's copy of
+it, so every copy carries the marker those managers skip. On macOS that is
+`org.nspasteboard.ConcealedType`, the convention described at nspasteboard.org. On Linux it is
+`x-kde-passwordManagerHint`, on X11 and Wayland. On Windows it is the
+flag that keeps a copy out of both clipboard history and cloud sync. A manager that ignores its
+platform's marker still keeps the copy, and Sennel cannot tell.
+
 **Changing the master password.** `^p` re-keys the vault in place. The database is written again
 under the new password before the session swaps to it, so a refused or failed write leaves a file
 that still opens with the password you already had. The write is guarded like any other, so it

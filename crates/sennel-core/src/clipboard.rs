@@ -84,8 +84,8 @@ impl Board {
         let mut board = Clipboard::new().map_err(|e| {
             format!("no clipboard to copy to · {e} · needs wl-clipboard on Wayland, xclip on X11")
         })?;
-        board
-            .set_text(text.to_owned())
+        concealed(board.set())
+            .text(text.to_owned())
             .map_err(|e| format!("clipboard refused the copy · {e}"))?;
         let generation = self.claim();
         if let Some(wait) = self.timeout {
@@ -124,6 +124,42 @@ impl Board {
         }
         Ok(())
     }
+}
+
+// The 30-second wipe clears the clipboard, not a clipboard manager's history, so every copy is
+// marked for those managers to skip: macOS's ConcealedType, KDE's password hint (read on X11 and
+// Wayland), and on Windows a flag that keeps it out of both local history and cloud sync.
+#[cfg(target_os = "macos")]
+fn concealed(set: arboard::Set<'_>) -> arboard::Set<'_> {
+    use arboard::SetExtApple;
+    set.exclude_from_history()
+}
+
+#[cfg(windows)]
+fn concealed(set: arboard::Set<'_>) -> arboard::Set<'_> {
+    use arboard::SetExtWindows;
+    set.exclude_from_monitoring()
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+fn concealed(set: arboard::Set<'_>) -> arboard::Set<'_> {
+    use arboard::SetExtLinux;
+    set.exclude_from_history()
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    windows,
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+    )
+)))]
+fn concealed(set: arboard::Set<'_>) -> arboard::Set<'_> {
+    set
 }
 
 #[cfg(test)]
