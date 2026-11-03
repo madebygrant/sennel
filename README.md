@@ -43,7 +43,7 @@ both at once if you like. [The desktop app](docs/desktop.md)
 
 - **One key per field.** `y` `p` `U` `t` copy the username, password, website or one-time code.
 - **A clipboard with a timer.** Sennel wipes every copy after 30 seconds and shows the countdown.
-  Quitting wipes it too.
+  Quitting wipes it too, and clipboard managers are told not to keep a copy in their history.
 - **Two-factor codes built in.** `t` copies the current code, never the seed behind it. The desktop
   app reads a code straight from a screenshot of the site's QR code. [One-time codes](docs/one-time-codes.md)
 - **A generator on call.** `P` makes a password, passphrase or PIN and shows its strength in bits.
@@ -98,6 +98,24 @@ sennel run -e PGPASSWORD=prod -- psql   # a program with a secret in its environ
 `get` exits with codes a script can branch on, and `--stdout` pipes the value instead of copying it.
 `run` hands secrets to a program without the clipboard or a shell variable.
 [sennel get](docs/get.md) · [sennel run](docs/run.md) · [Reference for AI agents](docs/agents.md)
+
+### Secrets for your projects
+
+A project names the entries it needs in a file it can commit, and never keeps a `.env` of real
+secrets that an AI agent or a stray commit could read:
+
+```sh
+# sennel.env: names entries, holds no secrets
+DATABASE_URL=dev db::url
+STRIPE_SECRET_KEY=stripe::api key
+```
+
+```sh
+sennel run --group Projects/myapp --env-file sennel.env -- npm run dev
+```
+
+`--group` looks entries up in that project's group only, so a short name like `stripe` finds this
+project's key and not another's. [A file per project](docs/run.md#a-file-per-project)
 
 ## Install
 

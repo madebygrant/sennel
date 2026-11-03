@@ -27,9 +27,53 @@ one, such as `username`, is reached by the fixed meaning, not the custom one.
 
 The needle works as it does for [sennel get](get.md): an exact title wins, then a single fuzzy match.
 
+## A file per project
+
+Put a project's references in a file it can commit, and point `run` at it:
+
+```sh
+# sennel.env: names entries, holds no secrets
+DATABASE_URL=dev db::url
+STRIPE_SECRET_KEY=stripe::api key
+export SESSION_SECRET="session secret"
+```
+
+```sh
+sennel run --group Projects/myapp --env-file sennel.env -- npm run dev
+```
+
+- Each line is a `VAR=NEEDLE[::FIELD]` reference, the same as `-e`. Blank lines and lines starting
+  with `#` are skipped. A leading `export ` and quotes around the right side are allowed.
+- `-e` on the command line replaces the same variable from a file, so one run can point a
+  variable at a different entry. The same variable twice in the files, or twice on the command
+  line, is refused.
+- `--env-file` can be given more than once. A mistake in a file is reported with its line number.
+- The file is safe to commit and safe for an AI agent to read only while it names entries and holds
+  no values. Do not point `--env-file` at a real `.env` full of secrets. It looks similar, but every
+  value would be treated as an entry name to search for.
+- If that happens anyway, nothing leaks into messages. A reference from a file is reported by its
+  variable and line, such as `nothing matches DATABASE_URL at sennel.env:2`, never by what is on
+  the right of the `=`.
+
+A `package.json` script keeps the whole line in one place:
+
+```json
+"scripts": { "dev": "sennel run --group Projects/myapp --env-file sennel.env -- next dev" }
+```
+
+## Scoping lookups to a group
+
+`--group PATH` looks every needle up only in that group and the groups below it. A short needle like
+`stripe` then finds the project's own entry instead of matching every Stripe entry in the vault.
+
+- The path runs down from the top of the tree, such as `Projects/myapp`, and ignores case. The
+  top group's own name may lead it, as KeePassXC shows it: `Passwords/Projects/myapp`.
+- A path that names no group, or more than one, stops before anything runs.
+- A miss says where it looked: `nothing matches "stripe" in Projects/myapp`.
+
 ## What it checks before running anything
 
-Every `-e` is checked before the password prompt. A variable name that is not letters, digits and
+Every `-e` and every line of every `--env-file` is checked before the password prompt. A variable name that is not letters, digits and
 `_`, a missing needle or field, or the same variable twice is refused first. Then every entry is
 read before the program starts, so a typo or a missing field never runs the program with a variable
 missing.
@@ -50,7 +94,7 @@ security find-generic-password -a "$USER" -s sennel-master -w | sennel run -e PG
 | Code | Meaning                                                |
 | ---- | ------------------------------------------------------ |
 | any  | the program ran, and this is its exit code             |
-| 1    | Sennel failed first: bad password, no vault, bad `-e`, a missing field |
+| 1    | Sennel failed first: bad password, no vault, bad `-e` or file line, no such group, a missing field |
 | 2    | a needle matched more than one entry                   |
 | 3    | a needle matched nothing                               |
 | 126  | the program was found but could not start              |

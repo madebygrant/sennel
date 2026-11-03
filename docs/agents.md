@@ -90,12 +90,18 @@ is for another program: the value never enters your context or a shell variable.
 
 ```sh
 printf '%s\n' "$MASTER" | sennel run --db VAULT -e VAR=NEEDLE[::FIELD] [-e ...] -- PROGRAM [ARGS...]
+printf '%s\n' "$MASTER" | sennel run --db VAULT --group Projects/app --env-file sennel.env -- PROGRAM
 ```
 
 - `FIELD` is `password` (the default), `username`, `url`, `otp`, or a custom field's exact name. The
   last `::` splits it off.
-- Every `-e` is checked before the password is read, and every entry before the program starts. A
-  failure starts nothing.
+- `--env-file FILE` reads the same references, one per line, with `#` comments. It names entries and
+  holds no secrets, so reading it is safe. Never pass a real `.env` of secrets to it. A `-e`
+  replaces the same variable from a file.
+- `--group PATH` limits every lookup to that group and its subgroups. Prefer it in a project, so a
+  short needle cannot match another project's entry.
+- Every `-e` and file line is checked before the password is read, and every entry before the
+  program starts. A failure starts nothing.
 - On success the exit code is the program's own. Sennel's failures: 1 (with `Error:` on stderr), 2
   ambiguous, 3 no match, 126 program not runnable, 127 program not found.
 - With a piped or redirected password, the program gets the rest of stdin after the first line.

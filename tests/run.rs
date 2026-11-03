@@ -184,6 +184,120 @@ fn a_bad_reference_is_refused_before_the_password() {
 }
 
 #[test]
+fn an_env_file_names_the_entries_and_the_command_line_wins() {
+    let path = std::env::temp_dir().join(format!("sennel-run-envfile-{}", std::process::id()));
+    std::fs::write(
+        &path,
+        "# no secrets here\nPW=\"xc entry\"\nWHO=xc::username\n",
+    )
+    .unwrap();
+    let file = path.to_str().unwrap();
+    let (out, err, code) = run(
+        &[
+            "run",
+            "--db",
+            FIXTURE,
+            "--env-file",
+            file,
+            "-e",
+            "WHO=xc::url",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$PW\" \"$WHO\"",
+        ],
+        "sennel-fixture\n",
+    );
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "{err}");
+    let (pw, who) = out.split_once('|').unwrap();
+    assert_eq!(pw, "sennel-entry-pw");
+    assert_ne!(who, "octo", "the command line did not override the file");
+}
+
+// The format accepts `.env` syntax, so a real `.env` full of secrets is an easy mistake. Its values
+// must never come back in a message, where a terminal, a log or an agent would see them.
+#[test]
+fn a_real_dotenv_file_never_has_its_values_printed() {
+    let path = std::env::temp_dir().join(format!("sennel-run-dotenv-{}", std::process::id()));
+    std::fs::write(&path, "DATABASE_URL=postgres://app:s3cret@db/prod\n").unwrap();
+    let file = path.to_str().unwrap();
+    let (out, err, code) = run(
+        &["run", "--db", FIXTURE, "--env-file", file, "--", "true"],
+        "sennel-fixture\n",
+    );
+    assert_eq!(code, 3, "{err}");
+    assert!(!err.contains("s3cret") && !out.contains("s3cret"), "{err}");
+    assert!(err.contains(&format!("DATABASE_URL at {file}:1")), "{err}");
+
+    std::fs::write(&path, "sk_live_s3cret\n").unwrap();
+    let (_, err, code) = run(
+        &["run", "--db", FIXTURE, "--env-file", file, "--", "true"],
+        "",
+    );
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 1, "{err}");
+    assert!(!err.contains("s3cret"), "{err}");
+    assert!(err.contains(&format!("{file}:1: needs the form")), "{err}");
+}
+
+#[test]
+fn a_group_scopes_every_lookup() {
+    let kdbx4 = "tests/fixtures/keepassxc4.kdbx";
+    let (out, err, code) = run(
+        &[
+            "run",
+            "--db",
+            kdbx4,
+            "--group",
+            "banks",
+            "-e",
+            "WHO=checking::username",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$WHO\"",
+        ],
+        "sennel-fixture\n",
+    );
+    assert_eq!((out.as_str(), code), ("octo", 0), "{err}");
+
+    let (_, err, code) = run(
+        &[
+            "run",
+            "--db",
+            kdbx4,
+            "--group",
+            "Banks",
+            "-e",
+            "X=zzzznothing",
+            "--",
+            "true",
+        ],
+        "sennel-fixture\n",
+    );
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("in Banks"), "{err}");
+
+    let (_, err, code) = run(
+        &[
+            "run",
+            "--db",
+            kdbx4,
+            "--group",
+            "Nope",
+            "-e",
+            "X=checking",
+            "--",
+            "true",
+        ],
+        "sennel-fixture\n",
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no group Nope"), "{err}");
+}
+
+#[test]
 fn a_program_that_is_not_there_exits_127() {
     let (_, err, code) = run(
         &[

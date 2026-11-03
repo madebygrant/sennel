@@ -79,9 +79,15 @@ fn main() -> Result<()> {
         return get(&cfg, &needle, field, stdout, force);
     }
     // Before the terminal checks too: it hands the terminal to the program it runs.
-    if let Some(Command::Run { env, program }) = &cfg.command {
+    if let Some(Command::Run {
+        env,
+        env_file,
+        group,
+        program,
+    }) = &cfg.command
+    {
         // Exits only after `run_program` returns, so the values it read are wiped first.
-        let code = run_program(&cfg, env, program)?;
+        let code = run_program(&cfg, env, env_file, group.as_deref(), program)?;
         std::process::exit(code);
     }
     /* Also before the terminal checks, and the one subcommand that opens no
@@ -879,7 +885,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
 
 // The entry a needle names, or the process exits: 2 when it names several, 3 when none.
 fn find_one(vault: &Vault, searcher: &mut search::Searcher, needle: &str) -> keepass::db::EntryId {
-    match find(vault, searcher, needle) {
+    match find(vault, searcher, needle, None, &format!("{needle:?}"), "") {
         Ok(id) => id,
         Err(code) => std::process::exit(code),
     }
@@ -890,11 +896,17 @@ fn find(
     vault: &Vault,
     searcher: &mut search::Searcher,
     needle: &str,
+    within: Option<&GroupId>,
+    // How the messages name the needle. A needle from a file may be a secret pasted by mistake,
+    // so `run` names those by variable and line instead.
+    shown: &str,
+    // Said after it, such as " in Projects/myapp", so a miss names where it looked.
+    scope: &str,
 ) -> std::result::Result<keepass::db::EntryId, i32> {
-    match vault::resolve(vault, searcher, needle) {
+    match vault::resolve_in(vault, searcher, needle, within) {
         vault::Found::One(id) => Ok(id),
         vault::Found::Many(ids) => {
-            eprintln!("{needle:?} matches {} entries:", ids.len());
+            eprintln!("{shown}{scope} matches {} entries:", ids.len());
             /* Titles only, and sanitised: this is vault text going to a
             terminal, and it may have been written by anyone. */
             for id in ids.iter().take(10) {
@@ -908,7 +920,7 @@ fn find(
             Err(2)
         }
         vault::Found::None => {
-            eprintln!("nothing matches {needle:?}");
+            eprintln!("nothing matches {shown}{scope}");
             Err(3)
         }
     }
@@ -920,6 +932,17 @@ struct EnvRef {
     var: String,
     needle: String,
     field: RunField,
+    /// `file:line` for a reference read from a file, which messages show instead of the needle.
+    origin: Option<String>,
+}
+
+impl EnvRef {
+    fn shown(&self) -> String {
+        match &self.origin {
+            Some(at) => format!("{} at {at}", self.var),
+            None => format!("{:?}", self.needle),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -965,7 +988,81 @@ fn parse_env_ref(text: &str) -> Result<EnvRef> {
         var: var.to_string(),
         needle: needle.to_string(),
         field,
+        origin: None,
     })
+}
+
+// One line of an env file: blank lines and `#` comments are skipped, a leading `export ` is allowed
+// so a shell can source the same shape, and quotes around the right side are dropped.
+fn parse_env_line(line: &str) -> Option<Result<EnvRef>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = match line.strip_prefix("export") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        _ => line,
+    };
+    let unquoted = match line.split_once('=') {
+        Some((var, rest)) => {
+            let rest = rest.trim();
+            let inner = ['"', '\''].iter().find_map(|q| {
+                rest.strip_prefix(*q)
+                    .and_then(|r| r.strip_suffix(*q))
+                    .filter(|_| rest.len() >= 2)
+            });
+            format!("{}={}", var.trim(), inner.unwrap_or(rest))
+        }
+        // Not echoed: a line with no `=` could be a bare secret.
+        None => return Some(Err(anyhow::anyhow!("needs the form VAR=NEEDLE"))),
+    };
+    Some(parse_env_ref(&unquoted))
+}
+
+// The files' references in order, then the command line's. A command-line `-e` replaces the same
+// variable from a file, so one run can point at a different entry; a repeat anywhere else is a mistake.
+fn gather_refs(env: &[String], files: &[std::path::PathBuf]) -> Result<Vec<EnvRef>> {
+    // Windows reads `Path` and `PATH` as one variable, so names collide there whatever their case.
+    let same = |a: &str, b: &str| match cfg!(windows) {
+        true => a.eq_ignore_ascii_case(b),
+        false => a == b,
+    };
+    let mut refs: Vec<EnvRef> = Vec::new();
+    for file in files {
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        // Some Windows editors start a file with a byte-order mark, which would glue onto the first name.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        for (n, line) in text.lines().enumerate() {
+            let at = format!("{}:{}", file.display(), n + 1);
+            let Some(parsed) = parse_env_line(line) else {
+                continue;
+            };
+            let mut r = parsed.map_err(|e| anyhow::anyhow!("{at}: {e}"))?;
+            if refs.iter().any(|earlier| same(&earlier.var, &r.var)) {
+                anyhow::bail!("{at}: {} is set twice", r.var);
+            }
+            r.origin = Some(at);
+            refs.push(r);
+        }
+    }
+    let from_files = refs.len();
+    let mut typed: Vec<String> = Vec::new();
+    for text in env {
+        let r = parse_env_ref(text)?;
+        if typed.iter().any(|earlier| same(earlier, &r.var)) {
+            anyhow::bail!("{} is set twice", r.var);
+        }
+        typed.push(r.var.clone());
+        match refs[..from_files].iter().position(|f| same(&f.var, &r.var)) {
+            Some(at) => refs[at] = r,
+            None => refs.push(r),
+        }
+    }
+    if refs.is_empty() {
+        anyhow::bail!("nothing to set · pass -e VAR=NEEDLE or --env-file FILE");
+    }
+    Ok(refs)
 }
 
 /* `sennel run`: unlock once, read every variable, then become the program.
@@ -974,26 +1071,30 @@ before the program starts, so a typo never runs the program with a variable
 missing. On Unix the program replaces this process, so its exit code and
 signals are its own and no copy of the vault outlives the switch. Returns the
 code to exit with when the program did not take over. */
-fn run_program(cfg: &Config, env: &[String], program: &[std::ffi::OsString]) -> Result<i32> {
-    let refs = env
-        .iter()
-        .map(|text| parse_env_ref(text))
-        .collect::<Result<Vec<_>>>()?;
-    // Windows reads `Path` and `PATH` as one variable, so names collide there whatever their case.
-    let same = |a: &str, b: &str| match cfg!(windows) {
-        true => a.eq_ignore_ascii_case(b),
-        false => a == b,
-    };
-    for (i, r) in refs.iter().enumerate() {
-        if refs[..i].iter().any(|earlier| same(&earlier.var, &r.var)) {
-            anyhow::bail!("{} is set twice", r.var);
-        }
-    }
+fn run_program(
+    cfg: &Config,
+    env: &[String],
+    files: &[std::path::PathBuf],
+    group: Option<&str>,
+    program: &[std::ffi::OsString],
+) -> Result<i32> {
+    let refs = gather_refs(env, files)?;
     let vault = unlock(cfg)?;
+    let within = group
+        .map(|path| vault.find_group(path).map_err(|e| anyhow::anyhow!(e)))
+        .transpose()?;
+    let scope = group.map(|path| format!(" in {path}")).unwrap_or_default();
     let mut searcher = search::Searcher::new();
     let mut values: Vec<(String, zeroize::Zeroizing<String>)> = Vec::new();
     for r in &refs {
-        let id = match find(&vault, &mut searcher, &r.needle) {
+        let id = match find(
+            &vault,
+            &mut searcher,
+            &r.needle,
+            within.as_ref(),
+            &r.shown(),
+            &scope,
+        ) {
             Ok(id) => id,
             Err(code) => return Ok(code),
         };
@@ -1921,11 +2022,92 @@ mod tests {
     use super::{EnvRef, RunField, parse_env_ref};
 
     #[test]
+    fn an_env_file_line_skips_comments_and_drops_quotes_and_export() {
+        use super::parse_env_line;
+        assert!(parse_env_line("").is_none());
+        assert!(parse_env_line("   # DATABASE_URL=old").is_none());
+        let var_needle = |line: &str| {
+            let r = parse_env_line(line).unwrap().unwrap();
+            (r.var, r.needle)
+        };
+        assert_eq!(var_needle("PW=prod db"), ("PW".into(), "prod db".into()));
+        assert_eq!(
+            var_needle("PW = \"prod db\""),
+            ("PW".into(), "prod db".into())
+        );
+        assert_eq!(
+            var_needle("export PW='prod db'"),
+            ("PW".into(), "prod db".into())
+        );
+        assert_eq!(var_needle("export\tPW=prod"), ("PW".into(), "prod".into()));
+        assert_eq!(var_needle("exported=x"), ("exported".into(), "x".into()));
+        // A lone quote is part of the needle, not a pair.
+        assert_eq!(var_needle("PW=\""), ("PW".into(), "\"".into()));
+        // A line with no `=` may be a bare secret, so the error does not repeat it.
+        let why = parse_env_line("sk_live_hunter2")
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(!why.contains("hunter2"), "{why}");
+    }
+
+    #[test]
+    fn the_command_line_overrides_a_file_and_repeats_are_refused() {
+        use super::gather_refs;
+        let dir = std::env::temp_dir().join(format!("sennel-envfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sennel.env");
+        std::fs::write(&file, "# project secrets\nDB=myapp db::url\n\nKEY=stripe\n").unwrap();
+
+        let refs = gather_refs(
+            &["KEY=stripe test".into(), "EXTRA=x".into()],
+            std::slice::from_ref(&file),
+        )
+        .unwrap();
+        let seen: Vec<_> = refs
+            .iter()
+            .map(|r| (r.var.as_str(), r.needle.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [("DB", "myapp db"), ("KEY", "stripe test"), ("EXTRA", "x")]
+        );
+
+        let twice = dir.join("twice.env");
+        std::fs::write(&twice, "A=x\nA=y\n").unwrap();
+        let why = gather_refs(&[], &[twice]).unwrap_err().to_string();
+        assert!(why.ends_with("twice.env:2: A is set twice"), "{why}");
+        let why = gather_refs(&["A=x".into(), "A=y".into()], &[])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(why, "A is set twice");
+        // Twice on the command line is refused even when the file sets it too.
+        let why = gather_refs(&["DB=x".into(), "DB=y".into()], std::slice::from_ref(&file))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(why, "DB is set twice");
+
+        let marked = dir.join("bom.env");
+        std::fs::write(&marked, "\u{feff}FIRST=one\n").unwrap();
+        let refs = gather_refs(&[], std::slice::from_ref(&marked)).unwrap();
+        assert_eq!(refs[0].var, "FIRST");
+        assert_eq!(refs[0].shown(), format!("FIRST at {}:1", marked.display()));
+        assert!(
+            gather_refs(&[], &[])
+                .unwrap_err()
+                .to_string()
+                .starts_with("nothing to set")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn an_env_reference_splits_at_the_last_double_colon() {
         let at = |var: &str, needle: &str, field: RunField| EnvRef {
             var: var.into(),
             needle: needle.into(),
             field,
+            origin: None,
         };
         assert_eq!(
             parse_env_ref("PGPASSWORD=prod db").unwrap(),

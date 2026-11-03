@@ -102,14 +102,18 @@ pub enum Command {
     /// Run a program with entry fields in its environment
     Run {
         /// VAR=NEEDLE puts that entry's password in VAR. Add ::username, ::url, ::otp or
-        /// ::<custom field> for another field. Repeat for more variables.
-        #[arg(
-            short = 'e',
-            long = "env",
-            value_name = "VAR=NEEDLE[::FIELD]",
-            required = true
-        )]
+        /// ::<custom field> for another field. Repeat for more variables. Overrides a file.
+        #[arg(short = 'e', long = "env", value_name = "VAR=NEEDLE[::FIELD]")]
         env: Vec<String>,
+
+        /// A file of VAR=NEEDLE[::FIELD] lines. It names entries and holds no secrets, so a
+        /// project can commit it. Repeat for more files.
+        #[arg(long = "env-file", value_name = "FILE")]
+        env_file: Vec<std::path::PathBuf>,
+
+        /// Look entries up only in this group and the groups below it, such as Projects/myapp
+        #[arg(long, value_name = "PATH")]
+        group: Option<String>,
 
         /// The program and its arguments, after --
         #[arg(last = true, required = true, value_name = "PROGRAM")]

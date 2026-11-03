@@ -1569,7 +1569,6 @@ impl Vault {
     }
 
     /// Parent of a group via the stored back-pointer.
-    #[allow(dead_code)]
     pub fn parent_group(&self, id: &GroupId) -> Option<GroupId> {
         self.db
             .group(*id)
@@ -1579,6 +1578,60 @@ impl Vault {
 
     pub fn parent_group_of_entry(&self, id: &EntryId) -> Option<GroupId> {
         self.db.entry(*id).map(|e| e.parent().id())
+    }
+
+    /// Whether an entry sits in `group` or any group below it.
+    pub fn entry_is_under(&self, id: &EntryId, group: &GroupId) -> bool {
+        let mut at = self.parent_group_of_entry(id);
+        while let Some(g) = at {
+            if g == *group {
+                return true;
+            }
+            at = self.parent_group(&g);
+        }
+        false
+    }
+
+    /// A group by its path below the root, such as `Projects/myapp`, ignoring case. The root's
+    /// own name may lead the path, since KeePassXC shows it as the top of the tree.
+    pub fn find_group(&self, path: &str) -> Result<GroupId, String> {
+        let names: Vec<&str> = path
+            .split('/')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .collect();
+        if names.is_empty() {
+            return Err("the group path is empty".into());
+        }
+        let root = self.root_id();
+        let mut at = root;
+        for (i, name) in names.iter().enumerate() {
+            let matches: Vec<GroupId> = self
+                .groups_in(&at)
+                .iter()
+                .filter(|g| g.name.eq_ignore_ascii_case(name))
+                .map(|g| g.id())
+                .collect();
+            at = match matches.as_slice() {
+                [one] => *one,
+                [] if i == 0
+                    && self
+                        .db
+                        .group(root)
+                        .is_some_and(|g| g.name.eq_ignore_ascii_case(name)) =>
+                {
+                    continue;
+                }
+                [] => return Err(format!("no group {path}")),
+                _ => return Err(format!("{path} names more than one group")),
+            };
+        }
+        if at == root {
+            return Err(format!(
+                "{path} is the top of the tree, not a group below it"
+            ));
+        }
+        Ok(at)
     }
 
     pub fn create_group(&mut self, parent: &GroupId, name: &str) -> Result<GroupId, VaultError> {
@@ -2330,7 +2383,22 @@ wins. Anything else is ambiguous and gets listed rather than guessed at.
 Binned entries are not candidates. Copying the password of something
 deleted last week is the one outcome worth engineering against. */
 pub fn resolve(vault: &Vault, searcher: &mut crate::search::Searcher, needle: &str) -> Found {
-    let live: Vec<EntryId> = vault.entry_refs().iter().map(|e| e.id()).collect();
+    resolve_in(vault, searcher, needle, None)
+}
+
+/// `resolve`, among the entries under `within` and its subgroups only.
+pub fn resolve_in(
+    vault: &Vault,
+    searcher: &mut crate::search::Searcher,
+    needle: &str,
+    within: Option<&GroupId>,
+) -> Found {
+    let live: Vec<EntryId> = vault
+        .entry_refs()
+        .iter()
+        .map(|e| e.id())
+        .filter(|id| within.is_none_or(|group| vault.entry_is_under(id, group)))
+        .collect();
     let exact: Vec<EntryId> = live
         .iter()
         .copied()
@@ -3942,6 +4010,59 @@ mod tests {
         assert_eq!(field_kind(&e, "acct"), FieldKind::Number);
         assert!(!e.fields.contains_key("code"));
         assert_eq!(e.title(), "bank");
+    }
+
+    #[test]
+    fn a_group_scope_narrows_a_needle_to_one_project() {
+        use crate::search::Searcher;
+        let mut v = vault();
+        let root = v.root_id();
+        let projects = v.create_group(&root, "Projects").unwrap();
+        let myapp = v.create_group(&projects, "myapp").unwrap();
+        let other = v.create_group(&projects, "other").unwrap();
+        let deep = v.create_group(&myapp, "staging").unwrap();
+        let mine = v.create_entry(&myapp, "stripe", "u", "p", "", "").unwrap();
+        v.create_entry(&other, "stripe", "u", "p", "", "").unwrap();
+        let below = v.create_entry(&deep, "db", "u", "p", "", "").unwrap();
+        let mut s = Searcher::new();
+
+        assert!(matches!(
+            crate::vault::resolve(&v, &mut s, "stripe"),
+            crate::vault::Found::Many(_)
+        ));
+        let found = v.find_group("projects/MyApp").unwrap();
+        assert_eq!(found, myapp);
+        assert_eq!(
+            crate::vault::resolve_in(&v, &mut s, "stripe", Some(&found)),
+            crate::vault::Found::One(mine)
+        );
+        // Subgroups count as inside the project.
+        assert_eq!(
+            crate::vault::resolve_in(&v, &mut s, "db", Some(&found)),
+            crate::vault::Found::One(below)
+        );
+        assert!(matches!(
+            crate::vault::resolve_in(&v, &mut s, "stripe", Some(&projects)),
+            crate::vault::Found::Many(_)
+        ));
+    }
+
+    #[test]
+    fn a_group_path_must_name_exactly_one_group() {
+        let mut v = vault();
+        let root = v.root_id();
+        let root_name = v.group_path(&root)[0].clone();
+        let projects = v.create_group(&root, "Projects").unwrap();
+        v.create_group(&root, "Twice").unwrap();
+        v.create_group(&root, "twice").unwrap();
+
+        // The root's own name may lead the path, as KeePassXC shows it.
+        assert_eq!(v.find_group(&format!("{root_name}/Projects")), Ok(projects));
+        assert_eq!(v.find_group(" /Projects/ "), Ok(projects));
+        assert_eq!(v.find_group("Nope"), Err("no group Nope".into()));
+        assert!(v.find_group("Twice").unwrap_err().contains("more than one"));
+        assert!(v.find_group("").is_err());
+        assert!(v.find_group(&root_name).is_err(), "the root is not a scope");
     }
 
     #[test]
