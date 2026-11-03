@@ -61,6 +61,18 @@ environment variable rather than an argument, so `ps` and your history never see
 the needle matched more than one entry and 3 means it matched none, so a script can tell the two
 apart. [sennel get](get.md).
 
+For a program that takes its secret from an environment variable, `sennel run` skips the shell
+step, so the secret never sits in a `$(...)` result:
+
+```sh
+sennel-run() {
+  security find-generic-password -a "$USER" -s sennel-master -w | sennel run "$@"
+}
+sennel-run -e PGPASSWORD=prod-postgres -- psql -h db.example.com -U app mydb
+```
+
+[sennel run](run.md).
+
 ### Make every read ask
 
 With `-T ""` the first read opens a dialog: Deny, Allow Once or Always Allow. Always Allow adds

@@ -92,10 +92,12 @@ sennel get github -p            # copy a password, wiped after 30 seconds
 sennel get github --otp         # copy the current one-time code
 sennel gen --stdout             # a new password, stored nowhere
 sennel audit                    # what needs changing
+sennel run -e PGPASSWORD=prod -- psql   # a program with a secret in its environment
 ```
 
 `get` exits with codes a script can branch on, and `--stdout` pipes the value instead of copying it.
-[sennel get](docs/get.md) · [Reference for AI agents](docs/agents.md)
+`run` hands secrets to a program without the clipboard or a shell variable.
+[sennel get](docs/get.md) · [sennel run](docs/run.md) · [Reference for AI agents](docs/agents.md)
 
 ## Install
 
@@ -153,6 +155,7 @@ Sennel remembers the vault, so next time it is just `sennel`. The keys for day o
 | [Importing](docs/import.md) · [Exporting](docs/export.md) | moving between password managers              |
 | [Older KDBX files](docs/kdbx3.md)             | KDBX 3.1 and `sennel convert`                               |
 | [sennel get](docs/get.md)                     | secrets from the command line                               |
+| [sennel run](docs/run.md)                     | a program with secrets in its environment                   |
 | [The system keychain](docs/keychain.md)       | unlocking scripts without typing the master password        |
 | [Themes](docs/themes.md)                      | six palettes, and how their contrast is measured            |
 | [Configuration](docs/configuration.md)        | every setting in the config file                            |

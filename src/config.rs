@@ -99,6 +99,23 @@ pub enum Command {
         force: bool,
     },
 
+    /// Run a program with entry fields in its environment
+    Run {
+        /// VAR=NEEDLE puts that entry's password in VAR. Add ::username, ::url, ::otp or
+        /// ::<custom field> for another field. Repeat for more variables.
+        #[arg(
+            short = 'e',
+            long = "env",
+            value_name = "VAR=NEEDLE[::FIELD]",
+            required = true
+        )]
+        env: Vec<String>,
+
+        /// The program and its arguments, after --
+        #[arg(last = true, required = true, value_name = "PROGRAM")]
+        program: Vec<std::ffi::OsString>,
+    },
+
     /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
     Convert {
         /// Where to write it. Defaults to `<name>-kdbx4.kdbx` beside the original

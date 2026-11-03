@@ -15,6 +15,8 @@ TTY. Use the subcommands below instead. Each one runs, prints and exits.
   secret straight into the command that needs it over echoing or storing it.
 - Every subcommand except `gen`, `completions` and `man` needs a vault, from `--db` or the config.
 - `get` exit codes 2 and 3 are not failures to retry blindly. See [get](#sennel-get).
+- To give a secret to another program, use `sennel run`. It never prints the secret, so it stays
+  out of your context.
 
 ## Vault and config resolution
 
@@ -80,6 +82,23 @@ On exit 2, pick an exact title from the stderr list and retry with it, since an 
 If two entries share that title, it stays ambiguous: ask the user.
 
 An empty field exits 1 with `<title> has no <field>`.
+
+### `sennel run`
+
+Start a program with entry fields in its environment. Prefer it over `get --stdout` when the secret
+is for another program: the value never enters your context or a shell variable.
+
+```sh
+printf '%s\n' "$MASTER" | sennel run --db VAULT -e VAR=NEEDLE[::FIELD] [-e ...] -- PROGRAM [ARGS...]
+```
+
+- `FIELD` is `password` (the default), `username`, `url`, `otp`, or a custom field's exact name. The
+  last `::` splits it off.
+- Every `-e` is checked before the password is read, and every entry before the program starts. A
+  failure starts nothing.
+- On success the exit code is the program's own. Sennel's failures: 1 (with `Error:` on stderr), 2
+  ambiguous, 3 no match, 126 program not runnable, 127 program not found.
+- With a piped or redirected password, the program gets the rest of stdin after the first line.
 
 ### `sennel gen`
 

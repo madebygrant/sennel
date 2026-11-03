@@ -78,6 +78,12 @@ fn main() -> Result<()> {
         let (needle, stdout, force) = (needle.clone(), *stdout, *force);
         return get(&cfg, &needle, field, stdout, force);
     }
+    // Before the terminal checks too: it hands the terminal to the program it runs.
+    if let Some(Command::Run { env, program }) = &cfg.command {
+        // Exits only after `run_program` returns, so the values it read are wiped first.
+        let code = run_program(&cfg, env, program)?;
+        std::process::exit(code);
+    }
     /* Also before the terminal checks, and the one subcommand that opens no
     vault at all: a password you are not storing needs no database. */
     if let Some(Command::Gen {
@@ -764,12 +770,44 @@ fn ask_password(prompt: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
         return Ok(rpassword::prompt_password(prompt)?);
     }
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    let mut line = read_first_line()?;
     // The newline is the pipe's, not the password's.
     let end = line.trim_end_matches(['\n', '\r']).len();
     line.truncate(end);
     Ok(line)
+}
+
+// A byte at a time, through a duplicate of the stdin handle: stdin's buffer would read ahead past
+// the newline, and `sennel run` hands the rest of stdin to the program it starts. A duplicate shares
+// the original's position, where reopening /dev/stdin on Linux would start a file over from the top.
+fn read_first_line() -> Result<String> {
+    use std::io::Read;
+    #[cfg(unix)]
+    let handle = {
+        use std::os::fd::AsFd;
+        std::io::stdin().as_fd().try_clone_to_owned()?
+    };
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::io::AsHandle;
+        std::io::stdin().as_handle().try_clone_to_owned()?
+    };
+    let mut input = std::fs::File::from(handle);
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let mut byte = [0u8; 1];
+    while input.read(&mut byte)? == 1 {
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    byte.zeroize();
+    // Moved, not copied, so the only copy is the one the caller wipes.
+    String::from_utf8(std::mem::take(&mut *bytes)).map_err(|e| {
+        let mut rejected = e.into_bytes();
+        rejected.zeroize();
+        anyhow::anyhow!("the password from the pipe is not UTF-8")
+    })
 }
 
 /* `sennel get`, the whole non-interactive path. Unlocks, resolves one entry,
@@ -790,27 +828,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
     let vault = unlock(cfg)?;
 
     let mut searcher = search::Searcher::new();
-    let id = match vault::resolve(&vault, &mut searcher, needle) {
-        vault::Found::One(id) => id,
-        vault::Found::Many(ids) => {
-            eprintln!("{needle:?} matches {} entries:", ids.len());
-            /* Titles only, and sanitised: this is vault text going to a
-            terminal, and it may have been written by anyone. */
-            for id in ids.iter().take(10) {
-                if let Some(entry) = vault.get_entry(id) {
-                    eprintln!("  {}", printable(entry.title()));
-                }
-            }
-            if ids.len() > 10 {
-                eprintln!("  … and {} more", ids.len() - 10);
-            }
-            std::process::exit(2);
-        }
-        vault::Found::None => {
-            eprintln!("nothing matches {needle:?}");
-            std::process::exit(3);
-        }
-    };
+    let id = find_one(&vault, &mut searcher, needle);
     let entry = vault.get_entry(&id).expect("resolve returned a live id");
     let title = printable(entry.title());
     /* Wiped when this returns: the copy path below holds it across a
@@ -857,6 +875,182 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
         }
     }
     Ok(())
+}
+
+// The entry a needle names, or the process exits: 2 when it names several, 3 when none.
+fn find_one(vault: &Vault, searcher: &mut search::Searcher, needle: &str) -> keepass::db::EntryId {
+    match find(vault, searcher, needle) {
+        Ok(id) => id,
+        Err(code) => std::process::exit(code),
+    }
+}
+
+// The entry a needle names, or the exit code after saying why: 2 for several, 3 for none.
+fn find(
+    vault: &Vault,
+    searcher: &mut search::Searcher,
+    needle: &str,
+) -> std::result::Result<keepass::db::EntryId, i32> {
+    match vault::resolve(vault, searcher, needle) {
+        vault::Found::One(id) => Ok(id),
+        vault::Found::Many(ids) => {
+            eprintln!("{needle:?} matches {} entries:", ids.len());
+            /* Titles only, and sanitised: this is vault text going to a
+            terminal, and it may have been written by anyone. */
+            for id in ids.iter().take(10) {
+                if let Some(entry) = vault.get_entry(id) {
+                    eprintln!("  {}", printable(entry.title()));
+                }
+            }
+            if ids.len() > 10 {
+                eprintln!("  … and {} more", ids.len() - 10);
+            }
+            Err(2)
+        }
+        vault::Found::None => {
+            eprintln!("nothing matches {needle:?}");
+            Err(3)
+        }
+    }
+}
+
+/// One `-e VAR=NEEDLE[::FIELD]` of `sennel run`.
+#[derive(Debug, PartialEq)]
+struct EnvRef {
+    var: String,
+    needle: String,
+    field: RunField,
+}
+
+#[derive(Debug, PartialEq)]
+enum RunField {
+    Fixed(Field),
+    Custom(String),
+}
+
+impl RunField {
+    fn name(&self) -> &str {
+        match self {
+            RunField::Fixed(field) => field.name(),
+            RunField::Custom(name) => name,
+        }
+    }
+}
+
+// The last `::` splits off the field, so a needle may hold one; a field name rarely does.
+fn parse_env_ref(text: &str) -> Result<EnvRef> {
+    let Some((var, rest)) = text.split_once('=') else {
+        anyhow::bail!("{text:?} needs the form VAR=NEEDLE");
+    };
+    let mut chars = var.chars();
+    let starts = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !starts || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!("{var:?} is not an environment variable name · letters, digits and _");
+    }
+    let (needle, field) = rest.rsplit_once("::").unwrap_or((rest, "password"));
+    if needle.is_empty() {
+        anyhow::bail!("{var} names no entry · {var}=NEEDLE");
+    }
+    let field = match field {
+        "" => anyhow::bail!("{var} names no field after ::"),
+        "password" => RunField::Fixed(Field::Password),
+        "username" | "user" => RunField::Fixed(Field::User),
+        "url" => RunField::Fixed(Field::Url),
+        "otp" => RunField::Fixed(Field::Otp),
+        custom => RunField::Custom(custom.to_string()),
+    };
+    Ok(EnvRef {
+        var: var.to_string(),
+        needle: needle.to_string(),
+        field,
+    })
+}
+
+/* `sennel run`: unlock once, read every variable, then become the program.
+Every reference is parsed before the password prompt and every entry is read
+before the program starts, so a typo never runs the program with a variable
+missing. On Unix the program replaces this process, so its exit code and
+signals are its own and no copy of the vault outlives the switch. Returns the
+code to exit with when the program did not take over. */
+fn run_program(cfg: &Config, env: &[String], program: &[std::ffi::OsString]) -> Result<i32> {
+    let refs = env
+        .iter()
+        .map(|text| parse_env_ref(text))
+        .collect::<Result<Vec<_>>>()?;
+    // Windows reads `Path` and `PATH` as one variable, so names collide there whatever their case.
+    let same = |a: &str, b: &str| match cfg!(windows) {
+        true => a.eq_ignore_ascii_case(b),
+        false => a == b,
+    };
+    for (i, r) in refs.iter().enumerate() {
+        if refs[..i].iter().any(|earlier| same(&earlier.var, &r.var)) {
+            anyhow::bail!("{} is set twice", r.var);
+        }
+    }
+    let vault = unlock(cfg)?;
+    let mut searcher = search::Searcher::new();
+    let mut values: Vec<(String, zeroize::Zeroizing<String>)> = Vec::new();
+    for r in &refs {
+        let id = match find(&vault, &mut searcher, &r.needle) {
+            Ok(id) => id,
+            Err(code) => return Ok(code),
+        };
+        let entry = vault.get_entry(&id).expect("resolve returned a live id");
+        let title = printable(entry.title());
+        let value = zeroize::Zeroizing::new(match &r.field {
+            RunField::Fixed(Field::User) => entry.username().to_string(),
+            RunField::Fixed(Field::Password) => entry.password().to_string(),
+            RunField::Fixed(Field::Url) => entry.url().to_string(),
+            RunField::Fixed(Field::Otp) => match vault::totp_now(&entry) {
+                Some((code, _)) => code,
+                None => anyhow::bail!("{title} has no one-time code"),
+            },
+            RunField::Custom(name) => match entry.fields.get(name.as_str()) {
+                Some(value) => value.get().to_string(),
+                None => anyhow::bail!("{title} has no field {name}"),
+            },
+        });
+        if value.is_empty() {
+            anyhow::bail!("{title} has no {}", r.field.name());
+        }
+        values.push((r.var.clone(), value));
+    }
+    drop(vault);
+
+    let mut child = std::process::Command::new(&program[0]);
+    child.args(&program[1..]);
+    for (var, value) in &values {
+        child.env(var, value.as_str());
+    }
+    let shown = program[0].to_string_lossy().into_owned();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Only returns when the program could not start: 127 not found, 126 found but not runnable.
+        let e = child.exec();
+        eprintln!("Error: cannot run {shown} · {e}");
+        Ok(match e.kind() {
+            std::io::ErrorKind::NotFound => 127,
+            _ => 126,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // `Command` keeps its own copy of each value, which std gives no way to wipe. It lasts
+        // until this returns, and the program itself holds the variables for its whole run anyway.
+        match child.status() {
+            Ok(status) => Ok(status.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!("Error: cannot run {shown} · {e}");
+                Ok(match e.kind() {
+                    std::io::ErrorKind::NotFound => 127,
+                    _ => 126,
+                })
+            }
+        }
+    }
 }
 
 // Wayland and X11 serve a copy from the owning process, so it goes when we exit
@@ -1724,6 +1918,33 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 #[cfg(test)]
 mod tests {
+    use super::{EnvRef, RunField, parse_env_ref};
+
+    #[test]
+    fn an_env_reference_splits_at_the_last_double_colon() {
+        let at = |var: &str, needle: &str, field: RunField| EnvRef {
+            var: var.into(),
+            needle: needle.into(),
+            field,
+        };
+        assert_eq!(
+            parse_env_ref("PGPASSWORD=prod db").unwrap(),
+            at("PGPASSWORD", "prod db", RunField::Fixed(Field::Password))
+        );
+        assert_eq!(
+            parse_env_ref("U=prod::user").unwrap(),
+            at("U", "prod", RunField::Fixed(Field::User))
+        );
+        assert_eq!(
+            parse_env_ref("_T=a::b::otp").unwrap(),
+            at("_T", "a::b", RunField::Fixed(Field::Otp))
+        );
+        assert_eq!(
+            parse_env_ref("KEY=stripe=live::api key").unwrap(),
+            at("KEY", "stripe=live", RunField::Custom("api key".into()))
+        );
+    }
+
     use super::*;
     use crate::app::Confirm;
     use ratatui::crossterm::event::KeyModifiers;
