@@ -339,7 +339,8 @@ fn a_custom_field_named_like_a_fixed_one_copies_itself() {
     let desk = open_with(vault());
     let banks = group(&desk, "Banks");
     let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
-    desk.add_field(&id, "password", "custom-value").unwrap();
+    desk.add_field(&id, "password", "custom-value", "password")
+        .unwrap();
     assert!(
         desk.copy_field(&id, "password")
             .text
@@ -350,6 +351,128 @@ fn a_custom_field_named_like_a_fixed_one_copies_itself() {
         desk.copy_text("x", String::new()).level,
         Level::Warn,
         "an empty copy went through"
+    );
+}
+
+#[test]
+fn custom_fields_reach_the_detail_with_their_type_and_secrets_withheld() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    desk.add_field(&id, "account", "0042", "number").unwrap();
+    desk.add_field(&id, "address", "1 Road\nTown", "textarea")
+        .unwrap();
+    desk.add_field(&id, "pin", "1234", "password").unwrap();
+    desk.add_field(&id, "branch", "North", "text").unwrap();
+
+    let fields = desk.entry(&id).unwrap().fields;
+    let seen: Vec<_> = fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.kind, f.value.as_deref()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("account", "number", Some("0042")),
+            ("address", "textarea", Some("1 Road\nTown")),
+            ("branch", "text", Some("North")),
+            ("pin", "password", None),
+        ]
+    );
+    assert_eq!(*desk.reveal_field(&id, "pin").unwrap(), "1234");
+}
+
+#[test]
+fn a_number_field_refuses_text_and_an_unknown_type_is_an_error() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    let reply = desk.add_field(&id, "account", "12a", "number").unwrap();
+    assert!(
+        reply.notes.iter().any(|n| n.level == Level::Error),
+        "{reply:?}"
+    );
+    assert!(desk.entry(&id).unwrap().fields.is_empty());
+    assert!(desk.add_field(&id, "x", "y", "colour").is_err());
+}
+
+#[test]
+fn adding_a_field_name_twice_is_an_error_note() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    desk.add_field(&id, "pin", "1234", "password").unwrap();
+    let reply = desk.add_field(&id, "pin", "0000", "text").unwrap();
+    assert!(
+        reply
+            .notes
+            .iter()
+            .any(|n| n.level == Level::Error && n.text.contains("already exists")),
+        "{reply:?}"
+    );
+    assert_eq!(*desk.reveal_field(&id, "pin").unwrap(), "1234");
+}
+
+#[test]
+fn a_field_edit_reaches_the_detail_and_a_kept_secret_stays_hidden() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    desk.add_field(&id, "pin", "1234", "password").unwrap();
+
+    let reply = desk
+        .edit_field(&id, "pin", " phone pin ", None, "password")
+        .unwrap();
+    assert!(
+        reply
+            .notes
+            .iter()
+            .any(|n| n.text.contains("renamed pin to phone pin")),
+        "{reply:?}"
+    );
+    let fields = desk.entry(&id).unwrap().fields;
+    assert_eq!(fields.len(), 1);
+    assert_eq!(
+        (fields[0].name.as_str(), fields[0].kind),
+        ("phone pin", "password")
+    );
+    assert_eq!(fields[0].value, None);
+    assert_eq!(*desk.reveal_field(&id, "phone pin").unwrap(), "1234");
+
+    let reply = desk
+        .edit_field(&id, "phone pin", "phone pin", Some("12a"), "number")
+        .unwrap();
+    assert!(
+        reply.notes.iter().any(|n| n.level == Level::Error),
+        "{reply:?}"
+    );
+    assert_eq!(*desk.reveal_field(&id, "phone pin").unwrap(), "1234");
+}
+
+#[test]
+fn unprotecting_a_field_warns_and_an_unchanged_save_says_so() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    desk.add_field(&id, "pin", "1234", "password").unwrap();
+
+    let reply = desk
+        .edit_field(&id, "pin", "pin", None, "password")
+        .unwrap();
+    assert_eq!(reply.notes.len(), 1, "{reply:?}");
+    assert!(reply.notes[0].text.contains("unchanged"), "{reply:?}");
+
+    let reply = desk.edit_field(&id, "pin", "pin", None, "text").unwrap();
+    assert!(
+        reply
+            .notes
+            .iter()
+            .any(|n| n.level == Level::Warn && n.text == "pin is no longer protected"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        desk.entry(&id).unwrap().fields[0].value.as_deref(),
+        Some("1234")
     );
 }
 

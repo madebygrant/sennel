@@ -44,6 +44,8 @@
     "allow-clear-history",
     "allow-fields",
     "allow-add-field",
+    "allow-reveal-field",
+    "allow-edit-field",
     "allow-attach",
     "allow-remove-field",
     "allow-extract",

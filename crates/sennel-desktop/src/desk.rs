@@ -17,7 +17,7 @@ use sennel_core::session::{
 };
 use sennel_core::sort::SortOrder;
 use sennel_core::touchid::{Refused, Sealed};
-use sennel_core::vault::{EntryExt, Extra};
+use sennel_core::vault::{EntryExt, Extra, FieldKind};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -151,6 +151,8 @@ pub struct EntryView {
     /// None when the stored code does not parse, while `has_otp` still says there is one.
     pub otp: Option<OtpShape>,
     pub extras: usize,
+    /// Custom string fields, for the detail panel. Attachments stay behind the paperclip.
+    pub fields: Vec<FieldRow>,
     pub recycled: bool,
 }
 
@@ -176,6 +178,8 @@ pub struct FieldRow {
     pub name: String,
     pub file: bool,
     pub secret: bool,
+    /// text, textarea, number or password; file for an attachment.
+    pub kind: &'static str,
     /// Withheld when secret: a protected field crosses to the webview only on reveal.
     pub value: Option<String>,
     pub bytes: Option<usize>,
@@ -674,6 +678,7 @@ impl Desk {
                     .join(" / ")
             })
             .unwrap_or_default();
+        let rows = field_rows(&e);
         Ok(EntryView {
             id: id.to_string(),
             group,
@@ -690,7 +695,8 @@ impl Desk {
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
             otp: sennel_core::vault::totp_shape(&e)
                 .map(|(period, digits)| OtpShape { period, digits }),
-            extras: sennel_core::vault::extra_rows(&e).len(),
+            extras: rows.len(),
+            fields: rows.into_iter().filter(|r| !r.file).collect(),
             recycled: vault.is_recycled(&id),
         })
     }
@@ -1089,41 +1095,75 @@ impl Desk {
         let s = self.session();
         let vault = s.vault().ok_or("locked")?;
         let e = vault.get_entry(&id).ok_or("that entry is gone")?;
-        Ok(sennel_core::vault::extra_rows(&e)
-            .iter()
-            .map(|row| match row {
-                Extra::Field {
-                    name,
-                    value,
-                    secret,
-                } => FieldRow {
-                    name: name.clone(),
-                    file: false,
-                    secret: *secret,
-                    value: (!secret).then(|| value.clone()),
-                    bytes: None,
-                },
-                Extra::File { name, bytes } => FieldRow {
-                    name: name.clone(),
-                    file: true,
-                    secret: false,
-                    value: None,
-                    bytes: Some(*bytes),
-                },
-            })
-            .collect())
+        Ok(field_rows(&e))
     }
 
-    pub fn add_field(&self, id: &str, name: &str, value: &str) -> Result<Reply, String> {
+    /// A password-type custom field, shown because the user asked, like `reveal`.
+    pub fn reveal_field(&self, id: &str, name: &str) -> Result<Zeroizing<String>, String> {
+        self.field_text(id, Field::Custom(name))
+    }
+
+    pub fn add_field(
+        &self,
+        id: &str,
+        name: &str,
+        value: &str,
+        kind: &str,
+    ) -> Result<Reply, String> {
         if name.trim().is_empty() {
             return Ok(Reply::one(warn("a name is the only must")));
         }
+        let kind = FieldKind::parse(kind).ok_or_else(|| format!("no field type {kind}"))?;
         let id = entry_id(id)?;
         let mut s = self.session();
-        Ok(Reply::notes(match s.add_field(id, name.trim(), value) {
-            Ok(()) => self.saved(&mut s, info(format!("added field {}", name.trim()))),
-            Err(e) => vec![error(format!("cannot add · {e}"))],
-        }))
+        Ok(Reply::notes(
+            match s.add_typed_field(id, name.trim(), value, kind) {
+                Ok(()) => self.saved(&mut s, info(format!("added field {}", name.trim()))),
+                Err(e) => vec![error(format!("cannot add · {e}"))],
+            },
+        ))
+    }
+
+    /// `value` is None when a protected field's box was left empty: keep the secret as it is.
+    pub fn edit_field(
+        &self,
+        id: &str,
+        name: &str,
+        new_name: &str,
+        value: Option<&str>,
+        kind: &str,
+    ) -> Result<Reply, String> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Ok(Reply::one(warn("a name is the only must")));
+        }
+        let kind = FieldKind::parse(kind).ok_or_else(|| format!("no field type {kind}"))?;
+        let id = entry_id(id)?;
+        let mut s = self.session();
+        let was_protected = s
+            .vault()
+            .and_then(|v| v.get_entry(&id))
+            .and_then(|e| e.fields.get(name).map(|f| f.is_protected()))
+            .unwrap_or(false);
+        let done = match new_name == name {
+            true => format!("saved field {name}"),
+            false => format!("renamed {name} to {new_name}"),
+        };
+        Ok(Reply::notes(
+            match s.edit_typed_field(id, name, new_name, value, kind) {
+                Ok(false) => vec![info(format!("{name} is unchanged"))],
+                Ok(true) => {
+                    let mut notes = self.saved(&mut s, info(done));
+                    // The box said "unchanged", so a type switch alone must not hide that the secret is now plain.
+                    // Second, not last: the window shows the last note, and a failed save must win.
+                    if was_protected && kind != FieldKind::Password {
+                        notes.insert(1, warn(format!("{new_name} is no longer protected")));
+                    }
+                    notes
+                }
+                Err(e) => vec![error(format!("cannot save · {e}"))],
+            },
+        ))
     }
 
     pub fn attach(&self, id: &str, name: &str, path: &str) -> Result<Reply, String> {
@@ -1323,6 +1363,35 @@ fn resolve_note(e: Resolve) -> Note {
         Resolve::Deferred => info("waiting for your key"),
         Resolve::Failed(e) => error(format!("{e}")),
     }
+}
+
+// Protected values stay out: they cross to the webview only through `reveal_field`.
+fn field_rows(e: &keepass::db::EntryRef<'_>) -> Vec<FieldRow> {
+    sennel_core::vault::extra_rows(e)
+        .iter()
+        .map(|row| match row {
+            Extra::Field {
+                name,
+                value,
+                secret,
+            } => FieldRow {
+                name: name.clone(),
+                file: false,
+                secret: *secret,
+                kind: sennel_core::vault::field_kind(e, name).as_str(),
+                value: (!secret).then(|| value.clone()),
+                bytes: None,
+            },
+            Extra::File { name, bytes } => FieldRow {
+                name: name.clone(),
+                file: true,
+                secret: false,
+                kind: "file",
+                value: None,
+                bytes: Some(*bytes),
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

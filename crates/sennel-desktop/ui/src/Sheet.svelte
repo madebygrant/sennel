@@ -10,8 +10,19 @@
   let { sheet, say, reload, refresh, close, open } = $props();
 
   let rows = $state(null);
+  // What the field form is for: { file, kind, edit, secret }. `edit` names the field being edited.
   let adding = $state(null);
+  // Bound apart from `adding`, so closing the form never leaves a binding reading through null.
+  let formName = $state("");
+  let formValue = $state("");
   let made = $state(null);
+
+  const FIELD_KINDS = [
+    ["text", "Text"],
+    ["textarea", "Text area"],
+    ["number", "Number"],
+    ["password", "Password"],
+  ];
 
   const titles = { audit: "Needs attention", history: "History", fields: "Fields and attachments", generate: "Generated password" };
 
@@ -37,12 +48,32 @@
     }
   }
 
-  async function submitAdd(event) {
-    event.preventDefault();
-    const { file, name, from } = adding;
+  function openForm(meta, name = "", value = "") {
+    adding = meta;
+    formName = name;
+    formValue = value;
+  }
+
+  function closeForm() {
     adding = null;
-    if (file) await act("attach", { id: sheet.id, name, path: from });
-    else await act("add_field", { id: sheet.id, name, value: from });
+    formName = "";
+    formValue = "";
+  }
+
+  // A protected field's value never reaches the window, so its box starts empty and empty keeps it.
+  function editField(r) {
+    openForm({ file: false, kind: r.kind, edit: r.name, secret: r.secret }, r.name, r.secret ? "" : (r.value ?? ""));
+  }
+
+  async function submitField(event) {
+    event.preventDefault();
+    const { file, kind, edit, secret } = adding;
+    const name = formName;
+    const value = formValue;
+    closeForm();
+    if (file) await act("attach", { id: sheet.id, name, path: value });
+    else if (edit !== null) await act("edit_field", { id: sheet.id, name: edit, newName: name, value: secret && value === "" ? null : value, kind });
+    else await act("add_field", { id: sheet.id, name, value, kind });
   }
 
   const fb = copyFeedback();
@@ -124,46 +155,73 @@
       {/if}
     {:else if sheet.kind === "fields"}
       {#each rows as r}
-        <div class="line" use:fb.spot={r.name}>
-          <span>
-            <strong>{r.name}</strong>
-            {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono lit">{r.secret ? "••••••" : r.value}</span>{/if}
-          </span>
-          <span class="actions">
-            {#if r.file}
-              <button onclick={() => act("extract", { id: sheet.id, name: r.name })}>Save beside vault</button>
-              <button onclick={() => act("agent_give", { id: sheet.id, name: r.name })}>To ssh-agent</button>
-            {:else}
-              <button onclick={() => copyOut(r.name, "copy_field", { id: sheet.id, name: r.name })}>{fb.copied === r.name ? "Copied" : "Copy"}</button>
-            {/if}
-            <button class="danger" onclick={() => act("remove_field", { id: sheet.id, name: r.name, file: r.file })}>Remove</button>
-          </span>
-        </div>
+        {#if !r.file && adding?.edit === r.name}
+          {@render fieldForm()}
+        {:else}
+          <div class="line" use:fb.spot={r.name}>
+            <span>
+              <strong>{r.name}</strong>
+              {#if r.file}<span class="dim">{r.bytes} bytes</span>{:else}<span class="dim mono lit">{r.secret ? "••••••" : r.value}</span>{/if}
+            </span>
+            <span class="actions">
+              {#if r.file}
+                <button onclick={() => act("extract", { id: sheet.id, name: r.name })}>Save beside vault</button>
+                <button onclick={() => act("agent_give", { id: sheet.id, name: r.name })}>To ssh-agent</button>
+              {:else}
+                <button onclick={() => copyOut(r.name, "copy_field", { id: sheet.id, name: r.name })}>{fb.copied === r.name ? "Copied" : "Copy"}</button>
+                {#if !adding}<button onclick={() => editField(r)}>Edit</button>{/if}
+              {/if}
+              <button class="danger" onclick={() => act("remove_field", { id: sheet.id, name: r.name, file: r.file })}>Remove</button>
+            </span>
+          </div>
+        {/if}
       {:else}
         <p class="dim">No custom fields or attachments.</p>
       {/each}
-      {#if adding}
-        <form class="add" onsubmit={submitAdd}>
-          <input bind:value={adding.name} placeholder="Name" />
-          <input
-            class="mono"
-            bind:value={adding.from}
-            placeholder={adding.file ? "Path to the file" : "Value (stored protected)"}
-            spellcheck="false"
-            oncopy={adding.file ? undefined : secretCopy(adding.name || "the value", say)}
-            oncut={adding.file ? undefined : secretCopy(adding.name || "the value", say)}
-          />
-          <button class="primary" type="submit">Add</button>
-        </form>
-      {:else}
+      {#if adding && adding.edit === null}
+        {@render fieldForm()}
+      {:else if !adding}
         <div class="row">
-          <button onclick={() => (adding = { file: false, name: "", from: "" })}>Add field</button>
-          <button onclick={() => (adding = { file: true, name: "", from: "" })}>Attach file</button>
+          <button onclick={() => openForm({ file: false, kind: "password", edit: null, secret: false })}>Add field</button>
+          <button onclick={() => openForm({ file: true, kind: null, edit: null, secret: false })}>Attach file</button>
         </div>
       {/if}
     {/if}
   </section>
 </Modal>
+
+{#snippet fieldForm()}
+  <form class="add" class:wide={adding?.kind === "textarea"} onsubmit={submitField}>
+    {#if !adding?.file}
+      <div class="kinds" role="radiogroup" aria-label="Field type">
+        {#each FIELD_KINDS as [kind, label]}
+          <button type="button" role="radio" aria-checked={adding?.kind === kind} class:on={adding?.kind === kind} onclick={() => (adding.kind = kind)}>{label}</button>
+        {/each}
+      </div>
+    {/if}
+    <input bind:value={formName} placeholder="Name" />
+    {#if adding?.file}
+      <input class="mono" bind:value={formValue} placeholder="Path to the file" spellcheck="false" />
+    {:else if adding?.kind === "textarea"}
+      <textarea class="mono" rows="4" bind:value={formValue} placeholder={adding?.secret ? "Unchanged · type to replace" : "Value"} spellcheck="false" oncopy={secretCopy(formName || "the value", say)} oncut={secretCopy(formName || "the value", say)}></textarea>
+    {:else}
+      <input
+        class="mono"
+        type={adding?.kind === "password" ? "password" : "text"}
+        inputmode={adding?.kind === "number" ? "decimal" : undefined}
+        bind:value={formValue}
+        placeholder={adding?.secret ? "Unchanged · type to replace" : adding?.kind === "password" ? "Value (stored protected)" : adding?.kind === "number" ? "Digits, like 0042 or 3.5" : "Value"}
+        spellcheck="false"
+        oncopy={secretCopy(formName || "the value", say)}
+        oncut={secretCopy(formName || "the value", say)}
+      />
+    {/if}
+    <div class="submit">
+      <button type="button" onclick={closeForm}>Cancel</button>
+      <button class="primary" type="submit">{adding?.edit === null ? "Add" : "Save"}</button>
+    </div>
+  </form>
+{/snippet}
 
 <style>
   section {
@@ -212,6 +270,10 @@
     min-width: 0;
   }
 
+  .line .actions {
+    flex-shrink: 0;
+  }
+
   .actions button {
     padding: 3px 8px;
     font-size: 12px;
@@ -232,6 +294,38 @@
     display: grid;
     grid-template-columns: 1fr 1.4fr auto;
     gap: 6px;
+  }
+
+  .add .kinds {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 4px;
+  }
+
+  .kinds button {
+    padding: 3px 10px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+
+  .kinds button.on {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .add.wide {
+    grid-template-columns: 1fr auto;
+  }
+
+  .submit {
+    display: flex;
+    gap: 6px;
+  }
+
+  .add.wide textarea {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    resize: vertical;
   }
 
   .secret {

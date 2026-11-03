@@ -244,8 +244,41 @@ async fn add_field(
     id: String,
     name: String,
     value: String,
+    kind: String,
 ) -> Result<Reply, String> {
-    off_main(&desk, move |d| d.add_field(&id, &name, &value)).await?
+    off_main(&desk, move |d| d.add_field(&id, &name, &value, &kind)).await?
+}
+
+#[tauri::command]
+async fn edit_field(
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+    new_name: String,
+    value: Option<String>,
+    kind: String,
+) -> Result<Reply, String> {
+    // Wiped once the edit lands, like the entry form's password.
+    let value = value.map(Zeroizing::new);
+    off_main(&desk, move |d| {
+        d.edit_field(
+            &id,
+            &name,
+            &new_name,
+            value.as_ref().map(|v| v.as_str()),
+            &kind,
+        )
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn reveal_field(
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+) -> Result<Zeroizing<String>, String> {
+    off_main(&desk, move |d| d.reveal_field(&id, &name)).await?
 }
 
 #[tauri::command]
@@ -361,6 +394,8 @@ pub fn run(context: tauri::Context) {
             clear_history,
             fields,
             add_field,
+            reveal_field,
+            edit_field,
             attach,
             remove_field,
             extract,

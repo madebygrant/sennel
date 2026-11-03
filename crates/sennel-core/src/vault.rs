@@ -355,6 +355,81 @@ pub fn extra_rows(entry: &EntryRef<'_>) -> Vec<Extra> {
     fields
 }
 
+/// How a custom field is shown and edited. KDBX has no field types, so a password is the
+/// format's own protected flag and the rest live in the entry's custom data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FieldKind {
+    Text,
+    Textarea,
+    Number,
+    Password,
+}
+
+impl FieldKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FieldKind::Text => "text",
+            FieldKind::Textarea => "textarea",
+            FieldKind::Number => "number",
+            FieldKind::Password => "password",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<FieldKind> {
+        match text {
+            "text" => Some(FieldKind::Text),
+            "textarea" => Some(FieldKind::Textarea),
+            "number" => Some(FieldKind::Number),
+            "password" => Some(FieldKind::Password),
+            _ => None,
+        }
+    }
+}
+
+// Prefixed so a KeePassXC plugin's own custom data on the same entry can never collide.
+fn kind_key(name: &str) -> String {
+    format!("sennel.kind:{name}")
+}
+
+// Protected wins over a stored kind, so a field KeePassXC protects never shows in the clear here.
+// A field with no stored kind, from another app or from the TUI, is a textarea if it spans lines.
+pub fn field_kind(entry: &EntryRef<'_>, name: &str) -> FieldKind {
+    let Some(value) = entry.fields.get(name) else {
+        return FieldKind::Text;
+    };
+    if value.is_protected() {
+        return FieldKind::Password;
+    }
+    let stored = entry
+        .custom_data
+        .get(&kind_key(name))
+        .and_then(|item| match &item.value {
+            Some(keepass::db::CustomDataValue::String(text)) => FieldKind::parse(text),
+            _ => None,
+        });
+    // A newline wins over a stored Text, since another app may have edited the value since.
+    match stored {
+        Some(FieldKind::Number) => FieldKind::Number,
+        _ if value.get().contains('\n') => FieldKind::Textarea,
+        Some(FieldKind::Textarea) => FieldKind::Textarea,
+        _ => FieldKind::Text,
+    }
+}
+
+// Digits with an optional sign and one decimal point. Leading zeros stay, since an account
+// number is a number people keep here and dropping its zeros would change it.
+pub fn is_number(text: &str) -> bool {
+    let body = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let mut parts = body.splitn(2, '.');
+    let whole = parts.next().unwrap_or("");
+    let fraction = parts.next();
+    let digits = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+    match fraction {
+        None => !whole.is_empty() && digits(whole),
+        Some(f) => !(whole.is_empty() && f.is_empty()) && digits(whole) && digits(f),
+    }
+}
+
 /* A needle that starts with `#` is a tag filter, not a fuzzy search. Tags are
 a KeePassXC feature Sennel could see (`extras` prints them) and not act on,
 and fuzzing them alongside titles would make `#work` match "homework".
@@ -1824,6 +1899,10 @@ impl Vault {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
         };
+        // A field KeePassXC renamed leaves its old kind behind, and a new field must not inherit it.
+        if !entry.fields.contains_key(name) {
+            entry.custom_data.remove(&kind_key(name));
+        }
         match secret {
             true => entry.set_protected(name, value),
             false => entry.set_unprotected(name, value),
@@ -1848,6 +1927,115 @@ impl Vault {
         Ok(())
     }
 
+    /// A new custom field with the way it is shown. Password goes in protected; the rest go in
+    /// plain with the kind beside them, so KeePassXC still shows their values.
+    pub fn add_typed_field(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        value: &str,
+        kind: FieldKind,
+    ) -> Result<(), VaultError> {
+        let value = match kind {
+            FieldKind::Number => value.trim(),
+            _ => value,
+        };
+        if kind == FieldKind::Number && !is_number(value) {
+            return Err(VaultError::Db(format!("{name} needs a number")));
+        }
+        // Replacing would drop the old value with no history, and could unprotect a secret.
+        let exists = self
+            .get_entry(id)
+            .ok_or(VaultError::EntryNotFound)?
+            .fields
+            .contains_key(name);
+        // The fixed rows exist on every entry; `set_field` gives those their own message.
+        if exists && !STANDARD.contains(&name) {
+            return Err(VaultError::Db(format!(
+                "{name} already exists · edit it instead"
+            )));
+        }
+        self.set_field(id, name, value, kind == FieldKind::Password)?;
+        self.set_kind(id, name, kind)
+    }
+
+    /// Renames, retypes or rewrites a custom field. A `None` value keeps the current one, so a
+    /// protected field can change name or type without its secret crossing to whoever asked.
+    /// False when nothing differs, and then nothing is written.
+    pub fn edit_typed_field(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+        new_name: &str,
+        value: Option<&str>,
+        kind: FieldKind,
+    ) -> Result<bool, VaultError> {
+        let entry = self.get_entry(id).ok_or(VaultError::EntryNotFound)?;
+        if STANDARD.contains(&name) || !entry.fields.contains_key(name) {
+            return Err(VaultError::Db(format!("no field {name}")));
+        }
+        if new_name.trim().is_empty() {
+            return Err(VaultError::Db("a field needs a name".into()));
+        }
+        if STANDARD.contains(&new_name) {
+            return Err(VaultError::Db(format!(
+                "{new_name} has its own row in the form"
+            )));
+        }
+        if new_name != name && entry.fields.contains_key(new_name) {
+            return Err(VaultError::Db(format!("{new_name} already exists")));
+        }
+        let mut value = match value {
+            Some(v) => Zeroizing::new(v.to_string()),
+            None => Zeroizing::new(entry.fields[name].get().clone()),
+        };
+        if kind == FieldKind::Number {
+            let trimmed = value.trim().to_string();
+            value = Zeroizing::new(trimmed);
+            if !is_number(&value) {
+                return Err(VaultError::Db(format!("{new_name} needs a number")));
+            }
+        }
+        let entry = self.get_entry(id).ok_or(VaultError::EntryNotFound)?;
+        let same = new_name == name
+            && kind == field_kind(&entry, name)
+            && entry.fields[name].get().as_str() == value.as_str();
+        if same {
+            return Ok(false);
+        }
+        // Everything is checked above, so a refused edit never leaves half a rename behind.
+        if new_name != name {
+            let mut entry = self.db.entry_mut(*id).ok_or(VaultError::EntryNotFound)?;
+            entry.fields.remove(name);
+            entry.custom_data.remove(&kind_key(name));
+        }
+        self.set_field(id, new_name, &value, kind == FieldKind::Password)?;
+        self.set_kind(id, new_name, kind)?;
+        Ok(true)
+    }
+
+    // Password is the protected flag alone, so it stores no kind.
+    fn set_kind(&mut self, id: &EntryId, name: &str, kind: FieldKind) -> Result<(), VaultError> {
+        let Some(mut entry) = self.db.entry_mut(*id) else {
+            return Err(VaultError::EntryNotFound);
+        };
+        match kind {
+            FieldKind::Password => {
+                entry.custom_data.remove(&kind_key(name));
+            }
+            _ => {
+                entry.custom_data.insert(
+                    kind_key(name),
+                    keepass::db::CustomDataItem {
+                        value: Some(keepass::db::CustomDataValue::String(kind.as_str().into())),
+                        last_modification_time: Some(Times::now()),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_field(&mut self, id: &EntryId, name: &str) -> Result<(), VaultError> {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
@@ -1855,6 +2043,7 @@ impl Vault {
         if entry.fields.remove(name).is_none() {
             return Err(VaultError::EntryNotFound);
         }
+        entry.custom_data.remove(&kind_key(name));
         entry.times.last_modification = Some(Times::now());
         Ok(())
     }
@@ -3564,6 +3753,205 @@ mod tests {
         assert_eq!(expires_at(&back.get_entry(&id).unwrap()), Some(when));
         assert!(expired(&back.get_entry(&id).unwrap()));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_field_keeps_its_type_and_loses_it_when_removed() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "account", " 0042 ", FieldKind::Number)
+            .unwrap();
+        v.add_typed_field(&id, "pin", "1234", FieldKind::Password)
+            .unwrap();
+        v.add_typed_field(&id, "memo", "one line", FieldKind::Textarea)
+            .unwrap();
+        v.set_field(&id, "keepassxc", "a\nb", false).unwrap();
+        v.set_field(&id, "plain", "a", false).unwrap();
+
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(field_kind(&e, "account"), FieldKind::Number);
+        // Trimmed, but the leading zeros of an account number stay.
+        assert_eq!(e.fields["account"].get(), "0042");
+        assert_eq!(field_kind(&e, "pin"), FieldKind::Password);
+        assert!(e.fields["pin"].is_protected());
+        assert_eq!(field_kind(&e, "memo"), FieldKind::Textarea);
+        // No stored kind: what another app wrote is read from the value itself.
+        assert_eq!(field_kind(&e, "keepassxc"), FieldKind::Textarea);
+        assert_eq!(field_kind(&e, "plain"), FieldKind::Text);
+
+        v.remove_field(&id, "account").unwrap();
+        v.set_field(&id, "account", "x", false).unwrap();
+        assert_eq!(
+            field_kind(&v.get_entry(&id).unwrap(), "account"),
+            FieldKind::Text
+        );
+        assert!(
+            v.add_typed_field(&id, "n", "1e5", FieldKind::Number)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn adding_a_field_that_exists_is_refused_and_keeps_the_original() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "pin", "1234", FieldKind::Password)
+            .unwrap();
+
+        let why = v
+            .add_typed_field(&id, "pin", "0000", FieldKind::Text)
+            .unwrap_err();
+        assert!(why.to_string().contains("already exists"), "{why}");
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(e.fields["pin"].get(), "1234");
+        assert!(e.fields["pin"].is_protected(), "the refusal unprotected it");
+        assert_eq!(field_kind(&e, "pin"), FieldKind::Password);
+
+        let why = v
+            .add_typed_field(&id, "Title", "x", FieldKind::Text)
+            .unwrap_err();
+        assert!(why.to_string().contains("own row"), "{why}");
+    }
+
+    #[test]
+    fn a_line_break_shows_as_a_text_area_unless_the_field_is_a_number() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "memo", "one", FieldKind::Text)
+            .unwrap();
+        v.add_typed_field(&id, "account", "42", FieldKind::Number)
+            .unwrap();
+        // What KeePassXC or the terminal app might write over them later.
+        v.set_field(&id, "memo", "one\ntwo", false).unwrap();
+        v.set_field(&id, "account", "4\n2", false).unwrap();
+
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(field_kind(&e, "memo"), FieldKind::Textarea);
+        assert_eq!(field_kind(&e, "account"), FieldKind::Number);
+    }
+
+    #[test]
+    fn a_new_field_does_not_inherit_a_kind_left_by_a_rename() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "account", "42", FieldKind::Number)
+            .unwrap();
+        // What a rename in KeePassXC does: the field goes, its custom data stays.
+        v.db.entry_mut(id).unwrap().fields.remove("account");
+
+        v.set_field(&id, "account", "not a number", false).unwrap();
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(field_kind(&e, "account"), FieldKind::Text);
+        assert!(!e.custom_data.contains_key("sennel.kind:account"));
+    }
+
+    #[test]
+    fn editing_a_field_changes_its_name_value_and_type_together() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "acct", "42", FieldKind::Number)
+            .unwrap();
+
+        v.edit_typed_field(&id, "acct", "account", Some(" 0042 "), FieldKind::Number)
+            .unwrap();
+        let e = v.get_entry(&id).unwrap();
+        assert!(!e.fields.contains_key("acct"));
+        assert!(
+            !e.custom_data.contains_key("sennel.kind:acct"),
+            "the old kind stayed"
+        );
+        assert_eq!(e.fields["account"].get(), "0042");
+        assert_eq!(field_kind(&e, "account"), FieldKind::Number);
+
+        v.edit_typed_field(&id, "account", "account", None, FieldKind::Password)
+            .unwrap();
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(
+            e.fields["account"].get(),
+            "0042",
+            "None did not keep the value"
+        );
+        assert!(e.fields["account"].is_protected());
+        assert_eq!(field_kind(&e, "account"), FieldKind::Password);
+    }
+
+    #[test]
+    fn an_edit_that_matches_writes_nothing() {
+        use crate::vault::FieldKind;
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "acct", "42", FieldKind::Number)
+            .unwrap();
+        v.add_typed_field(&id, "pin", "1234", FieldKind::Password)
+            .unwrap();
+        let stamp = |v: &Vault| v.get_entry(&id).unwrap().times.last_modification;
+        let before = stamp(&v);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Trimmed to the same number, and a kept secret, both count as no change.
+        let same = [
+            v.edit_typed_field(&id, "acct", "acct", Some(" 42 "), FieldKind::Number),
+            v.edit_typed_field(&id, "pin", "pin", None, FieldKind::Password),
+            v.edit_typed_field(&id, "pin", "pin", Some("1234"), FieldKind::Password),
+        ];
+        assert_eq!(same, [Ok(false), Ok(false), Ok(false)]);
+        assert_eq!(stamp(&v), before, "a no-op edit moved the modified time");
+        assert_eq!(
+            v.edit_typed_field(&id, "acct", "acct", Some("43"), FieldKind::Number),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn a_refused_field_edit_changes_nothing() {
+        use crate::vault::{FieldKind, field_kind};
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "bank", "u", "p", "", "").unwrap();
+        v.add_typed_field(&id, "pin", "1234", FieldKind::Password)
+            .unwrap();
+        v.add_typed_field(&id, "acct", "42", FieldKind::Number)
+            .unwrap();
+
+        let refused = [
+            v.edit_typed_field(&id, "pin", "acct", None, FieldKind::Password),
+            v.edit_typed_field(&id, "pin", "code", Some("12a"), FieldKind::Number),
+            v.edit_typed_field(&id, "pin", "Title", None, FieldKind::Text),
+            v.edit_typed_field(&id, "pin", "  ", None, FieldKind::Text),
+            v.edit_typed_field(&id, "nope", "x", None, FieldKind::Text),
+            v.edit_typed_field(&id, "Title", "x", None, FieldKind::Text),
+        ];
+        for result in refused {
+            assert!(result.is_err(), "{result:?}");
+        }
+        let e = v.get_entry(&id).unwrap();
+        assert_eq!(e.fields["pin"].get(), "1234");
+        assert!(e.fields["pin"].is_protected());
+        assert_eq!(e.fields["acct"].get(), "42");
+        assert_eq!(field_kind(&e, "acct"), FieldKind::Number);
+        assert!(!e.fields.contains_key("code"));
+        assert_eq!(e.title(), "bank");
+    }
+
+    #[test]
+    fn a_number_is_digits_a_sign_and_one_point() {
+        for ok in ["0", "0042", "-3", "+3", "3.5", ".5", "5."] {
+            assert!(crate::vault::is_number(ok), "{ok}");
+        }
+        for bad in ["", "-", ".", "1.2.3", "1e5", "1 000", "12a"] {
+            assert!(!crate::vault::is_number(bad), "{bad}");
+        }
     }
 
     /* Custom fields and attachments used to be a count and nothing else.

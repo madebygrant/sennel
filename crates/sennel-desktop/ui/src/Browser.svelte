@@ -1,6 +1,7 @@
 <script>
   import { onMount, tick } from "svelte";
   import {
+    Asterisk,
     CalendarClock,
     Check,
     ChevronDown,
@@ -15,6 +16,7 @@
     FolderOpen,
     FolderPlus,
     Globe,
+    Hash,
     Lock,
     Paperclip,
     Pencil,
@@ -25,9 +27,11 @@
     Search,
     ShieldAlert,
     Tag,
+    TextAlignStart,
     Timer,
     Trash2,
     TriangleAlert,
+    Type,
     Undo2,
     User,
     Vault,
@@ -56,6 +60,8 @@
   let detail = $state(null);
   // Set only on an explicit reveal and dropped on every change of entry.
   let revealed = $state(null);
+  // Password-type custom fields the user has shown, by name, until the selection changes.
+  let shownFields = $state({});
   let issues = $state({});
   let form = $state(null);
   let sheet = $state(null);
@@ -128,6 +134,7 @@
   async function pick(id) {
     selected = id;
     revealed = null;
+    shownFields = {};
     detail = id ? await call("entry", { id }).catch(() => null) : null;
   }
 
@@ -160,6 +167,35 @@
       fb.mark(field);
     }
   }
+
+  // Keyed apart from the fixed fields, since a custom field may be named "username".
+  const fieldKey = (name) => `field:${name}`;
+
+  async function copyField(name) {
+    if (!selected) return;
+    const note = await call("copy_field", { id: selected, name });
+    say([note]);
+    await refresh();
+    if (note.level !== "error") {
+      copiedFrom = { id: selected, field: fieldKey(name), copy: clears.copies };
+      fb.mark(fieldKey(name));
+    }
+  }
+
+  async function toggleField(name) {
+    if (name in shownFields) {
+      const { [name]: _, ...rest } = shownFields;
+      shownFields = rest;
+      return;
+    }
+    try {
+      shownFields = { ...shownFields, [name]: await call("reveal_field", { id: selected, name }) };
+    } catch (why) {
+      say([{ level: "error", text: String(why) }]);
+    }
+  }
+
+  const FIELD_ICONS = { text: Type, textarea: TextAlignStart, number: Hash, password: Asterisk };
 
   async function toggleReveal() {
     revealed = revealed === null ? await call("reveal", { id: selected }) : null;
@@ -595,6 +631,30 @@
         {#if detail.expires}
           <div class="field still"><span class="label"><CalendarClock />Expires</span><span class="value">{detail.expires}</span></div>
         {/if}
+        {#each detail.fields as f (f.name)}
+          {@const key = fieldKey(f.name)}
+          {@const Icon = FIELD_ICONS[f.kind] ?? Type}
+          {#if f.kind === "password"}
+            <div class="field still" class:done={fb.copied === key} class:held={holding(key)} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={key}>
+              <span class="label" title={f.name}><Icon /><span class="name">{f.name}</span></span>
+              <span class="value" class:lit={f.name in shownFields} class:multi={shownFields[f.name]?.includes("\n")}>{shownFields[f.name] ?? "••••••••"}</span>
+              <span class="tools">
+                <button class="icon" onclick={() => toggleField(f.name)} title={f.name in shownFields ? "Hide" : "Show"} aria-label={`${f.name in shownFields ? "Hide" : "Show"} ${f.name}`}>
+                  {#if f.name in shownFields}<EyeOff />{:else}<Eye />{/if}
+                </button>
+                <button class="icon" onclick={() => copyField(f.name)} title="Copy" aria-label={fb.copied === key ? "Copied" : `Copy ${f.name}`}>
+                  {#if fb.copied === key}<Check />{:else}<Copy />{/if}
+                </button>
+              </span>
+            </div>
+          {:else}
+            <button class="field" class:done={fb.copied === key} class:held={holding(key)} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={key} onclick={() => copyField(f.name)}>
+              <span class="label" title={f.name}><Icon /><span class="name">{f.name}</span></span>
+              <span class="value lit" class:multi={f.kind === "textarea"} class:num={f.kind === "number"}>{f.value}</span>
+              <span class="hint">{#if fb.copied === key}<Check />Copied{:else}<Copy />{/if}</span>
+            </button>
+          {/if}
+        {/each}
       </div>
 
       {#if detail.notes}
@@ -1213,6 +1273,33 @@
 
   .value.quiet {
     color: var(--faint);
+  }
+
+  .field:has(.multi) {
+    align-items: start;
+  }
+
+  .value.multi {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 9.5em;
+    overflow: auto;
+  }
+
+  .value.num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .label .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .tools {
+    display: flex;
+    gap: 4px;
   }
 
   .hint {

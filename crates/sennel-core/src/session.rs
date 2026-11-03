@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::Loaded;
 use crate::touchid::Refused;
-use crate::vault::{EntryExt, Extra, MergeSummary, Vault, VaultError, YubiSpec};
+use crate::vault::{EntryExt, Extra, FieldKind, MergeSummary, Vault, VaultError, YubiSpec};
 
 /// A password sealed so only the user's presence opens it again. Generic so a test can stand in
 /// for the Secure Enclave without any binary linking the stand-in.
@@ -916,23 +916,67 @@ impl<S: Seal> Session<S> {
         })
     }
 
+    // Every field and file change is its own undo step. An undo writes back the whole entry, so a
+    // change left off the stack would be wiped by undoing an older step. Pushed only on a change.
+    fn as_edit(
+        &mut self,
+        id: EntryId,
+        change: impl FnOnce(&mut Vault) -> Result<bool, VaultError>,
+    ) -> Result<bool, VaultError> {
+        let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
+        let before = vault.get_entry(&id).map(|e| e.clone());
+        let changed = change(vault)?;
+        if let (true, Some(before)) = (changed, before) {
+            self.push_undo(Undo::Edit { id, before });
+        }
+        Ok(changed)
+    }
+
     /// Added protected: a field somebody adds by hand to a password manager is more often a secret than not.
     pub fn add_field(&mut self, id: EntryId, name: &str, value: &str) -> Result<(), VaultError> {
-        let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
-        vault.set_field(&id, name, value, true)
+        self.as_edit(id, |v| v.set_field(&id, name, value, true).map(|()| true))
+            .map(|_| ())
+    }
+
+    pub fn add_typed_field(
+        &mut self,
+        id: EntryId,
+        name: &str,
+        value: &str,
+        kind: FieldKind,
+    ) -> Result<(), VaultError> {
+        self.as_edit(id, |v| {
+            v.add_typed_field(&id, name, value, kind).map(|()| true)
+        })
+        .map(|_| ())
+    }
+
+    /// False when the edit matched what was there, so nothing was written.
+    pub fn edit_typed_field(
+        &mut self,
+        id: EntryId,
+        name: &str,
+        new_name: &str,
+        value: Option<&str>,
+        kind: FieldKind,
+    ) -> Result<bool, VaultError> {
+        self.as_edit(id, |v| v.edit_typed_field(&id, name, new_name, value, kind))
     }
 
     pub fn attach(&mut self, id: EntryId, name: &str, bytes: Vec<u8>) -> Result<(), VaultError> {
-        let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
-        vault.add_attachment(&id, name, bytes)
+        self.as_edit(id, |v| v.add_attachment(&id, name, bytes).map(|()| true))
+            .map(|_| ())
     }
 
     pub fn remove_extra(&mut self, id: EntryId, row: &Extra) -> Result<(), VaultError> {
-        let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
-        match row {
-            Extra::Field { name, .. } => vault.remove_field(&id, name),
-            Extra::File { name, .. } => vault.remove_attachment(&id, name),
-        }
+        self.as_edit(id, |v| {
+            match row {
+                Extra::Field { name, .. } => v.remove_field(&id, name),
+                Extra::File { name, .. } => v.remove_attachment(&id, name),
+            }
+            .map(|()| true)
+        })
+        .map(|_| ())
     }
 
     /// Drops every old version of an entry. Returns how many went; there is no undo for this.
@@ -1410,6 +1454,78 @@ mod tests {
         assert_eq!(read(&s).1, "pw");
         s.undo();
         assert_eq!(read(&s), ("renamed".into(), "p".into()));
+    }
+
+    #[test]
+    fn a_field_edit_undoes_back_to_the_old_name_value_and_type() {
+        use crate::vault::{FieldKind, field_kind};
+        let (mut s, _, entry) = open();
+        s.add_typed_field(entry, "pin", "1234", FieldKind::Password)
+            .unwrap();
+        s.edit_typed_field(entry, "pin", "code", Some("99"), FieldKind::Number)
+            .unwrap();
+        s.undo();
+        let e = s.vault.as_ref().unwrap().get_entry(&entry).unwrap();
+        assert!(!e.fields.contains_key("code"));
+        assert_eq!(e.fields["pin"].get(), "1234");
+        assert_eq!(field_kind(&e, "pin"), FieldKind::Password);
+    }
+
+    // An undo writes back a whole entry, so each field and file change must be its own step.
+    #[test]
+    fn undoing_a_field_edit_keeps_fields_and_files_added_after_it() {
+        use crate::vault::FieldKind;
+        let (mut s, _, entry) = open();
+        s.add_typed_field(entry, "a", "1", FieldKind::Text).unwrap();
+        s.edit_typed_field(entry, "a", "a", Some("2"), FieldKind::Text)
+            .unwrap();
+        s.add_typed_field(entry, "b", "codes", FieldKind::Password)
+            .unwrap();
+        s.attach(entry, "key.pem", b"k".to_vec()).unwrap();
+        let read = |s: &Session<Fake>| {
+            let e = s.vault.as_ref().unwrap().get_entry(&entry).unwrap();
+            (
+                e.fields.get("a").map(|v| v.get().clone()),
+                e.fields.contains_key("b"),
+                e.attachments_named().count(),
+            )
+        };
+
+        s.undo();
+        assert_eq!(
+            read(&s),
+            (Some("2".into()), true, 0),
+            "undo took more than the attach"
+        );
+        s.undo();
+        assert_eq!(read(&s), (Some("2".into()), false, 0));
+        s.undo();
+        assert_eq!(read(&s), (Some("1".into()), false, 0));
+    }
+
+    #[test]
+    fn a_removed_field_comes_back_on_undo_and_a_no_op_edit_is_not_a_step() {
+        use crate::vault::{Extra, FieldKind};
+        let (mut s, _, entry) = open();
+        s.add_typed_field(entry, "pin", "1234", FieldKind::Password)
+            .unwrap();
+        let steps = s.undo.len();
+        let changed = s
+            .edit_typed_field(entry, "pin", "pin", None, FieldKind::Password)
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(s.undo.len(), steps, "a no-op edit went on the stack");
+
+        let row = Extra::Field {
+            name: "pin".into(),
+            value: String::new(),
+            secret: true,
+        };
+        s.remove_extra(entry, &row).unwrap();
+        s.undo();
+        let e = s.vault.as_ref().unwrap().get_entry(&entry).unwrap();
+        assert_eq!(e.fields["pin"].get(), "1234");
+        assert!(e.fields["pin"].is_protected());
     }
 
     #[test]

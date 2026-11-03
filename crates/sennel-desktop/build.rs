@@ -37,6 +37,8 @@ const COMMANDS: &[&str] = &[
     "clear_history",
     "fields",
     "add_field",
+    "reveal_field",
+    "edit_field",
     "attach",
     "remove_field",
     "extract",
