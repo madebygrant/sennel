@@ -32,9 +32,11 @@ the repository root, since the desktop app shares the workspace's `target`:
 
 `ui/node_modules/.bin/tauri dev` runs it with the page live-reloaded from Vite instead.
 
-`scripts/install-desktop.sh` does the build and installs the result. On macOS it puts `Sennel.app` in
-`/Applications`, or `~/Applications` if that is not writable. On Linux it installs the AppImage as
-`~/.local/bin/sennel-desktop` with a menu entry.
+`scripts/install.sh --desktop` does the build and installs the result. On macOS it puts `Sennel.app`
+in `/Applications`, or `~/Applications` if that is not writable. On Linux it installs the AppImage as
+`~/.local/bin/sennel-desktop` with a menu entry. Run it with no option to choose between the desktop
+app, the terminal app and CLI, or both. The desktop app does not include the `sennel` command, so
+`sennel run` and `sennel env` need the terminal app installed too.
 
 The builds are signed ad hoc, not with a developer certificate. One you built yourself runs on the
 Mac that built it. A copy downloaded or AirDropped to another Mac is quarantined: open it once, then

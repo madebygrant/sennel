@@ -134,24 +134,28 @@ saving. [A whole .env file in one entry](docs/run.md#a-whole-env-file-in-one-ent
 
 Sennel runs on macOS and Linux.
 
-### Terminal app
-
-With [Rust](https://rustup.rs) 1.88 or later:
-
-```sh
-cargo install --git https://github.com/madebygrant/sennel.git
-```
-
-### Desktop app
-
-From a clone, with Rust 1.90 or later and [Node.js](https://nodejs.org):
+Install from a clone. You need [Rust](https://rustup.rs) 1.88 or later, and the desktop app also
+needs Rust 1.90 and [Node.js](https://nodejs.org):
 
 ```sh
-scripts/install-desktop.sh
+git clone https://github.com/madebygrant/sennel.git && cd sennel
+scripts/install.sh
 ```
 
-It puts `Sennel.app` in `/Applications` on a Mac. On Linux it installs the AppImage as
-`~/.local/bin/sennel-desktop`, with a menu entry. [More](docs/desktop.md)
+It asks whether to install the terminal app and CLI, the desktop app, or both. Pass `--cli`,
+`--desktop` or `--both` to skip the question, which a script or CI has to.
+
+- The terminal app and CLI install as `sennel` in `~/.cargo/bin`, built from the clone's lockfile.
+  `sennel run`, `sennel env` and the other subcommands come with it.
+- The desktop app goes in `/Applications` as `Sennel.app` on a Mac. On Linux the AppImage installs
+  as `~/.local/bin/sennel-desktop`, with a menu entry. [More](docs/desktop.md)
+
+The two apps open the same vaults and read the same config. To install just the terminal app
+without a clone:
+
+```sh
+cargo install --git https://github.com/madebygrant/sennel.git sennel-tui --locked
+```
 
 ## Quick start
 
