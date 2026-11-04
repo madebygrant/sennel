@@ -149,13 +149,10 @@ jobs:
         include:
           - os: macos-latest
             bundles: app,dmg
-            files: |
-              target/release/bundle/dmg/*.dmg
+            files: target/release/bundle/dmg/*.dmg
           - os: ubuntu-24.04
             bundles: deb,appimage
-            files: |
-              target/release/bundle/deb/*.deb
-              target/release/bundle/appimage/*.AppImage
+            files: target/release/bundle/deb/*.deb target/release/bundle/appimage/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,10 +184,19 @@ jobs:
           npm --prefix ui ci
           ui/node_modules/.bin/tauri build --bundles ${{ matrix.bundles }}
 
+      # Into one flat folder: the artifact keeps paths below the files' common folder, and the release
+      # takes files only.
+      - name: Collect
+        env:
+          FILES: ${{ matrix.files }}
+        run: |
+          mkdir out
+          for file in $FILES; do cp "$file" out/; done
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.os }}
-          path: ${{ matrix.files }}
+          path: out/*
           retention-days: 3
           if-no-files-found: error
 
@@ -216,6 +222,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
+          ls -l
           sha256sum -- * >SHA256SUMS
           cat SHA256SUMS
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
