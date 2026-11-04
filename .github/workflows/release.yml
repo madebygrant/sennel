@@ -1,0 +1,228 @@
+name: Release
+
+# Pushing a tag such as v0.2.0 builds the CLI and the desktop app and publishes them as a GitHub
+# release. A tag with a hyphen, such as v0.2.0-rc.1, publishes a prerelease.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default. Only the release job, which runs no project or dependency code, can write.
+permissions:
+  contents: read
+
+# Two pushes of one tag must not race to fill the same release.
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The tag reaches shell scripts later, so anything but a plain version stops here. A prerelease
+      # tag carries the files' version, so v0.2.0-rc.1 needs 0.2.0 in each file.
+      - name: The tag matches every version in the repository
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::$TAG is not vMAJOR.MINOR.PATCH with an optional -prerelease"
+            exit 1
+          fi
+          base="${BASH_REMATCH[1]}"
+          check() {
+            if [ "$2" != "$base" ]; then
+              echo "::error::$TAG does not match $1, which says $2"
+              exit 1
+            fi
+          }
+          toml() { python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' "$1"; }
+          check Cargo.toml "$(toml Cargo.toml)"
+          check crates/sennel-desktop/Cargo.toml "$(toml crates/sennel-desktop/Cargo.toml)"
+          check tauri.conf.json "$(jq -r .version crates/sennel-desktop/tauri.conf.json)"
+          echo "version=${TAG#v}" >>"$GITHUB_OUTPUT"
+
+      - name: The tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main · tag a commit that has been merged"
+            exit 1
+          fi
+
+      # The release builds run no tests, so they rely on CI having passed on this exact commit. Waits
+      # while CI is still running, as it is when the commit and the tag are pushed together.
+      - name: CI passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs='["Test, lint and bundle (macos-latest)", "Test, lint and bundle (ubuntu-24.04)", "Minimum Rust versions"]'
+          for _ in $(seq 90); do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
+              --jq "[.check_runs[] | select(.name as \$n | $jobs | index(\$n))]")"
+            done_ok="$(jq --argjson want "$jobs" '[.[] | select(.conclusion == "success") | .name] | unique | length == ($want | length)' <<<"$runs")"
+            failed="$(jq -r '[.[] | select(.status == "completed" and .conclusion != "success") | .name] | join(", ")' <<<"$runs")"
+            if [ "$done_ok" = true ]; then
+              echo "CI passed on $GITHUB_SHA"
+              exit 0
+            fi
+            if [ -n "$failed" ]; then
+              echo "::error::CI did not pass on $GITHUB_SHA: $failed"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::CI has not finished on $GITHUB_SHA after 45 minutes · rerun this once it has"
+          exit 1
+
+  cli:
+    name: CLI (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          # The oldest supported runner, so the binary runs on any glibc from 2.35 on.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    # No build cache: a release builds from scratch rather than from what other runs saved.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p sennel-tui --target ${{ matrix.target }}
+
+      - name: Pack
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          # macOS tar would otherwise add ._ files for extended attributes.
+          COPYFILE_DISABLE: 1
+        run: |
+          name="sennel-$VERSION-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/sennel" README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.target }}
+          path: sennel-*.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop app (${{ matrix.os }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: app,dmg
+            files: |
+              target/release/bundle/dmg/*.dmg
+          - os: ubuntu-24.04
+            bundles: deb,appimage
+            files: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/appimage/*.AppImage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Linux packages for the webview and the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      # Without the npm cache, for the same reason the Rust builds have none.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      # `tauri build` builds the page itself, through beforeBuildCommand.
+      - name: Bundle
+        working-directory: crates/sennel-desktop
+        # The AppImage tools are themselves AppImages, and runners have no FUSE to mount them.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          npm --prefix ui ci
+          ui/node_modules/.bin/tauri build --bundles ${{ matrix.bundles }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-${{ matrix.os }}
+          path: ${{ matrix.files }}
+          retention-days: 3
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [check, cli, desktop]
+    runs-on: ubuntu-24.04
+    # The only job that can write, and it checks out and builds nothing.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Every file goes up in one step, so nobody can download a release that is half there. A rerun
+      # finds the release from the first attempt and replaces its files.
+      - name: Checksums and release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          sha256sum -- * >SHA256SUMS
+          cat SHA256SUMS
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber -- *
+            exit 0
+          fi
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Sennel $VERSION" "${pre[@]}" -- *
