@@ -35,9 +35,8 @@ If another app changed the file, Sennel won't save over it.
 
 <img src="docs/images/desktop.png" alt="The desktop app: groups, entries and an entry with its password hidden, a one-time code counting down and the clipboard countdown at the top" width="760">
 
-A terminal app and a native desktop app, built on one Rust core. They open the same vaults, read the
-same settings and share the same list of recent vaults, with the same keys and the same colours. Run
-both at once if you like. [The desktop app](docs/desktop.md)
+A terminal app and a native desktop app, built on one Rust core. They open the same vaults and share
+settings, recent vaults, keys and colours. Run both at once if you like. [The desktop app](docs/desktop.md)
 
 ### Copy, then forget
 
@@ -145,7 +144,7 @@ The [latest release](https://github.com/madebygrant/sennel/releases/latest) has 
 | `sennel-<version>-x86_64-unknown-linux-gnu.tar.gz` | terminal app and CLI, Linux x86_64, glibc 2.35 or later |
 | `sennel-<version>-aarch64-unknown-linux-gnu.tar.gz` | terminal app and CLI, Linux arm64, glibc 2.35 or later |
 | `.dmg` | desktop app, Apple silicon Mac |
-| `.AppImage` and `.deb` | desktop app, Linux x86_64, glibc 2.39 or later (Ubuntu 24.04 era) |
+| `.AppImage` and `.deb` | desktop app, Linux x86_64, glibc 2.39 or later, such as Ubuntu 24.04 |
 | `SHA256SUMS` | a checksum for every file above |
 
 To install the terminal app and check it against `SHA256SUMS`, set `v` to the release's version
@@ -160,9 +159,9 @@ tar -xzf "sennel-$v-$t.tar.gz"
 install -m 755 "sennel-$v-$t/sennel" ~/.local/bin/
 ```
 
-`~/.local/bin` is an example; any folder on your `PATH` works. The builds are not signed with a
-developer certificate, so macOS quarantines a `.dmg` downloaded in a browser. Open it once, then
-allow it under System Settings › Privacy & Security. [More](docs/desktop.md)
+Any folder on your `PATH` works in place of `~/.local/bin`. The builds have no Apple developer
+signature, so macOS quarantines a `.dmg` downloaded in a browser. Open it once, then allow it under
+System Settings › Privacy & Security. [More](docs/desktop.md)
 
 ### Build from source
 
@@ -174,16 +173,15 @@ git clone https://github.com/madebygrant/sennel.git && cd sennel
 scripts/install.sh
 ```
 
-It asks whether to install the terminal app and CLI, the desktop app, or both. Pass `--cli`,
-`--desktop` or `--both` to skip the question, which a script or CI has to.
+It asks whether to install the terminal app and CLI, the desktop app, or both. `--cli`, `--desktop`
+or `--both` skips the question, and a script or CI job has to pass one.
 
 - The terminal app and CLI install as `sennel` in `~/.cargo/bin`, built from the clone's lockfile.
   `sennel run`, `sennel env` and the other subcommands come with it.
 - The desktop app goes in `/Applications` as `Sennel.app` on a Mac. On Linux the AppImage installs
   as `~/.local/bin/sennel-desktop`, with a menu entry. [More](docs/desktop.md)
 
-The two apps open the same vaults and read the same config. To install just the terminal app
-without a clone:
+To install just the terminal app without a clone:
 
 ```sh
 cargo install --git https://github.com/madebygrant/sennel.git sennel-tui --locked
@@ -222,14 +220,14 @@ Sennel remembers the vault, so next time it is just `sennel`. The keys for day o
 | [Importing](docs/import.md) · [Exporting](docs/export.md) | moving between password managers              |
 | [Older KDBX files](docs/kdbx3.md)             | KDBX 3.1 and `sennel convert`                               |
 | [sennel get](docs/get.md)                     | secrets from the command line                               |
-| [sennel run](docs/run.md)                     | a program with secrets in its environment                   |
+| [sennel run](docs/run.md)                     | a program with secrets in its environment, and `sennel env` |
 | [The system keychain](docs/keychain.md)       | unlocking scripts without typing the master password        |
 | [Themes](docs/themes.md)                      | six palettes, and how their contrast is measured            |
 | [Configuration](docs/configuration.md)        | every setting in the config file                            |
 | [Security](docs/security.md)                  | what is wiped, when, and why                                |
 | [Reference for AI agents](docs/agents.md)     | every scriptable command, also indexed in [`llms.txt`](llms.txt) |
 
-## Building from source
+## Development
 
 ```sh
 cargo build --release
