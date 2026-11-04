@@ -17,6 +17,9 @@ TTY. Use the subcommands below instead. Each one runs, prints and exits.
 - `get` exit codes 2 and 3 are not failures to retry blindly. See [get](#sennel-get).
 - To give a secret to another program, use `sennel run`. It never prints the secret, so it stays
   out of your context.
+- Field references such as `{REF:P@I:<uuid>}` are resolved in what `get` and `run` hand out. A
+  reference that is broken or matches more than one entry is an error there, never the raw
+  `{REF:...}` text. `export` and `env export` write the raw text for a broken one instead.
 
 ## Vault and config resolution
 
@@ -91,6 +94,7 @@ is for another program: the value never enters your context or a shell variable.
 ```sh
 printf '%s\n' "$MASTER" | sennel run --db VAULT -e VAR=NEEDLE[::FIELD] [-e ...] -- PROGRAM [ARGS...]
 printf '%s\n' "$MASTER" | sennel run --db VAULT --group Projects/app --env-file sennel.env -- PROGRAM
+printf '%s\n' "$MASTER" | sennel run --db VAULT --entry "app dev" -- PROGRAM
 ```
 
 - `FIELD` is `password` (the default), `username`, `url`, `otp`, or a custom field's exact name. The
@@ -98,6 +102,9 @@ printf '%s\n' "$MASTER" | sennel run --db VAULT --group Projects/app --env-file 
 - `--env-file FILE` reads the same references, one per line, with `#` comments. It names entries and
   holds no secrets, so reading it is safe. Never pass a real `.env` of secrets to it. A `-e`
   replaces the same variable from a file.
+- `--entry NEEDLE` sets every variable of an env entry (see [env](#sennel-env)), leaving out
+  commented-out ones. Repeat it for more entries. `-e` and `--env-file` replace a variable of the
+  same name. The same variable in two entries, or an entry that is not an env entry, exits 1.
 - `--group PATH` limits every lookup to that group and its subgroups. Prefer it in a project, so a
   short needle cannot match another project's entry.
 - Every `-e` and file line is checked before the password is read, and every entry before the
@@ -105,6 +112,43 @@ printf '%s\n' "$MASTER" | sennel run --db VAULT --group Projects/app --env-file 
 - On success the exit code is the program's own. Sennel's failures: 1 (with `Error:` on stderr), 2
   ambiguous, 3 no match, 126 program not runnable, 127 program not found.
 - With a piped or redirected password, the program gets the rest of stdin after the first line.
+
+### `sennel env`
+
+Keep a whole `.env` file in one entry: one protected field per variable, with the file's comments,
+sections and order kept beside them. Use `sennel run --entry` to hand the variables to a program.
+
+```sh
+printf '%s\n' "$MASTER" | sennel env import "app dev" .env --db VAULT --group Projects/app --dry-run
+printf '%s\n' "$MASTER" | sennel env import "app dev" .env --db VAULT --group Projects/app
+printf '%s\n' "$MASTER" | sennel env export "app dev" --db VAULT > .env
+```
+
+`env import TITLE FILE` writes to the vault.
+
+- `TITLE` is matched exactly, with case, not fuzzily. With no match, it creates the entry in
+  `--group`, or at the top of the tree. With one match, it replaces that env entry's variables.
+  Several matches exit 2: pass `--group`. A matching entry that is not an env entry exits 1.
+- stdout is one line per variable, `  <status padded to 8> NAME`, where status is `new`, `changed`,
+  `same` or `removed`. Then `stored N variables in TITLE`, `updated ...`, or `... already holds
+  this file · nothing written`. With `--dry-run` the last line is `would create TITLE` or `would
+  update TITLE`, plus `· nothing written`. `--dry-run` still needs the password.
+- An import that would remove variables exits 1 after printing the list, unless `--replace` is
+  given. Run `--dry-run` first and confirm removals with the user.
+- A bad line stops the import before the password is read: `FILE:LINE: <why>` on stderr for each,
+  then exit 1. The line's text is never printed. Causes: not `NAME=value`, a name that is not
+  letters, digits and `_`, a standard field name (`Title`, `UserName`, `Password`, `URL`, `Notes`,
+  `otp`), the same name twice, an unclosed quote. Files over 256 KB are refused.
+- A commented-out variable, `# NAME=value`, is stored protected and marked as commented out. `run`
+  leaves it out.
+- `FILE` may be `-` for stdin, but then the password must be typed at a terminal, which an agent
+  cannot do. Pass a file path and the password on stdin instead.
+- The file stays on disk in plaintext. Suggest deleting it once `sennel run --entry` works.
+
+`env export NEEDLE` prints the entry as a `.env` file on stdout, comments included. The needle is
+matched as in [get](#sennel-get), with the same exit codes 2 and 3. It is refused into a terminal
+unless `--force`. Every value lands in your context, so prefer `run --entry`, and export only when
+a tool must read a file. Fields whose names are not variable names are left out, named on stderr.
 
 ### `sennel gen`
 
@@ -246,6 +290,11 @@ esac
 # Find exact titles first
 printf '%s\n' "$MASTER" | sennel --list --db v.kdbx
 
+# A project's .env into the vault, then run with it
+printf '%s\n' "$MASTER" | sennel env import "app dev" .env --db v.kdbx --dry-run
+printf '%s\n' "$MASTER" | sennel env import "app dev" .env --db v.kdbx
+printf '%s\n' "$MASTER" | sennel run --db v.kdbx --entry "app dev" -- npm run dev
+
 # Secrets with no vault
 sennel gen --stdout                                   # 20 chars, a–z A–Z 0–9
 sennel gen --stdout -n 32 --symbols
@@ -256,7 +305,7 @@ sennel gen --stdout --count 10 --no-config           # ten, ignoring user defaul
 
 ## What the CLI cannot do
 
-The CLI can't create, edit or delete entries, move them, set custom fields or change the master
-password. Those are TUI-only. When a user asks for one of them, tell them the key: `a` add, `e`
+Apart from `env import`, which creates and rewrites env entries, the CLI can't create, edit or
+delete entries, move them, set custom fields or change the master password. Those are TUI-only. When a user asks for one of them, tell them the key: `a` add, `e`
 edit, `D` delete, `F` fields, `^p` change master password. Run `h` inside the TUI for the full key
 map. The commands above print lines, not JSON, so parse the line formats above. Only `export --format json` writes JSON.
