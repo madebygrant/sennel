@@ -118,6 +118,18 @@ sennel run --group Projects/myapp --env-file sennel.env -- npm run dev
 `--group` looks entries up in that project's group only, so a short name like `stripe` finds this
 project's key and not another's. [A file per project](docs/run.md#a-file-per-project)
 
+Or keep a whole `.env` in one entry, comments and all, and delete the file:
+
+```sh
+sennel env import "myapp dev" .env --group Projects/myapp
+sennel run --entry "myapp dev" -- npm run dev
+sennel env export "myapp dev" > .env   # for a tool that must read a file
+```
+
+Comments become labels and sections, and a commented-out variable is kept protected and left out of
+`run`. In the desktop app, paste the file into the variables box and check the preview before
+saving. [A whole .env file in one entry](docs/run.md#a-whole-env-file-in-one-entry)
+
 ## Install
 
 Sennel runs on macOS and Linux.

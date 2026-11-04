@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-env"
+description = "Enables the copy_env command without any pre-configured scope."
+commands.allow = ["copy_env"]
+
+[[permission]]
+identifier = "deny-copy-env"
+description = "Denies the copy_env command without any pre-configured scope."
+commands.deny = ["copy_env"]

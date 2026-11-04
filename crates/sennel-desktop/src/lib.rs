@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use desk::{
-    AuditRow, Desk, EntryForm, EntryRow, EntryView, FieldRow, Generated, GroupRow, Note, Pick,
-    Reply, Scanned, Status, VersionRow,
+    AuditRow, Desk, EntryForm, EntryRow, EntryView, EnvPreview, FieldRow, Generated, GroupRow,
+    Note, Pick, Reply, Scanned, Status, VersionRow,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -282,6 +282,34 @@ async fn reveal_field(
 }
 
 #[tauri::command]
+async fn env_preview(
+    desk: Shared<'_>,
+    id: Option<String>,
+    text: String,
+) -> Result<EnvPreview, String> {
+    off_main(&desk, move |d| d.env_preview(id.as_deref(), text)).await?
+}
+
+#[tauri::command]
+async fn save_env(
+    desk: Shared<'_>,
+    id: Option<String>,
+    group: Option<String>,
+    title: String,
+    text: String,
+) -> Result<Reply, String> {
+    off_main(&desk, move |d| {
+        d.save_env(id.as_deref(), group.as_deref(), &title, text)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn copy_env(desk: Shared<'_>, id: String) -> Result<Note, String> {
+    off_main(&desk, move |d| d.copy_env(&id)).await
+}
+
+#[tauri::command]
 async fn attach(desk: Shared<'_>, id: String, name: String, path: String) -> Result<Reply, String> {
     off_main(&desk, move |d| d.attach(&id, &name, &path)).await?
 }
@@ -396,6 +424,9 @@ pub fn run(context: tauri::Context) {
             add_field,
             reveal_field,
             edit_field,
+            env_preview,
+            save_env,
+            copy_env,
             attach,
             remove_field,
             extract,

@@ -8,7 +8,7 @@ mod ui;
 use sennel_core::harden::{core_dumps_off, harden};
 #[cfg(not(test))]
 use sennel_core::touchid;
-use sennel_core::{agent, clipboard, export, generator, import, pwned, search, vault};
+use sennel_core::{agent, clipboard, envfile, export, generator, import, pwned, search, vault};
 
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -25,7 +25,7 @@ use zeroize::Zeroize;
 
 use crate::clipboard::Board;
 use app::{App, Confirm};
-use config::{Cli, Command, Config, Field};
+use config::{Cli, Command, Config, EnvAction, Field};
 use keepass::db::GroupId;
 use vault::{EntryExt, Vault, printable};
 
@@ -82,13 +82,30 @@ fn main() -> Result<()> {
     if let Some(Command::Run {
         env,
         env_file,
+        entry,
         group,
         program,
     }) = &cfg.command
     {
         // Exits only after `run_program` returns, so the values it read are wiped first.
-        let code = run_program(&cfg, env, env_file, group.as_deref(), program)?;
+        let code = run_program(&cfg, env, env_file, entry, group.as_deref(), program)?;
         std::process::exit(code);
+    }
+    if let Some(Command::Env { action }) = &cfg.command {
+        return match action {
+            EnvAction::Import {
+                entry,
+                file,
+                group,
+                replace,
+                dry_run,
+            } => env_import(&cfg, entry, file, group.as_deref(), *replace, *dry_run),
+            EnvAction::Export {
+                entry,
+                group,
+                force,
+            } => env_export(&cfg, entry, group.as_deref(), *force),
+        };
     }
     /* Also before the terminal checks, and the one subcommand that opens no
     vault at all: a password you are not storing needs no database. */
@@ -740,6 +757,11 @@ piped line), read the key file if there is one, open, and wipe both. It was
 copied into four commands, and all four passed `None` for the key file — so
 a vault with one could not be reached from the command line at all. */
 fn unlock(cfg: &Config) -> Result<Vault> {
+    unlock_with(cfg, false)
+}
+
+// `tty_only` when stdin already carried the input, so the password has to come from the terminal.
+fn unlock_with(cfg: &Config, tty_only: bool) -> Result<Vault> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
@@ -749,7 +771,12 @@ fn unlock(cfg: &Config) -> Result<Vault> {
         }
         None => None,
     };
-    let mut password = ask_password("password: ")?;
+    let mut password = match tty_only {
+        true => rpassword::prompt_password("password: ").map_err(|e| {
+            anyhow::anyhow!("stdin held the file, so the password needs a terminal · {e}")
+        })?,
+        false => ask_password("password: ")?,
+    };
     if let Some(spec) = &cfg.yubikey {
         eprintln!("yubikey {spec} · touch the key if it blinks");
     }
@@ -1025,12 +1052,16 @@ fn parse_env_line(line: &str) -> Option<Result<EnvRef>> {
 
 // The files' references in order, then the command line's. A command-line `-e` replaces the same
 // variable from a file, so one run can point at a different entry; a repeat anywhere else is a mistake.
-fn gather_refs(env: &[String], files: &[std::path::PathBuf]) -> Result<Vec<EnvRef>> {
-    // Windows reads `Path` and `PATH` as one variable, so names collide there whatever their case.
-    let same = |a: &str, b: &str| match cfg!(windows) {
+// Windows reads `Path` and `PATH` as one variable, so names collide there whatever their case.
+fn same_var(a: &str, b: &str) -> bool {
+    match cfg!(windows) {
         true => a.eq_ignore_ascii_case(b),
         false => a == b,
-    };
+    }
+}
+
+fn gather_refs(env: &[String], files: &[std::path::PathBuf]) -> Result<Vec<EnvRef>> {
+    let same = same_var;
     let mut refs: Vec<EnvRef> = Vec::new();
     for file in files {
         let text =
@@ -1063,9 +1094,6 @@ fn gather_refs(env: &[String], files: &[std::path::PathBuf]) -> Result<Vec<EnvRe
             None => refs.push(r),
         }
     }
-    if refs.is_empty() {
-        anyhow::bail!("nothing to set · pass -e VAR=NEEDLE or --env-file FILE");
-    }
     Ok(refs)
 }
 
@@ -1079,10 +1107,14 @@ fn run_program(
     cfg: &Config,
     env: &[String],
     files: &[std::path::PathBuf],
+    entries: &[String],
     group: Option<&str>,
     program: &[std::ffi::OsString],
 ) -> Result<i32> {
     let refs = gather_refs(env, files)?;
+    if refs.is_empty() && entries.is_empty() {
+        anyhow::bail!("nothing to set · pass -e VAR=NEEDLE, --env-file FILE or --entry NEEDLE");
+    }
     let vault = unlock(cfg)?;
     let within = group
         .map(|path| vault.find_group(path).map_err(|e| anyhow::anyhow!(e)))
@@ -1090,6 +1122,43 @@ fn run_program(
     let scope = group.map(|path| format!(" in {path}")).unwrap_or_default();
     let mut searcher = search::Searcher::new();
     let mut values: Vec<(String, zeroize::Zeroizing<String>)> = Vec::new();
+    for needle in entries {
+        let id = match find(
+            &vault,
+            &mut searcher,
+            needle,
+            within.as_ref(),
+            &format!("{needle:?}"),
+            &scope,
+        ) {
+            Ok(id) => id,
+            Err(code) => return Ok(code),
+        };
+        let entry = vault.get_entry(&id).expect("resolve returned a live id");
+        let title = printable(entry.title());
+        if !envfile::is_env(&entry) {
+            anyhow::bail!("{title} is not an env entry · sennel env import makes one");
+        }
+        for row in envfile::entry_rows(&entry) {
+            // An -e or --env-file reference names its variable on purpose, so it wins.
+            if row.disabled || refs.iter().any(|r| same_var(&r.var, &row.name)) {
+                continue;
+            }
+            if !envfile::valid_name(&row.name) {
+                eprintln!(
+                    "{title}: field {} is not a variable name · left out",
+                    printable(&row.field)
+                );
+                continue;
+            }
+            if values.iter().any(|(var, _)| same_var(var, &row.name)) {
+                anyhow::bail!("{} is set twice · it is in more than one entry", row.name);
+            }
+            let value = vault::resolved(&vault, &entry, &row.field)
+                .map_err(|why| anyhow::anyhow!("{title}: {why}"))?;
+            values.push((row.name.clone(), value));
+        }
+    }
     for r in &refs {
         let id = match find(
             &vault,
@@ -1159,6 +1228,203 @@ fn run_program(
             }
         }
     }
+}
+
+// `sennel env import`: a .env file into the entry with exactly this title, or a new one. Exact, not
+// fuzzy like `get`, because this writes and replaces, and the nearest match may be the wrong entry.
+fn env_import(
+    cfg: &Config,
+    title: &str,
+    file: &std::path::Path,
+    group: Option<&str>,
+    replace: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use std::io::Read;
+    let from_stdin = file == std::path::Path::new("-");
+    let shown = match from_stdin {
+        true => "stdin".to_string(),
+        false => file.display().to_string(),
+    };
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    if from_stdin {
+        // Typed or pasted here, every value would sit on screen and in scrollback.
+        if std::io::stdin().is_terminal() {
+            anyhow::bail!("- reads a pipe, such as pbpaste | sennel env import {title:?} -");
+        }
+        std::io::stdin()
+            .take(envfile::MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .context("reading stdin")?;
+    } else {
+        *bytes = std::fs::read(file).with_context(|| format!("reading {shown}"))?;
+    }
+    // Before the UTF-8 check, which would otherwise fail on a character the size limit cut in two.
+    if bytes.len() > envfile::MAX_BYTES {
+        anyhow::bail!(
+            "{shown} is over {} KB, which is not a .env file",
+            envfile::MAX_BYTES / 1024
+        );
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| anyhow::anyhow!("{shown} is not UTF-8"))?;
+    let parsed = envfile::parse(text);
+    drop(bytes);
+    if !parsed.refused.is_empty() {
+        for r in &parsed.refused {
+            eprintln!("{shown}:{}: {}", r.line, printable(&r.why));
+        }
+        anyhow::bail!("nothing written · fix the lines above");
+    }
+    if parsed.vars.is_empty() {
+        anyhow::bail!("{shown} sets no variables");
+    }
+    let mut vault = unlock_with(cfg, from_stdin)?;
+    if !vault.writable() && !dry_run {
+        anyhow::bail!(
+            "this vault is {} · Sennel writes KDBX 4.1 only",
+            vault.format()
+        );
+    }
+    let within = group
+        .map(|path| vault.find_group(path).map_err(|e| anyhow::anyhow!(e)))
+        .transpose()?;
+    let named: Vec<keepass::db::EntryId> = vault
+        .entry_refs()
+        .into_iter()
+        .filter(|e| e.title() == title)
+        .map(|e| e.id())
+        .filter(|id| within.as_ref().is_none_or(|g| vault.entry_is_under(id, g)))
+        .collect();
+    let existing = match named.as_slice() {
+        [] => None,
+        [id] => Some(*id),
+        many => {
+            eprintln!(
+                "{} entries are titled {:?} · pass --group to pick one",
+                many.len(),
+                printable(title)
+            );
+            std::process::exit(2);
+        }
+    };
+    if let Some(id) = existing
+        && !envfile::is_env(&vault.get_entry(&id).expect("listed above"))
+    {
+        anyhow::bail!(
+            "{} is not an env entry · pick another title",
+            printable(title)
+        );
+    }
+    let planned = envfile::plan(
+        existing.and_then(|id| vault.get_entry(&id)).as_ref(),
+        &parsed,
+    );
+    for p in &planned {
+        let off = if p.row.disabled {
+            "  (commented out)"
+        } else {
+            ""
+        };
+        say!("  {:<8} {}{off}", p.status.as_str(), printable(&p.row.name));
+    }
+    let would = match existing {
+        Some(_) => format!("would update {}", printable(title)),
+        None => format!("would create {}", printable(title)),
+    };
+    if dry_run {
+        say!("{would} · nothing written");
+        return Ok(());
+    }
+    // Checked after the list is printed, so the refusal shows which variables would go.
+    let removed = planned
+        .iter()
+        .filter(|p| p.status == envfile::Status::Removed)
+        .count();
+    if removed > 0 && !replace {
+        anyhow::bail!(
+            "would remove {removed} variable{} the file does not have · pass --replace, or --dry-run to look first",
+            if removed == 1 { "" } else { "s" }
+        );
+    }
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let into = within.unwrap_or_else(|| vault.root_id());
+            vault
+                .create_entry(&into, title, "", "", "", "")
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        }
+    };
+    let changed = vault
+        .write_env(&id, &parsed)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if changed {
+        vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+        say!(
+            "{} {} variables in {}",
+            if existing.is_some() {
+                "updated"
+            } else {
+                "stored"
+            },
+            parsed.vars.len(),
+            printable(title)
+        );
+    } else {
+        say!(
+            "{} already holds this file · nothing written",
+            printable(title)
+        );
+    }
+    if !from_stdin {
+        eprintln!("{shown} is still plaintext on disk · delete it once sennel run works");
+    }
+    Ok(())
+}
+
+// `sennel env export`: the entry as a .env file on stdout, for tools that insist on reading one.
+fn env_export(cfg: &Config, needle: &str, group: Option<&str>, force: bool) -> Result<()> {
+    if std::io::stdout().is_terminal() && !force {
+        anyhow::bail!(
+            "export into a terminal would leave every value in your scrollback · redirect it, or --force"
+        );
+    }
+    let vault = unlock(cfg)?;
+    let within = group
+        .map(|path| vault.find_group(path).map_err(|e| anyhow::anyhow!(e)))
+        .transpose()?;
+    let scope = group.map(|path| format!(" in {path}")).unwrap_or_default();
+    let mut searcher = search::Searcher::new();
+    let id = match find(
+        &vault,
+        &mut searcher,
+        needle,
+        within.as_ref(),
+        &format!("{needle:?}"),
+        &scope,
+    ) {
+        Ok(id) => id,
+        Err(code) => std::process::exit(code),
+    };
+    let entry = vault.get_entry(&id).expect("resolve returned a live id");
+    let title = printable(entry.title());
+    if !envfile::is_env(&entry) {
+        anyhow::bail!("{title} is not an env entry · sennel env import makes one");
+    }
+    let (text, skipped) = envfile::export(&vault, &entry);
+    for field in &skipped {
+        eprintln!(
+            "{title}: field {} is not a variable name · left out",
+            printable(field)
+        );
+    }
+    use std::io::Write;
+    match std::io::stdout().write_all(text.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+        _ => {}
+    }
+    eprintln!("the output is plaintext · keep the file out of git");
+    Ok(())
 }
 
 // Wayland and X11 serve a copy from the owning process, so it goes when we exit
@@ -2099,12 +2365,7 @@ mod tests {
         let refs = gather_refs(&[], std::slice::from_ref(&marked)).unwrap();
         assert_eq!(refs[0].var, "FIRST");
         assert_eq!(refs[0].shown(), format!("FIRST at {}:1", marked.display()));
-        assert!(
-            gather_refs(&[], &[])
-                .unwrap_err()
-                .to_string()
-                .starts_with("nothing to set")
-        );
+        assert!(gather_refs(&[], &[]).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

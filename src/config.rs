@@ -111,6 +111,11 @@ pub enum Command {
         #[arg(long = "env-file", value_name = "FILE")]
         env_file: Vec<std::path::PathBuf>,
 
+        /// Every variable in this env entry, from `sennel env import`. Repeat for more entries.
+        /// -e and --env-file replace a variable of the same name.
+        #[arg(long = "entry", value_name = "NEEDLE")]
+        entry: Vec<String>,
+
         /// Look entries up only in this group and the groups below it, such as Projects/myapp
         #[arg(long, value_name = "PATH")]
         group: Option<String>,
@@ -118,6 +123,12 @@ pub enum Command {
         /// The program and its arguments, after --
         #[arg(last = true, required = true, value_name = "PROGRAM")]
         program: Vec<std::ffi::OsString>,
+    },
+
+    /// Keep a project's .env file in an entry, and write it back out
+    Env {
+        #[command(subcommand)]
+        action: EnvAction,
     },
 
     /// Rewrite an older KDBX 3.1 database as KDBX 4, which Sennel can write
@@ -229,6 +240,45 @@ pub enum Command {
         /// Only this group and what is under it, as a path like `Banks/Savings`
         #[arg(long, value_name = "PATH")]
         group: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum EnvAction {
+    /// Read a .env file into an entry: a new one, or the env entry with that title, whose
+    /// variables it then replaces
+    Import {
+        /// The entry's exact title
+        entry: String,
+
+        /// The .env file, or - to read it from stdin, such as `pbpaste | sennel env import app -`
+        file: PathBuf,
+
+        /// Where the entry is, or goes when it is new, such as Projects/myapp
+        #[arg(long, value_name = "PATH")]
+        group: Option<String>,
+
+        /// Allow removing variables the entry has and the file does not
+        #[arg(long)]
+        replace: bool,
+
+        /// Say what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print an env entry as a .env file, comments included. Refused into a terminal.
+    Export {
+        /// What to look for, as `get` searches
+        entry: String,
+
+        /// Look only in this group and the groups below it
+        #[arg(long, value_name = "PATH")]
+        group: Option<String>,
+
+        /// Print to a terminal anyway, scrollback and all
+        #[arg(long)]
+        force: bool,
     },
 }
 

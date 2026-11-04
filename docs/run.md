@@ -61,6 +61,49 @@ A `package.json` script keeps the whole line in one place:
 "scripts": { "dev": "sennel run --group Projects/myapp --env-file sennel.env -- next dev" }
 ```
 
+## A whole .env file in one entry
+
+When a project has more variables than you want to name one by one, keep the whole `.env` file in
+one entry and load all of it:
+
+```sh
+sennel env import "myapp dev" .env --group Projects/myapp
+rm .env
+sennel run --entry "myapp dev" -- npm run dev
+```
+
+- `env import` reads the file into the entry with exactly that title, creating it when there is
+  none. Each variable becomes a protected custom field, so KeePassXC shows them too. It prints what
+  it did to each variable (`new`, `changed`, `same`, `removed`) by name only. `--dry-run` shows
+  that without writing.
+- Importing into an existing env entry replaces its variables. An import that would remove a
+  variable the new file lacks stops and says how many, unless you pass `--replace`. The desktop
+  app shows removals in its preview, and its paste can be undone.
+- Comments stay. A comment just above a variable, or after it on the same line, becomes its
+  label. A comment followed by a blank line becomes a section heading. The desktop and terminal apps
+  show both, and `env export` writes them back.
+- A commented-out variable, such as `# OLD_KEY=sk-...`, is usually an old secret. It is stored as a
+  protected field marked as commented out, never as plain text. `run --entry` leaves it out, and
+  `env export` writes it back commented out. A prose comment shaped the same way, such as
+  `# NOTE=see wiki`, is kept the same way.
+- A file over 256 KB is refused. A line that is not `NAME=value`, a name that is not letters, digits and `_`, a name KeePass
+  uses itself (`Title`, `UserName`, `Password`, `URL`, `Notes`), or the same variable twice stops
+  the import with the line number. Nothing is written, and the line itself is never printed.
+- Quoted values may span lines, such as a PEM key. Inside double quotes, `\n`, `\t`, `\"`, `\\`
+  and `\$` are unescaped. `${OTHER}` is kept as written and not expanded. Use a
+  [field reference](vaults.md#field-references) to share a value between entries.
+- `pbpaste | sennel env import "myapp dev" -` reads the file from a pipe. The password then has to
+  be typed at the terminal, since stdin is already taken.
+- `run --entry` can be given more than once. `-e` and `--env-file` replace a variable of the same
+  name from an entry. The same variable in two entries is refused.
+- `sennel env export "myapp dev" > .env` writes the file back for a tool that has to read one. It
+  refuses to print to a terminal unless you pass `--force`. The file is plaintext, so keep it out of
+  git.
+
+In the desktop app, the toolbar's variable button opens a box to paste the file into. It previews
+every variable, label and status before saving. An env entry's view lists the variables by section,
+with show and copy buttons, plus buttons to replace them from a new paste or copy the whole file.
+
 ## Scoping lookups to a group
 
 `--group PATH` looks every needle up only in that group and the groups below it. A short needle like

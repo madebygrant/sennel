@@ -8,6 +8,7 @@ use std::time::Instant;
 use keepass::db::{EntryId, GroupId};
 use sennel_core::clipboard::Board;
 use sennel_core::config;
+use sennel_core::envfile;
 use sennel_core::generator::Kind;
 use sennel_core::qr;
 use sennel_core::search::Searcher;
@@ -157,6 +158,45 @@ pub struct EntryView {
     /// The stored text behind the shown fields above, for the edit form. Editing a resolved value
     /// and saving it would replace a field reference with a copy of what it pointed at.
     pub raw: RawFields,
+    /// The variables of an env entry in file order, named by field. None for any other entry.
+    pub env: Option<Vec<EnvRow>>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EnvRow {
+    pub field: String,
+    pub name: String,
+    pub label: Option<String>,
+    pub section: Option<String>,
+    pub disabled: bool,
+    /// new, changed, same or removed in a preview; absent in the entry view.
+    pub status: Option<&'static str>,
+}
+
+impl EnvRow {
+    fn of(row: envfile::Row, status: Option<envfile::Status>) -> Self {
+        EnvRow {
+            field: row.field,
+            name: row.name,
+            label: row.label,
+            section: row.section,
+            disabled: row.disabled,
+            status: status.map(envfile::Status::as_str),
+        }
+    }
+}
+
+/// What a pasted .env file would do, with no values in it.
+#[derive(Serialize, Debug)]
+pub struct EnvPreview {
+    pub rows: Vec<EnvRow>,
+    pub refused: Vec<RefusedLine>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct RefusedLine {
+    pub line: usize,
+    pub why: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -711,7 +751,11 @@ impl Desk {
             has_otp: sennel_core::vault::raw_otp(&e).is_some(),
             otp: sennel_core::vault::totp_shape(&e)
                 .map(|(period, digits)| OtpShape { period, digits }),
-            extras: rows.len(),
+            // On an env entry the variables are the view itself, so the paperclip counts files only.
+            extras: match envfile::is_env(&e) {
+                true => rows.iter().filter(|r| r.file).count(),
+                false => rows.len(),
+            },
             fields: rows.into_iter().filter(|r| !r.file).collect(),
             recycled: vault.is_recycled(&id),
             raw: RawFields {
@@ -719,7 +763,117 @@ impl Desk {
                 url: e.url().to_string(),
                 notes: e.notes().to_string(),
             },
+            env: envfile::is_env(&e).then(|| {
+                envfile::entry_rows(&e)
+                    .into_iter()
+                    .map(|row| EnvRow::of(row, None))
+                    .collect()
+            }),
         })
+    }
+
+    /// What saving `text` would change, against the env entry `id` or a new one.
+    pub fn env_preview(&self, id: Option<&str>, mut text: String) -> Result<EnvPreview, String> {
+        let parsed = envfile::parse(&text);
+        text.zeroize();
+        let s = self.session();
+        let vault = s.vault().ok_or("locked")?;
+        let entry = match id {
+            Some(id) => Some(
+                vault
+                    .get_entry(&entry_id(id)?)
+                    .ok_or("that entry is gone")?,
+            ),
+            None => None,
+        };
+        Ok(EnvPreview {
+            rows: envfile::plan(entry.as_ref(), &parsed)
+                .into_iter()
+                .map(|p| EnvRow::of(p.row, Some(p.status)))
+                .collect(),
+            refused: parsed
+                .refused
+                .iter()
+                .map(|r| RefusedLine {
+                    line: r.line,
+                    why: r.why.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    /// A pasted .env file into the env entry `id`, replacing its variables, or into a new entry.
+    pub fn save_env(
+        &self,
+        id: Option<&str>,
+        group: Option<&str>,
+        title: &str,
+        mut text: String,
+    ) -> Result<Reply, String> {
+        let parsed = envfile::parse(&text);
+        text.zeroize();
+        let target = match id {
+            Some(id) => EntryTarget::Edit(entry_id(id)?),
+            None => EntryTarget::Add(group.map(group_id).transpose()?),
+        };
+        if parsed.vars.is_empty() && parsed.refused.is_empty() {
+            return Ok(Reply::refused(warn("the paste sets no variables")));
+        }
+        let mut s = self.session();
+        if let EntryTarget::Edit(id) = target {
+            let vault = s.vault().ok_or("locked")?;
+            let e = vault.get_entry(&id).ok_or("that entry is gone")?;
+            if !envfile::is_env(&e) {
+                return Ok(Reply::refused(warn("not an env entry")));
+            }
+        }
+        let count = parsed.vars.len();
+        match s.save_env(target, title.trim(), &parsed) {
+            Ok((id, false)) => Ok(Reply {
+                notes: vec![info("nothing changed")],
+                select: Some(id.to_string()),
+                ok: true,
+            }),
+            Ok((id, true)) => {
+                let plural = if count == 1 { "variable" } else { "variables" };
+                Ok(Reply {
+                    notes: self.saved(&mut s, info(format!("stored {count} {plural}"))),
+                    select: Some(id.to_string()),
+                    ok: true,
+                })
+            }
+            Err(e) => Ok(Reply::refused(warn(format!("cannot save · {e}")))),
+        }
+    }
+
+    /// The whole env entry as a .env file, onto the clipboard like any other copy.
+    pub fn copy_env(&self, id: &str) -> Note {
+        let text = {
+            let Ok(id) = entry_id(id) else {
+                return warn("not an entry id");
+            };
+            let s = self.session();
+            let Some(vault) = s.vault() else {
+                return warn("locked");
+            };
+            let Some(e) = vault.get_entry(&id) else {
+                return warn("that entry is gone");
+            };
+            if !envfile::is_env(&e) {
+                return warn("not an env entry");
+            }
+            envfile::export(vault, &e)
+        };
+        let (text, skipped) = text;
+        let note = self.to_board("the .env file", &text);
+        match (skipped.as_slice(), note.level) {
+            ([], _) | (_, Level::Error) => note,
+            (gone, _) => warn(format!(
+                "{} · left out {}, not variable names",
+                note.text,
+                gone.join(", ")
+            )),
+        }
     }
 
     /// The one path that hands a password to the webview: a reveal the user asked for.

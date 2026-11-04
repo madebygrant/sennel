@@ -831,30 +831,33 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         Line::from(Span::styled(truncate(entry.title(), width), p.row(true))),
         Line::default(),
     ];
-    copy_rows.push((lines.len(), app::CopyRow::Username));
-    lines.push(copyable(
-        "user",
-        truncate(
-            &shown(app, entry.username()),
-            width.saturating_sub(LABEL + 1),
-        ),
-        cream,
-        app::CopyRow::Username,
-    ));
-    copy_rows.push((lines.len(), app::CopyRow::Password));
-    lines.push(copyable(
-        "pass",
-        if app.show_password {
+    let env = crate::envfile::is_env(&entry);
+    if !env {
+        copy_rows.push((lines.len(), app::CopyRow::Username));
+        lines.push(copyable(
+            "user",
             truncate(
-                &revealed(app, entry.password()),
+                &shown(app, entry.username()),
                 width.saturating_sub(LABEL + 1),
-            )
-        } else {
-            "••••••••".to_string()
-        },
-        cream,
-        app::CopyRow::Password,
-    ));
+            ),
+            cream,
+            app::CopyRow::Username,
+        ));
+        copy_rows.push((lines.len(), app::CopyRow::Password));
+        lines.push(copyable(
+            "pass",
+            if app.show_password {
+                truncate(
+                    &revealed(app, entry.password()),
+                    width.saturating_sub(LABEL + 1),
+                )
+            } else {
+                "••••••••".to_string()
+            },
+            cream,
+            app::CopyRow::Password,
+        ));
+    }
     if !entry.url().is_empty() {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
@@ -893,8 +896,13 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             p.faint(format!("  {left}s")),
         ]));
     }
-    for extra in crate::vault::extras(&entry) {
-        lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
+    match env {
+        true => lines.extend(env_lines(&entry, width, &p)),
+        false => {
+            for extra in crate::vault::extras(&entry) {
+                lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
+            }
+        }
     }
     lines.push(row(
         "group",
@@ -919,10 +927,11 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     )));
     /* Says the rows are clickable, because nothing else on a terminal screen
     does: there is no cursor change and no underline to give it away. */
-    lines.push(Line::from(p.faint(truncate(
-        " click a row to copy · y p U t · * reveal · e edit",
-        width,
-    ))));
+    let hint = match env {
+        true => " F reveals and copies variables · e edit",
+        false => " click a row to copy · y p U t · * reveal · e edit",
+    };
+    lines.push(Line::from(p.faint(truncate(hint, width))));
     lines.truncate(inner.height as usize);
     /* Screen coordinates, and only the rows that actually rendered: a pane
     too short to reach the password row must not have a click target
@@ -933,6 +942,51 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|(at, what)| (inner.top() + at as u16, what))
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// An env entry's variables in file order with their labels. Values stay behind F, which reveals
+// and copies them like any other protected field.
+fn env_lines(entry: &keepass::db::EntryRef<'_>, width: usize, p: &Palette) -> Vec<Line<'static>> {
+    let rows = crate::envfile::entry_rows(entry);
+    let name_width = rows
+        .iter()
+        .map(|r| cols(&r.name))
+        .max()
+        .unwrap_or(0)
+        .min(width / 2);
+    let mut lines = vec![Line::from(p.faint(format!(
+        " {:<LABEL$}{} · F reveals and copies",
+        "vars",
+        rows.len()
+    )))];
+    let mut section: Option<&str> = None;
+    for r in &rows {
+        if r.section.as_deref() != section && r.section.is_some() {
+            section = r.section.as_deref();
+            lines.push(Line::from(Span::styled(
+                truncate(&format!(" {}", section.unwrap_or("")), width),
+                Style::new().fg(p.muted).add_modifier(Modifier::BOLD),
+            )));
+        }
+        let ink = match r.disabled {
+            true => Style::new().fg(p.muted),
+            false => Style::new().fg(p.text),
+        };
+        let note = match (&r.label, r.disabled) {
+            (Some(label), true) => format!("{label} · commented out"),
+            (Some(label), false) => label.clone(),
+            (None, true) => "commented out".into(),
+            (None, false) => String::new(),
+        };
+        let name = truncate(&r.name, name_width);
+        let pad = name_width.saturating_sub(cols(&name));
+        let room = width.saturating_sub(name_width + 5);
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {name}{}", " ".repeat(pad)), ink),
+            p.faint(format!("  {}", truncate(&note, room))),
+        ]));
+    }
+    lines
 }
 
 /* KDBX stores stamps in UTC and may store none at all. Shown in local time:
@@ -1014,24 +1068,27 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     };
     let mut copy_rows: Vec<(usize, app::CopyRow)> = Vec::new();
     let mut lines = Vec::new();
-    copy_rows.push((lines.len(), app::CopyRow::Username));
-    lines.push(copyable(
-        "user",
-        truncate(&shown(app, entry.username()), value),
-        cream,
-        app::CopyRow::Username,
-    ));
-    copy_rows.push((lines.len(), app::CopyRow::Password));
-    lines.push(copyable(
-        "password",
-        if app.show_password {
-            truncate(&revealed(app, entry.password()), value)
-        } else {
-            "••••••••".to_string()
-        },
-        cream,
-        app::CopyRow::Password,
-    ));
+    let env = crate::envfile::is_env(&entry);
+    if !env {
+        copy_rows.push((lines.len(), app::CopyRow::Username));
+        lines.push(copyable(
+            "user",
+            truncate(&shown(app, entry.username()), value),
+            cream,
+            app::CopyRow::Username,
+        ));
+        copy_rows.push((lines.len(), app::CopyRow::Password));
+        lines.push(copyable(
+            "password",
+            if app.show_password {
+                truncate(&revealed(app, entry.password()), value)
+            } else {
+                "••••••••".to_string()
+            },
+            cream,
+            app::CopyRow::Password,
+        ));
+    }
     if !entry.url().is_empty() {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
@@ -1067,8 +1124,13 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
             p.faint(format!("  {left}s · t copies")),
         ]));
     }
-    for extra in crate::vault::extras(&entry) {
-        lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
+    match env {
+        true => lines.extend(env_lines(&entry, inner, &p)),
+        false => {
+            for extra in crate::vault::extras(&entry) {
+                lines.push(Line::from(p.faint(format!(" {:<LABEL$}{extra}", ""))));
+            }
+        }
     }
     lines.push(row("group", truncate(&app.here(), value), faint));
     if let Some((said, gone)) = expiry_row(&entry) {
@@ -1271,16 +1333,23 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect) {
     /* Dim when there is nothing under the cursor to copy: three keys offered
     in gold that all answer "no entry here" is a bar making promises the
     selection cannot keep. */
-    let armed = app.selected_entry().is_some();
+    let selected = app.selected_entry();
+    let armed = selected.is_some();
+    // An env entry has no username or password to copy; its values are behind F.
+    let env = selected.is_some_and(|e| crate::envfile::is_env(&e));
+    let (first, rest) = match env {
+        true => ("F vars", "   reveal and copy"),
+        false => ("y user", "   p pass   U url"),
+    };
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(
-            "y user",
+            first,
             Style::new().fg(if armed { p.accent } else { p.muted }),
         ),
-        p.faint("   p pass   U url"),
+        p.faint(rest),
     ];
-    let mut used = cols(" y user   p pass   U url");
+    let mut used = cols(first) + cols(rest) + 1;
     /* In the order they may be dropped, last first: unsaved work outranks a
     count, and a count outranks the notes about keys the bar also names. */
     let mut optional: Vec<Span> = Vec::new();
@@ -2746,6 +2815,46 @@ mod tests {
         assert!(joined.contains("octo"), "{joined}");
         assert!(!joined.contains("s3cret-pw"), "{joined}");
         assert!(joined.contains("••••••••"), "{joined}");
+    }
+
+    #[test]
+    fn an_env_entry_lists_its_variables_and_labels_without_values() {
+        use crate::vault::Vault;
+        let backend = TestBackend::new(120, 24);
+        let mut t = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        let banks = vault.create_group(&root, "Banks").unwrap();
+        let id = vault.create_entry(&banks, "acme", "", "", "", "").unwrap();
+        let parsed =
+            crate::envfile::parse("# Database\n\n# Main db\nDB_URL=s3cret-url\n# OLD=s3cret-old\n");
+        vault.write_env(&id, &parsed).unwrap();
+        app.open_vault(vault);
+        app.step_group(true);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(!joined.contains("s3cret"), "{joined}");
+        for shown in [
+            "vars",
+            "2 · F reveals",
+            "Database",
+            "DB_URL",
+            "Main db",
+            "OLD",
+            "commented out",
+            " F vars",
+        ] {
+            assert!(joined.contains(shown), "{shown:?} missing from\n{joined}");
+        }
+        assert!(
+            !joined.contains("│ user"),
+            "an env entry drew the user row\n{joined}"
+        );
+        assert!(
+            !joined.contains("y user"),
+            "the bar offered a username to copy\n{joined}"
+        );
     }
 
     /* The tree says which groups fold: ▾ on an open parent, ▸ once folded,

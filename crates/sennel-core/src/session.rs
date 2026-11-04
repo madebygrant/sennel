@@ -979,6 +979,42 @@ impl<S: Seal> Session<S> {
         .map(|_| ())
     }
 
+    /// Writes a pasted .env file into a new entry titled `title` under the group, or over the env
+    /// entry being edited. Returns the entry and whether anything changed. One undo step either way.
+    pub fn save_env(
+        &mut self,
+        target: EntryTarget,
+        title: &str,
+        parsed: &crate::envfile::Parsed,
+    ) -> Result<(EntryId, bool), VaultError> {
+        match target {
+            EntryTarget::Edit(id) => self
+                .as_edit(id, |v| v.write_env(&id, parsed))
+                .map(|c| (id, c)),
+            EntryTarget::Add(group) => {
+                if title.trim().is_empty() {
+                    return Err(VaultError::Db("an entry needs a title".into()));
+                }
+                // Checked before the entry exists, so a refused paste leaves no empty entry behind.
+                if let Some(why) = parsed.refusal() {
+                    return Err(VaultError::Db(why));
+                }
+                let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
+                let group = group.ok_or(VaultError::GroupNotFound)?;
+                let id = vault.create_entry(&group, title, "", "", "", "")?;
+                if let Err(e) = vault.write_env(&id, parsed) {
+                    let _ = vault.expunge_entry(&id);
+                    return Err(e);
+                }
+                self.push_undo(Undo::AddEntry {
+                    id,
+                    title: title.to_string(),
+                });
+                Ok((id, true))
+            }
+        }
+    }
+
     /// Drops every old version of an entry. Returns how many went; there is no undo for this.
     pub fn clear_history(&mut self, id: EntryId) -> Result<usize, VaultError> {
         let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
@@ -1469,6 +1505,41 @@ mod tests {
         assert!(!e.fields.contains_key("code"));
         assert_eq!(e.fields["pin"].get(), "1234");
         assert_eq!(field_kind(&e, "pin"), FieldKind::Password);
+    }
+
+    #[test]
+    fn an_env_paste_is_one_undo_step_and_a_refused_one_adds_no_entry() {
+        use crate::envfile::parse;
+        let (mut s, banks, _) = open();
+        let count = |s: &Session<Fake>| s.vault.as_ref().unwrap().entry_count();
+        let before = count(&s);
+        let refused = parse("A=1\nnot a line\n");
+        assert!(
+            s.save_env(EntryTarget::Add(Some(banks)), "Acme", &refused)
+                .is_err()
+        );
+        assert_eq!(count(&s), before);
+
+        let (id, _) = s
+            .save_env(EntryTarget::Add(Some(banks)), "Acme", &parse("A=1\n"))
+            .unwrap();
+        assert!(
+            s.save_env(EntryTarget::Edit(id), "", &parse("A=2\n"))
+                .unwrap()
+                .1
+        );
+        let steps = s.undo.len();
+        assert!(
+            !s.save_env(EntryTarget::Edit(id), "", &parse("A=2\n"))
+                .unwrap()
+                .1
+        );
+        assert_eq!(s.undo.len(), steps, "an unchanged paste went on the stack");
+        s.undo();
+        let e = s.vault.as_ref().unwrap().get_entry(&id).unwrap();
+        assert_eq!(e.fields["A"].get(), "1");
+        s.undo();
+        assert_eq!(count(&s), before);
     }
 
     // An undo writes back a whole entry, so each field and file change must be its own step.

@@ -693,3 +693,105 @@ fn a_style_shapes_the_password_for_that_password_only() {
     let plain = desk.generate(&Pick::default()).unwrap();
     assert!(plain.style.upper && plain.style.digits && !plain.style.symbols);
 }
+
+#[test]
+fn an_env_paste_previews_without_values_and_lands_in_the_view() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let text = "# Database\n\n# Main db\nDB_URL=postgres://s3cret\n# OLD=old-s3cret\nbad line\n";
+    let preview = desk.env_preview(None, text.into()).unwrap();
+    let shown = format!("{preview:?}");
+    assert!(
+        !shown.contains("s3cret"),
+        "a value reached the preview: {shown}"
+    );
+    assert_eq!(preview.refused.len(), 1);
+    assert_eq!(preview.rows[0].label.as_deref(), Some("Main db"));
+    assert_eq!(preview.rows[0].status, Some("new"));
+
+    let refused = desk
+        .save_env(None, Some(&banks), "Acme", text.into())
+        .unwrap();
+    assert!(!refused.ok);
+    assert_eq!(desk.entries(Some(&banks), None).unwrap().len(), 1);
+
+    let text = "# Main db\nDB_URL=postgres://s3cret\n# OLD=old-s3cret\n";
+    let reply = desk
+        .save_env(None, Some(&banks), "Acme", text.into())
+        .unwrap();
+    assert!(reply.ok, "{:?}", reply.notes);
+    let id = reply.select.unwrap();
+    let view = desk.entry(&id).unwrap();
+    let shown = format!("{view:?}");
+    assert!(
+        !shown.contains("s3cret"),
+        "a value reached the view: {shown}"
+    );
+    let rows = view.env.unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.name.as_str(), r.disabled))
+            .collect::<Vec<_>>(),
+        vec![("DB_URL", false), ("OLD", true)]
+    );
+    assert_eq!(
+        desk.reveal_field(&id, "DB_URL").unwrap().as_str(),
+        "postgres://s3cret"
+    );
+
+    let again = desk.save_env(Some(&id), None, "", text.into()).unwrap();
+    assert_eq!(again.notes[0].text, "nothing changed");
+    assert_eq!(desk.copy_env(&id).level, Level::Info);
+    assert_eq!(
+        desk.entry(&id).unwrap().extras,
+        0,
+        "variables counted as extras"
+    );
+
+    let shorter = "DB_URL=postgres://s3cret\n";
+    let preview = desk.env_preview(Some(&id), shorter.into()).unwrap();
+    let statuses: Vec<_> = preview
+        .rows
+        .iter()
+        .map(|r| (r.name.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![("DB_URL", Some("same")), ("OLD", Some("removed"))]
+    );
+    assert!(
+        desk.save_env(Some(&id), None, "", shorter.into())
+            .unwrap()
+            .ok
+    );
+    let names: Vec<_> = desk
+        .entry(&id)
+        .unwrap()
+        .env
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, vec!["DB_URL".to_string()]);
+    desk.undo();
+    assert_eq!(
+        desk.entry(&id).unwrap().env.unwrap().len(),
+        2,
+        "undo did not bring OLD back"
+    );
+}
+
+#[test]
+fn a_login_is_not_an_env_entry() {
+    let desk = open_with(vault());
+    let banks = group(&desk, "Banks");
+    let id = desk.entries(Some(&banks), None).unwrap()[0].id.clone();
+    assert!(desk.entry(&id).unwrap().env.is_none());
+    assert!(
+        !desk
+            .save_env(Some(&id), None, "", "A=1\n".into())
+            .unwrap()
+            .ok
+    );
+    assert_eq!(desk.copy_env(&id).level, Level::Warn);
+}

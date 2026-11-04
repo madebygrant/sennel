@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod clipboard;
 pub mod config;
+pub mod envfile;
 pub mod export;
 pub mod generator;
 pub mod harden;

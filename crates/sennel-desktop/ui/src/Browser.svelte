@@ -4,6 +4,8 @@
     Asterisk,
     CalendarClock,
     Check,
+    ClipboardCopy,
+    ClipboardPaste,
     ChevronDown,
     ChevronRight,
     Copy,
@@ -34,6 +36,7 @@
     Type,
     Undo2,
     User,
+    Variable,
     Vault,
     WandSparkles,
   } from "@lucide/svelte";
@@ -43,6 +46,7 @@
   import Cells, { kind } from "./Cells.svelte";
   import { looksLikePassphrase } from "./cells.js";
   import EntryForm from "./EntryForm.svelte";
+  import EnvForm from "./EnvForm.svelte";
   import HexField from "./HexField.svelte";
   import Modal from "./Modal.svelte";
   import OtpCells from "./OtpCells.svelte";
@@ -64,6 +68,8 @@
   let shownFields = $state({});
   let issues = $state({});
   let form = $state(null);
+  // The .env paste box: { group } for a new entry, { id, title } to replace one's variables.
+  let envForm = $state(null);
   let sheet = $state(null);
   let prompt = $state(null);
   let searchBox;
@@ -201,8 +207,30 @@
     revealed = revealed === null ? await call("reveal", { id: selected }) : null;
   }
 
+  async function copyEnv() {
+    const note = await call("copy_env", { id: selected });
+    say([note]);
+    await refresh();
+    if (note.level !== "error") {
+      copiedFrom = { id: selected, field: "env", copy: clears.copies };
+      fb.mark("env");
+    }
+  }
+
+  // Grouped by the file's section headings, in file order.
+  const envSections = $derived.by(() => {
+    const out = [];
+    for (const r of detail?.env ?? []) {
+      const last = out.at(-1);
+      if (last && last.name === (r.section ?? null)) last.rows.push(r);
+      else out.push({ name: r.section ?? null, rows: [r] });
+    }
+    return out;
+  });
+
   async function saved(reply) {
     form = null;
+    envForm = null;
     if (reply?.select) await pick(reply.select);
     await reload();
   }
@@ -414,7 +442,7 @@
   });
 
   function keys(event) {
-    if (form || sheet || prompt || rekeying || event.altKey || event.defaultPrevented) return;
+    if (form || envForm || sheet || prompt || rekeying || event.altKey || event.defaultPrevented) return;
     if (help) {
       if (event.key === "h" || event.key === "?") help = false;
       return;
@@ -466,6 +494,7 @@
     {/if}
     <span class="sr" role="status">{cleared ? "Clipboard cleared" : ""}</span>
     <button class="tool" onclick={() => (form = { group })} title="New entry  a" aria-label="New entry"><Plus /></button>
+    <button class="tool" onclick={() => (envForm = { group })} title="New environment variables, from a .env file" aria-label="New environment variables"><Variable /></button>
     <button class="tool" onclick={() => askGroup("add")} title="New group  A" aria-label="New group"><FolderPlus /></button>
     <button class="tool" onclick={() => (sheet = { kind: "generate" })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
     <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
@@ -631,7 +660,29 @@
         {#if detail.expires}
           <div class="field still"><span class="label"><CalendarClock />Expires</span><span class="value">{detail.expires}</span></div>
         {/if}
-        {#each detail.fields as f (f.name)}
+        {#each envSections as s}
+          {#if s.name}<h3 class="section">{s.name}</h3>{/if}
+          {#each s.rows as r (r.field)}
+            {@const key = fieldKey(r.field)}
+            <div class="field still env" class:off={r.disabled} class:done={fb.copied === key} class:held={holding(key)} use:meter={clears.total ? clears.left / clears.total : 0} use:fb.spot={key}>
+              <span class="label" title={r.label ? `${r.label}\n${r.name}` : r.name}>
+                {#if r.label}<span class="caption">{r.label}</span>{/if}
+                <span class="name mono">{r.name}</span>
+                {#if r.disabled}<span class="caption">commented out</span>{/if}
+              </span>
+              <span class="value" class:lit={r.field in shownFields} class:multi={shownFields[r.field]?.includes("\n")}>{shownFields[r.field] ?? "••••••••"}</span>
+              <span class="tools">
+                <button class="icon" onclick={() => toggleField(r.field)} title={r.field in shownFields ? "Hide" : "Show"} aria-label={`${r.field in shownFields ? "Hide" : "Show"} ${r.name}`}>
+                  {#if r.field in shownFields}<EyeOff />{:else}<Eye />{/if}
+                </button>
+                <button class="icon" onclick={() => copyField(r.field)} title="Copy" aria-label={fb.copied === key ? "Copied" : `Copy ${r.name}`}>
+                  {#if fb.copied === key}<Check />{:else}<Copy />{/if}
+                </button>
+              </span>
+            </div>
+          {/each}
+        {/each}
+        {#each detail.env ? [] : detail.fields as f (f.name)}
           {@const key = fieldKey(f.name)}
           {@const Icon = FIELD_ICONS[f.kind] ?? Type}
           {#if f.kind === "password"}
@@ -663,6 +714,12 @@
 
       <div class="entry-actions">
         <button class="icon" onclick={() => (form = { id: detail.id, detail })} title="Edit" aria-label="Edit"><Pencil /></button>
+        {#if detail.env}
+          <button class="icon" onclick={() => (envForm = { id: detail.id, title: detail.title })} title="Replace from a .env file" aria-label="Replace from a .env file"><ClipboardPaste /></button>
+          <button class="icon" onclick={copyEnv} title="Copy as a .env file" aria-label={fb.copied === "env" ? "Copied" : "Copy as a .env file"}>
+            {#if fb.copied === "env"}<Check />{:else}<ClipboardCopy />{/if}
+          </button>
+        {/if}
         <button class="icon" onclick={() => (sheet = { kind: "fields", id: detail.id })} title="Fields and attachments" aria-label={`Fields and attachments${detail.extras ? `, ${detail.extras}` : ""}`}>
           <Paperclip />{#if detail.extras}<span class="badge">{detail.extras}</span>{/if}
         </button>
@@ -678,6 +735,10 @@
 
 {#if form}
   <EntryForm {form} {say} close={saved} />
+{/if}
+
+{#if envForm}
+  <EnvForm env={envForm} {say} close={saved} />
 {/if}
 
 {#if sheet}
@@ -1300,6 +1361,43 @@
   .tools {
     display: flex;
     gap: 4px;
+  }
+
+  .section {
+    margin: 12px 12px 2px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .field.env {
+    grid-template-columns: minmax(140px, 40%) minmax(0, 1fr) auto;
+  }
+
+  .field.env .label {
+    flex-direction: column;
+    align-items: start;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .field.env .label .name {
+    max-width: 100%;
+  }
+
+  .caption {
+    color: var(--faint);
+    font-size: 11.5px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .field.env.off .name {
+    color: var(--faint);
   }
 
   .hint {
