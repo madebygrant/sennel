@@ -134,6 +134,38 @@ saving. [A whole .env file in one entry](docs/run.md#a-whole-env-file-in-one-ent
 
 Sennel runs on macOS and Linux.
 
+### Download a release
+
+The [latest release](https://github.com/madebygrant/sennel/releases/latest) has ready-built files:
+
+| File | What it is |
+| ---- | ---------- |
+| `sennel-<version>-aarch64-apple-darwin.tar.gz` | terminal app and CLI, Apple silicon Mac |
+| `sennel-<version>-x86_64-apple-darwin.tar.gz` | terminal app and CLI, Intel Mac |
+| `sennel-<version>-x86_64-unknown-linux-gnu.tar.gz` | terminal app and CLI, Linux x86_64, glibc 2.35 or later |
+| `sennel-<version>-aarch64-unknown-linux-gnu.tar.gz` | terminal app and CLI, Linux arm64, glibc 2.35 or later |
+| `.dmg` | desktop app, Apple silicon Mac |
+| `.AppImage` and `.deb` | desktop app, Linux x86_64, glibc 2.39 or later (Ubuntu 24.04 era) |
+| `SHA256SUMS` | a checksum for every file above |
+
+To install the terminal app and check it against `SHA256SUMS`, set `v` to the release's version
+and `t` to your platform from the table. On Linux, use `sha256sum -c` in place of `shasum -a 256 -c`:
+
+```sh
+v=0.1.0 t=aarch64-apple-darwin
+base=https://github.com/madebygrant/sennel/releases/download/v$v
+curl -LO "$base/sennel-$v-$t.tar.gz" -LO "$base/SHA256SUMS"
+grep " sennel-$v-$t.tar.gz\$" SHA256SUMS | shasum -a 256 -c
+tar -xzf "sennel-$v-$t.tar.gz"
+install -m 755 "sennel-$v-$t/sennel" ~/.local/bin/
+```
+
+`~/.local/bin` is an example; any folder on your `PATH` works. The builds are not signed with a
+developer certificate, so macOS quarantines a `.dmg` downloaded in a browser. Open it once, then
+allow it under System Settings › Privacy & Security. [More](docs/desktop.md)
+
+### Build from source
+
 Install from a clone. You need [Rust](https://rustup.rs) 1.88 or later, and the desktop app also
 needs Rust 1.90 and [Node.js](https://nodejs.org):
 
