@@ -93,6 +93,30 @@ pub struct Pick {
     pub style: Option<Style>,
 }
 
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PathKind {
+    Empty,
+    Vault,
+    New,
+    Folder,
+    /// A file sits where a folder on the way should be.
+    Blocked,
+    /// A folder on the way cannot be read, so nothing can be said about the file.
+    Unreadable,
+    OtherHome,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PathCheck {
+    pub kind: PathKind,
+    pub full: Option<String>,
+    /// The folder creating the vault would make, when it is missing.
+    pub makes: Option<String>,
+    pub kdbx: bool,
+}
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
@@ -424,7 +448,7 @@ impl Desk {
         Status {
             open: s.is_open(),
             vault_name: db.as_deref().filter(|_| s.is_open()).map(name_of),
-            creates: db.as_ref().is_some_and(|p| !p.is_file()),
+            creates: db.as_ref().is_some_and(|p| !p.exists()),
             db: db.map(|p| p.display().to_string()),
             recent: self
                 .recent
@@ -467,6 +491,67 @@ impl Desk {
         self.session().touch();
     }
 
+    /// What a typed path points at, so the unlock screen can say so before a password is typed.
+    pub fn check_path(typed: &str) -> PathCheck {
+        let typed = typed.trim();
+        let mut check = PathCheck {
+            kind: PathKind::Empty,
+            full: None,
+            makes: None,
+            kdbx: false,
+        };
+        if typed.is_empty() {
+            return check;
+        }
+        if config::is_other_home(typed) {
+            check.kind = PathKind::OtherHome;
+            return check;
+        }
+        let path = config::absolute(&config::expand(typed));
+        check.full = Some(path.display().to_string());
+        check.kdbx = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kdbx"));
+        // try_exists, not exists: a folder we may not read is not the same as no folder. A file
+        // sitting where a folder on the way should be comes back as NotADirectory.
+        let failed = |e: std::io::Error| match e.kind() {
+            std::io::ErrorKind::NotADirectory => PathKind::Blocked,
+            _ => PathKind::Unreadable,
+        };
+        check.kind = match path.try_exists() {
+            Err(e) => failed(e),
+            Ok(true) if path.is_dir() => PathKind::Folder,
+            Ok(true) => PathKind::Vault,
+            Ok(false) => {
+                // Saving makes missing folders, but not through a file sitting where one should be.
+                let parent = path.parent().unwrap_or(Path::new("/"));
+                let mut found = Path::new("/");
+                for a in parent.ancestors() {
+                    match a.try_exists() {
+                        Ok(true) => {
+                            found = a;
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            check.kind = failed(e);
+                            return check;
+                        }
+                    }
+                }
+                if !found.is_dir() {
+                    PathKind::Blocked
+                } else {
+                    if found != parent {
+                        check.makes = Some(parent.display().to_string());
+                    }
+                    PathKind::New
+                }
+            }
+        };
+        check
+    }
+
     // The password arrives as a JS string, which cannot be wiped on that side; the bytes here are.
     pub fn unlock(
         &self,
@@ -489,7 +574,11 @@ impl Desk {
                 return Reply::one(note);
             }
         };
-        let creating = !path.is_file();
+        if path.is_dir() {
+            bytes.zeroize();
+            return Reply::one(warn("that is a folder · choose a file inside it"));
+        }
+        let creating = !path.exists();
         if creating && confirm.is_none() {
             bytes.zeroize();
             return Reply::one(warn(

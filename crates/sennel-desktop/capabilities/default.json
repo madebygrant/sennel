@@ -1,15 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: listening for events (Rust emits locked, prompt and quit-asked) and Sennel's own commands, each by name. No fs, shell or http plugins.",
+  "description": "The main window: listening for events (Rust emits locked, prompt and quit-asked) and Sennel's own commands, each by name. The dialog plugin may only show the open and save pickers, which hand back a path and read nothing. The fs plugin comes in with it and is granted nothing. No shell or http plugins.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "dialog:allow-open",
+    "dialog:allow-save",
     "allow-status",
     "allow-choose",
+    "allow-check-path",
     "allow-touch",
     "allow-unlock",
     "allow-quick-unlock",

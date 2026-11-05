@@ -3,6 +3,7 @@
 const COMMANDS: &[&str] = &[
     "status",
     "choose",
+    "check_path",
     "touch",
     "unlock",
     "quick_unlock",

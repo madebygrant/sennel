@@ -1,5 +1,6 @@
 <script>
   import { KINDS, STYLES, resized, restyled } from "./generator.svelte.js";
+  import { radioKeys } from "./radio.js";
 
   // `children` renders between the kinds and the size, once there is a result.
   let { made, pick, children } = $props();
@@ -14,9 +15,9 @@
   };
 </script>
 
-<div class="kinds" role="radiogroup" aria-label="Kind">
-  {#each KINDS as [kind, label]}
-    <button type="button" role="radio" aria-checked={made?.kind === kind} class:on={made?.kind === kind} onclick={() => pick(kind)}>{label}</button>
+<div class="kinds" role="radiogroup" aria-label="Kind" tabindex="-1" onkeydown={(e) => radioKeys(e, KINDS.map(([k]) => k), made?.kind, pick)}>
+  {#each KINDS as [kind, label], i}
+    <button type="button" role="radio" aria-checked={made?.kind === kind} tabindex={made?.kind === kind || (!made && i === 0) ? 0 : -1} class:on={made?.kind === kind} onclick={() => pick(kind)}>{label}</button>
   {/each}
 </div>
 {#if made}

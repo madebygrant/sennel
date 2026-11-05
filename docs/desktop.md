@@ -51,9 +51,16 @@ without the page. The page's own tests run with `npm --prefix crates/sennel-desk
 
 ## Using it
 
-The unlock screen takes a vault file, a password and an optional key file. **Library** lists the
-vaults opened before in either app, newest first, and a click fills in the path. A path with no file
-behind it creates a new vault, asking for the password twice. With `touch_id = true`, `enter` on an
+The unlock screen takes a vault file, a password and an optional key file. **Browse…** picks the
+file in the system's own dialog, or type the path. **Library** lists the vaults opened before in
+either app, newest first, and a click fills in the path.
+
+**New vault** at the top switches the screen to creating one. **Choose…** opens a save dialog for its
+name and folder, and the line under the path says what will happen: the file it creates, a folder it
+makes on the way, or that a vault is already there. The password shows its strength in bits as you
+type, and the second box says whether it matches. A key file added here is needed every time the
+vault opens. Open mode never creates a vault, so a mistyped path offers to create one instead of
+doing it. With `touch_id = true`, `enter` on an
 empty password box after a lock asks for a fingerprint, as in the terminal.
 
 The main window has groups on the left, entries in the middle and the selected entry on the right.

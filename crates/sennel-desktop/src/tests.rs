@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use sennel_core::vault::Vault;
 
-use crate::desk::{Desk, EntryForm, Level, OtpShape, Pick, Style, open_with};
+use crate::desk::{Desk, EntryForm, Level, OtpShape, PathKind, Pick, Style, open_with};
 use crate::settings::Settings;
 
 fn vault() -> Vault {
@@ -231,6 +231,55 @@ fn a_vault_is_created_then_unlocked_from_its_file() {
     desk.unlock("pw".into(), None, None);
     assert!(desk.status().open);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_path_check_names_what_the_path_points_at() {
+    let dir = std::env::temp_dir().join(format!("sennel-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("old.kdbx"), b"x").unwrap();
+    let at = |rel: &str| Desk::check_path(&dir.join(rel).display().to_string());
+
+    assert_eq!(Desk::check_path("  ").kind, PathKind::Empty);
+    assert_eq!(at("old.kdbx").kind, PathKind::Vault);
+    assert_eq!(at("").kind, PathKind::Folder);
+    let fresh = at("new.KDBX");
+    assert!(fresh.kind == PathKind::New && fresh.kdbx && fresh.makes.is_none());
+    let deeper = at("a/b/new.kdbx");
+    assert_eq!(deeper.kind, PathKind::New);
+    assert_eq!(
+        deeper.makes.as_deref(),
+        Some(dir.join("a/b").to_str().unwrap())
+    );
+    assert!(!at("notes.txt").kdbx);
+    assert_eq!(at("old.kdbx/inside.kdbx").kind, PathKind::Blocked);
+
+    use std::os::unix::fs::PermissionsExt;
+    let shut = dir.join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads through a 000 folder, so only an ordinary user sees it shut.
+    let readable = std::fs::read_dir(&shut).is_ok();
+    let inside = at("shut/v.kdbx").kind;
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !readable {
+        assert_eq!(inside, PathKind::Unreadable);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_folder_is_neither_opened_nor_created() {
+    let dir = std::env::temp_dir().join(format!("sennel-folder-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let desk = Desk::new(Settings::default(), None);
+    desk.choose(&dir.display().to_string()).unwrap();
+    assert!(!desk.status().creates);
+    let reply = desk.unlock("pw".into(), None, Some("pw".into()));
+    assert!(reply.notes[0].text.contains("folder"), "{:?}", reply.notes);
+    assert!(!desk.status().open);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

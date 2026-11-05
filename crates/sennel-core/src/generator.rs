@@ -410,6 +410,22 @@ mod tests {
         assert_eq!(strength(typed_bits("Tr0ub4dor&3xkcd!")), "strong");
     }
 
+    // The desktop's strength.test.js checks these same numbers, so the two copies cannot drift.
+    #[test]
+    fn typed_entropy_matches_the_desktop_copy() {
+        for (password, bits) in [
+            ("abcd", 18.801759),
+            ("aB3!", 25.837726),
+            ("a b", 17.101319),
+            ("é", 6.643856),
+            ("a🙂", 13.95456),
+            ("Tr0ub4dor&3xkcd!", 103.350906),
+        ] {
+            let got = typed_bits(password);
+            assert!((got - bits).abs() < 1e-6, "{password}: {got} != {bits}");
+        }
+    }
+
     #[test]
     fn entropy_tracks_length_and_alphabet() {
         assert_eq!(entropy_bits(0, 90), 0.0);

@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 sennel-core = { path = "../sennel-core" }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 anyhow.workspace = true
 serde.workspace = true
 keepass.workspace = true

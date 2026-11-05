@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use desk::{
     AuditRow, Desk, EntryForm, EntryRow, EntryView, EnvPreview, FieldRow, Generated, GroupRow,
-    Note, Pick, Reply, Scanned, Status, VersionRow,
+    Note, PathCheck, Pick, Reply, Scanned, Status, VersionRow,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -39,6 +39,12 @@ async fn status(desk: Shared<'_>) -> Result<Status, String> {
 #[tauri::command]
 async fn choose(desk: Shared<'_>, path: String) -> Result<Status, String> {
     off_main(&desk, move |d| d.choose(&path)).await?
+}
+
+// Off the main thread: a path on a sleeping network drive can take seconds to stat.
+#[tauri::command]
+async fn check_path(desk: Shared<'_>, path: String) -> Result<PathCheck, String> {
+    off_main(&desk, move |_| Desk::check_path(&path)).await
 }
 
 // Keys, clicks and pointer moves over the window. Focus and blur never call this, so a window
@@ -360,6 +366,7 @@ pub fn run(context: tauri::Context) {
         }
     }));
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&desk))
         .manage(Leaving(AtomicBool::new(false)))
         .setup(move |app| {
@@ -388,6 +395,7 @@ pub fn run(context: tauri::Context) {
         .invoke_handler(tauri::generate_handler![
             status,
             choose,
+            check_path,
             touch,
             unlock,
             quick_unlock,
