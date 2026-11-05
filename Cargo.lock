@@ -4539,7 +4539,7 @@ dependencies = [
 
 [[package]]
 name = "sennel-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4562,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "sennel-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4578,7 +4578,7 @@ dependencies = [
 
 [[package]]
 name = "sennel-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",

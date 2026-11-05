@@ -151,7 +151,7 @@ To install the terminal app and check it against `SHA256SUMS`, set `v` to the re
 and `t` to your platform from the table. On Linux, use `sha256sum -c` in place of `shasum -a 256 -c`:
 
 ```sh
-v=0.1.0 t=aarch64-apple-darwin
+v=0.2.0 t=aarch64-apple-darwin
 base=https://github.com/madebygrant/sennel/releases/download/v$v
 curl -LO "$base/sennel-$v-$t.tar.gz" -LO "$base/SHA256SUMS"
 grep " sennel-$v-$t.tar.gz\$" SHA256SUMS | shasum -a 256 -c
