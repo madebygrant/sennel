@@ -546,6 +546,16 @@ pub fn entry_rows(entry: &EntryRef<'_>) -> Vec<Row> {
     rows
 }
 
+/// How many variables `entry_rows` would list, without parsing the layout: every row it returns
+/// is a field outside the standard five, so counting those fields gives the same number.
+pub fn var_count(entry: &EntryRef<'_>) -> usize {
+    entry
+        .fields
+        .keys()
+        .filter(|f| !STANDARD.contains(&f.as_str()))
+        .count()
+}
+
 /// The entry written back out as a .env file, comments and order included. Field references are
 /// resolved, falling back to the raw text when one is broken, as the other exports do. Returns the
 /// fields left out because their names are not variable names.
@@ -950,6 +960,18 @@ export TOKEN='a b#c'
             "# Database\n\n# Main Postgres, pooled\nDATABASE_URL=postgres://u:p@db/app\n\
              REDIS_URL=redis://localhost # local\n# OLD_API_KEY=sk-123\nexport TOKEN='a b#c'\n"
         );
+    }
+
+    #[test]
+    fn the_quick_count_agrees_with_the_rows() {
+        let (mut vault, id) = vault_with_entry();
+        vault.write_env(&id, &parse(FILE)).unwrap();
+        // A field the layout never mentions, such as one added by hand in KeePassXC.
+        vault.set_field(&id, "EXTRA", "x", true).unwrap();
+        let entry = vault.get_entry(&id).unwrap();
+        let rows = entry_rows(&entry);
+        assert!(rows.iter().any(|r| r.disabled) && rows.iter().any(|r| r.field == "EXTRA"));
+        assert_eq!(var_count(&entry), rows.len());
     }
 
     #[test]

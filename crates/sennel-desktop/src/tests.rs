@@ -783,6 +783,15 @@ fn an_env_paste_previews_without_values_and_lands_in_the_view() {
             .collect::<Vec<_>>(),
         vec![("DB_URL", false), ("OLD", true)]
     );
+    let listed = desk.entries(Some(&banks), None).unwrap();
+    let vars = |want: &str| listed.iter().find(|r| r.id == want).unwrap().vars;
+    assert_eq!(vars(&id), Some(2), "the list does not mark the env entry");
+    assert!(
+        listed
+            .iter()
+            .filter(|r| r.id != id)
+            .all(|r| r.vars.is_none())
+    );
     assert_eq!(
         desk.reveal_field(&id, "DB_URL").unwrap().as_str(),
         "postgres://s3cret"

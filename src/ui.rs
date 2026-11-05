@@ -499,6 +499,10 @@ fn list_width(area: Rect, len: usize) -> usize {
     (area.width as usize).saturating_sub(2 + usize::from(overflows(area, len)))
 }
 
+fn vars_label(n: usize) -> String {
+    format!("{n} variable{}", if n == 1 { "" } else { "s" })
+}
+
 /* What fits on one entry row. The title used to be truncated to the pane and
 the username appended after it, so the line ran past the edge and ratatui
 clipped it — a username cut with no marker, the very thing `truncate`
@@ -683,7 +687,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 .vault()
                 .and_then(|v| v.get_entry(id))
                 .is_some_and(|e| crate::vault::expired(&e));
-            let (title, user, group) = app
+            let (title, user, group, env) = app
                 .session
                 .vault()
                 .and_then(|v| {
@@ -692,11 +696,13 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                         .parent_group_of_entry(id)
                         .map(|g| v.group_path(&g).join("/"))
                         .unwrap_or_default();
-                    Some((
-                        EntryExt::title(&entry).to_string(),
-                        EntryExt::username(&entry).to_string(),
-                        path,
-                    ))
+                    // An env entry has no username, so its count of variables takes that column.
+                    let env = crate::envfile::is_env(&entry);
+                    let user = match env {
+                        true => vars_label(crate::envfile::var_count(&entry)),
+                        false => EntryExt::username(&entry).to_string(),
+                    };
+                    Some((EntryExt::title(&entry).to_string(), user, path, env))
                 })
                 .unwrap_or_default();
             let (name, user, group) = fit_row(
@@ -727,6 +733,10 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
             without pricing every row on every frame. */
             if has_code {
                 spans.push(p.faint(" ⊙"));
+            }
+            // `$` as in a shell variable: one cell, and plain ASCII, so NO_COLOR keeps it.
+            if env {
+                spans.push(p.faint(" $"));
             }
             /* Expired rows say so in the list, not only in the pane: the
             whole point is spotting one you were about to reach for. In
@@ -2836,6 +2846,7 @@ mod tests {
         let joined = screen(&t).join("\n");
         assert!(!joined.contains("s3cret"), "{joined}");
         for shown in [
+            "2 variables $",
             "vars",
             "2 · F reveals",
             "Database",

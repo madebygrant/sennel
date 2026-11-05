@@ -66,6 +66,8 @@ A `package.json` script keeps the whole line in one place:
 When a project has more variables than you want to name one by one, keep the whole `.env` file in
 one entry and load all of it:
 
+<img src="images/env-entry.png" alt="An env entry in the desktop app: variables grouped under Database, Payments and Monitoring, each with its label, a hidden value, and show and copy buttons" width="760">
+
 ```sh
 sennel env import "myapp dev" .env --group Projects/myapp
 rm .env
@@ -100,9 +102,12 @@ sennel run --entry "myapp dev" -- npm run dev
   refuses to print to a terminal unless you pass `--force`. The file is plaintext, so keep it out of
   git.
 
-In the desktop app, the toolbar's variable button opens a box to paste the file into. It previews
-every variable, label and status before saving. An env entry's view lists the variables by section,
-with show and copy buttons, plus buttons to replace them from a new paste or copy the whole file.
+In the desktop app, the toolbar's code-file button opens a box to paste the file into. It previews
+every variable, label and status before saving.
+
+<img src="images/env-paste.png" alt="The paste dialog: a .env file in the text box, and below it a preview of each variable with its section, label and the word new" width="760">
+
+An env entry's view lists the variables by section, with show and copy buttons, plus buttons to replace them from a new paste or copy the whole file.
 
 ## Scoping lookups to a group
 

@@ -29,4 +29,5 @@
 ## Optional
 
 - [Keys](docs/keys.md): the TUI key map, for tasks the CLI cannot do (add, edit, delete, re-key)
+- [Installing](docs/install.md): release downloads, checksums and building from source
 - [README](README.md)

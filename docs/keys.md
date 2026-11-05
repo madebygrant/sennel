@@ -125,6 +125,7 @@ into the working directory, and loses the vault's protection the moment it lands
 | `▌`   | the cursor, in the pane that has the keys                |
 | `│`   | the cursor, in the pane that does not                    |
 | `⊙`   | the entry has a one-time code                            |
+| `$`   | an env entry, which shows its count of variables         |
 | `⧖`   | the entry is past its expiry date                        |
 | `⌦`   | the recycle bin, and anything inside it                  |
 

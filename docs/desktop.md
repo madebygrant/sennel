@@ -2,6 +2,8 @@
 
 [Back to the README](../README.md)
 
+<img src="images/desktop.png" alt="The desktop app: groups, entries and an entry with its password hidden, a one-time code counting down and the clipboard countdown at the top" width="760">
+
 `sennel-desktop` is Sennel in a native window. It opens the same `.kdbx` files as the terminal app,
 reads the same config file and keeps the same library of vaults. Both apps run on one Rust core, so
 unlocking, saving, merging, undo, the recycle bin and Touch ID behave the same in each. Run both at
@@ -53,15 +55,17 @@ without the page. The page's own tests run with `npm --prefix crates/sennel-desk
 
 The unlock screen takes a vault file, a password and an optional key file. **Browse…** picks the
 file in the system's own dialog, or type the path. **Library** lists the vaults opened before in
-either app, newest first, and a click fills in the path.
+either app, newest first, and a click fills in the path. With `touch_id = true`, `enter` on an empty
+password box after a lock asks for a fingerprint, as in the terminal.
 
 **New vault** at the top switches the screen to creating one. **Choose…** opens a save dialog for its
 name and folder, and the line under the path says what will happen: the file it creates, a folder it
 makes on the way, or that a vault is already there. The password shows its strength in bits as you
 type, and the second box says whether it matches. A key file added here is needed every time the
 vault opens. Open mode never creates a vault, so a mistyped path offers to create one instead of
-doing it. With `touch_id = true`, `enter` on an
-empty password box after a lock asks for a fingerprint, as in the terminal.
+doing it.
+
+<img src="images/new-vault.png" alt="The unlock screen in New vault mode: the path it will create, a strong password at 143 bits, the second box saying it matches, and the Create vault button" width="560">
 
 The main window has groups on the left, entries in the middle and the selected entry on the right.
 Typing in the search box at the top searches the whole vault. `#wo` instead lists the entries with a tag
@@ -95,6 +99,9 @@ them all, and `single_keys = false` in the config file turns the one-letter keys
 In a text box ⌘C, ⌘Z and the rest keep their usual meaning. Double-clicking an entry copies its
 password, and clicking the username, website or one-time code row copies that field. The clipboard's
 countdown sits at the top right.
+
+The list marks an env entry with a code-file icon and its count of variables. It has no password, so
+`p`, `⏎` and a double click copy its whole .env instead.
 
 Show lays the password out one character per numbered cell, with digits and symbols in their own
 colours, so it can be read out or typed elsewhere without counting. Entries that the audit flags

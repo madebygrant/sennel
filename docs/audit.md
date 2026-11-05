@@ -9,6 +9,8 @@ sennel audit --db vault.kdbx           # offline, instant
 sennel audit --pwned --db vault.kdbx   # also check for known breaches
 ```
 
+<img src="images/audit.png" alt="The desktop app's Needs attention list: two reused passwords, a weak one at 28 bits, an expired one and one unchanged for 3 years" width="760">
+
 ## What it looks for
 
 **Reused.** The same password on more than one entry. Nobody can spot this one for themselves, and

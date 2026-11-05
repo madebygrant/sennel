@@ -156,6 +156,8 @@ pub struct EntryRow {
     pub title: String,
     pub username: String,
     pub url: String,
+    /// How many variables an env entry holds; None for any other entry.
+    pub vars: Option<usize>,
 }
 
 #[derive(Serialize, Debug)]
@@ -799,6 +801,7 @@ impl Desk {
                     title: e.title().to_string(),
                     username: shown(vault, e.username()),
                     url: shown(vault, e.url()),
+                    vars: envfile::is_env(&e).then(|| envfile::var_count(&e)),
                 })
             })
             .collect())

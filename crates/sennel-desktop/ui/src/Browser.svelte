@@ -13,6 +13,7 @@
     CornerLeftUp,
     Eye,
     EyeOff,
+    FileCode,
     Folder,
     KeyRound,
     FolderOpen,
@@ -36,12 +37,12 @@
     Type,
     Undo2,
     User,
-    Variable,
     Vault,
     WandSparkles,
   } from "@lucide/svelte";
   import { call } from "./api.js";
   import { copyFeedback } from "./copied.svelte.js";
+  import { COPIES, copyFor, entryHints } from "./entrykeys.js";
   import { combo, dispatch, shown } from "./keys.js";
   import Cells, { kind } from "./Cells.svelte";
   import { looksLikePassphrase } from "./cells.js";
@@ -318,7 +319,8 @@
     });
   });
 
-  const COPIES = { y: "username", p: "password", U: "url", t: "otp" };
+  // From the row, which moves with the selection; the detail falls back for a row searched away.
+  const selectedEnv = $derived(rows.find((r) => r.id === selected)?.vars != null || (detail?.id === selected && !!detail?.env));
   // A clicked row keeps focus on Linux, yet the keys act on the selection, not on that row.
   const isRow = (el) => el?.matches?.(".group:not(.smart), .entry");
 
@@ -352,17 +354,19 @@
         else pane = "entries";
       },
     },
-    { name: "open", keys: "enter", what: "group: its entries · entry: copy the password", on: ["Enter"], run: () => (pane === "groups" ? (pane = "entries") : selected ? copy("password") : false) },
+    { name: "open", keys: "enter", what: "group: its entries · entry: copy the password, or an env entry's .env", on: ["Enter"], run: () => (pane === "groups" ? (pane = "entries") : selected ? (selectedEnv ? copyEnv() : copy("password")) : false) },
     {
       name: "copy",
       keys: "y p U t",
-      what: "username, password, website, one-time code",
+      what: "username, password, website, one-time code · p copies an env entry's whole .env",
       on: Object.keys(COPIES),
       when: () => selected,
       run: (k) => {
-        const field = COPIES[k];
-        if ((field === "otp" && !detail?.hasOtp) || (field === "url" && !detail?.url)) return false;
-        copy(field);
+        // An env entry has no login fields; p copies its .env, as a double click on its row does.
+        const what = copyFor(k, { env: selectedEnv, hasOtp: detail?.hasOtp, url: detail?.url });
+        if (!what) return false;
+        if (what === "env") copyEnv();
+        else copy(what);
       },
     },
     { name: "reveal", keys: "*", what: "show the password", on: ["*"], when: () => detail?.hasPassword, run: toggleReveal },
@@ -436,7 +440,7 @@
       : pane === "groups"
         ? [["j k", "move"], ["← →", "fold"], ["A", "add group"], ...(current?.depth ? [["E", "rename"]] : [])]
         : selected
-          ? [["p", "password"], ["y", "user"], ...(detail?.hasOtp ? [["t", "code"]] : []), ["e", "edit"], ["/", "find"]]
+          ? entryHints({ env: selectedEnv, hasOtp: detail?.hasOtp })
           : [["a", "add"], ["/", "find"]];
     hints = status.singleKeys ? [...bar, ["h", "keys"]].map(([k, label]) => [shown(k), label]) : [];
   });
@@ -494,7 +498,7 @@
     {/if}
     <span class="sr" role="status">{cleared ? "Clipboard cleared" : ""}</span>
     <button class="tool" onclick={() => (form = { group })} title="New entry  a" aria-label="New entry"><Plus /></button>
-    <button class="tool" onclick={() => (envForm = { group })} title="New environment variables, from a .env file" aria-label="New environment variables"><Variable /></button>
+    <button class="tool" onclick={() => (envForm = { group })} title="New environment variables, from a .env file" aria-label="New environment variables"><FileCode /></button>
     <button class="tool" onclick={() => askGroup("add")} title="New group  A" aria-label="New group"><FolderPlus /></button>
     <button class="tool" onclick={() => (sheet = { kind: "generate" })} title="Generate a password  P" aria-label="Generate a password"><WandSparkles /></button>
     <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
@@ -571,14 +575,18 @@
               pane = "entries";
               pick(r.id);
             }}
-            ondblclick={() => copy("password")}
+            ondblclick={() => (r.vars == null ? copy("password") : copyEnv())}
             draggable="true"
             ondragstart={(e) => e.dataTransfer.setData("text/sennel-entry", r.id)}
           >
-            <span class="initial">{(r.title || "?").slice(0, 1).toUpperCase()}</span>
+            {#if r.vars == null}
+              <span class="initial">{(r.title || "?").slice(0, 1).toUpperCase()}</span>
+            {:else}
+              <span class="initial" title="Environment variables"><FileCode aria-hidden="true" /></span>
+            {/if}
             <span class="names">
               <strong>{r.title || "(untitled)"}</strong>
-              <span>{r.username}</span>
+              <span>{r.vars == null ? r.username : `${r.vars} variable${r.vars === 1 ? "" : "s"}`}</span>
             </span>
             {#if issues[r.id]}<span class="flag" title={issues[r.id]}></span>{/if}
             {#if cut?.id === r.id}<span class="cutmark">cut</span>{/if}
@@ -593,7 +601,11 @@
   <article aria-label="Entry">
     {#if detail}
       <div class="head">
-        <span class="initial big">{(detail.title || "?").slice(0, 1).toUpperCase()}</span>
+        {#if detail.env}
+          <span class="initial big" title="Environment variables"><FileCode aria-hidden="true" /></span>
+        {:else}
+          <span class="initial big">{(detail.title || "?").slice(0, 1).toUpperCase()}</span>
+        {/if}
         <div>
           <h2>{detail.title || "(untitled)"}</h2>
           <p><Folder />{detail.group || "Root"}{detail.recycled ? ", in the recycle bin" : ""}</p>
@@ -1217,6 +1229,12 @@
     font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 1.1;
+  }
+
+  /* The global .lucide-icon rule holds every icon at 16px, which is lost in this tile. */
+  .initial.big > :global(svg) {
+    width: 24px;
+    height: 24px;
   }
 
   .head p {
