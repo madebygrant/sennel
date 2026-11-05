@@ -28,7 +28,7 @@ Set `v` to the release's version and `t` to your platform from the table. This d
 tarball, checks it against `SHA256SUMS` and installs `sennel` into `~/.local/bin`:
 
 ```sh
-v=0.2.0 t=aarch64-apple-darwin
+v=0.3.0 t=aarch64-apple-darwin
 base=https://github.com/madebygrant/sennel/releases/download/v$v
 curl -LO "$base/sennel-$v-$t.tar.gz" -LO "$base/SHA256SUMS"
 grep " sennel-$v-$t.tar.gz\$" SHA256SUMS | shasum -a 256 -c
