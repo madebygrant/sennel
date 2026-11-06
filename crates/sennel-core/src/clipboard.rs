@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -14,7 +15,8 @@ pub struct Board {
     generation is still current. A second copy re-arms the timer instead of
     being wiped early by the first one's thread. */
     epoch: Arc<Mutex<u64>>,
-    timeout: Option<Duration>,
+    // Seconds, 0 for no clear. Shared by clones, so a settings change reaches every holder.
+    timeout: Arc<AtomicU64>,
     /* When the secret on the clipboard stops being there; the status bar
     counts it down. On the wall clock because a sleeping thread does not
     run during a system suspend, so a monotonic wipe outlasts a closed lid. */
@@ -28,8 +30,18 @@ impl Board {
             until: Arc::new(Mutex::new(None)),
             // Zero is "leave it there", matching lock_timeout's reading of 0
             // as off rather than as immediate.
-            timeout: (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs)),
+            timeout: Arc::new(AtomicU64::new(timeout_secs)),
         }
+    }
+
+    /// From the next copy on; a countdown already running keeps its deadline.
+    pub fn set_timeout(&self, secs: u64) {
+        self.timeout.store(secs, Ordering::Relaxed);
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        let secs = self.timeout.load(Ordering::Relaxed);
+        (secs > 0).then(|| Duration::from_secs(secs))
     }
 
     /// Next copy generation. Bumped once per copy, read back by the clearer.
@@ -48,7 +60,7 @@ impl Board {
 
     /// Seconds before a copy clears, for the confirmation message.
     pub fn timeout_secs(&self) -> Option<u64> {
-        self.timeout.map(|d| d.as_secs())
+        self.timeout().map(|d| d.as_secs())
     }
 
     /// Whole seconds left before the clipboard is wiped, or `None` when
@@ -88,7 +100,7 @@ impl Board {
             .text(text.to_owned())
             .map_err(|e| format!("clipboard refused the copy · {e}"))?;
         let generation = self.claim();
-        if let Some(wait) = self.timeout {
+        if let Some(wait) = self.timeout() {
             let deadline = SystemTime::now() + wait;
             *self.until.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
             let board = self.clone();
@@ -219,8 +231,14 @@ mod tests {
 
     #[test]
     fn zero_timeout_means_no_clear() {
-        assert!(Board::new(0).timeout.is_none());
-        assert_eq!(Board::new(15).timeout, Some(Duration::from_secs(15)));
+        assert!(Board::new(0).timeout().is_none());
+        assert_eq!(Board::new(15).timeout(), Some(Duration::from_secs(15)));
+        let board = Board::new(15);
+        board.clone().set_timeout(0);
+        assert!(
+            board.timeout_secs().is_none(),
+            "a clone's change did not reach the original"
+        );
     }
 
     /* Needs a real display server, so it never runs in CI. Run it by hand

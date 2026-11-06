@@ -94,6 +94,7 @@ them all, and `single_keys = false` in the config file turns the one-letter keys
 | esc       | drop a cut entry, then clear the search                        |
 | ⌘S ⌘L     | save, lock                                                     |
 | ⌘P        | change the master password                                     |
+| ⌘,        | settings                                                       |
 | h ?       | list the keys                                                  |
 
 In a text box ⌘C, ⌘Z and the rest keep their usual meaning. Double-clicking an entry copies its
@@ -112,16 +113,30 @@ press **Paste QR** in the entry form or paste into the seed box, or drop a saved
 form. The code is read in Rust, the clipboard is cleared afterwards since the screenshot is the secret,
 and the form names the account the code is for. Only time-based codes are taken.
 
+Settings (⌘, or the gear at the top) changes these while the window is open:
+
+| Setting              | Config key          | Takes effect                              |
+| -------------------- | ------------------- | ----------------------------------------- |
+| Lock after           | `lock_timeout`      | at once                                   |
+| Touch ID (Mac only)  | `touch_id`          | on: next password unlock; off: at once    |
+| Clear copies after   | `clipboard_timeout` | from the next copy                        |
+| Open the list in     | `sort`              | at once, and at the next launch           |
+| Single-letter keys   | `single_keys`       | at once                                   |
+| Backups to keep      | `backups`           | from the next save                        |
+
+Each change is written to the config file, so the terminal app also uses it from its next start.
+
 Every change saves at once, as in the terminal. If somebody else wrote the file meanwhile, a bar
 offers to merge both, overwrite theirs, or reload theirs. Closing the window with changes that could
 not be saved asks first.
 
 ## What is different from the terminal app
 
-- The `db` key in the config is read but never written. Opening a vault puts it at the top of the
+- The `db` key in the config is read but never written. The keys in the Settings table above are
+  written when Settings changes them. Opening a vault puts it at the top of the
   library instead.
 - There is no theme switcher. The window follows the system's light or dark setting.
-- Settings come from the config file only. There are no command-line flags.
+- Settings come from the config file and the Settings dialog. There are no command-line flags.
 - A config file the terminal app would refuse still opens the window. The unlock screen names the
   problem, and the window runs on defaults until it is fixed, without writing to the file.
 

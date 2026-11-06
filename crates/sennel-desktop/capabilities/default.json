@@ -17,6 +17,8 @@
     "allow-unlock",
     "allow-quick-unlock",
     "allow-lock",
+    "allow-prefs",
+    "allow-set-pref",
     "allow-tree",
     "allow-entries",
     "allow-entry",

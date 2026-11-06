@@ -27,4 +27,4 @@ export function dispatch(actions, event, { single = true } = {}) {
   );
 }
 
-export const shown = (keys) => keys.replace(/\^(\w)/g, (_, k) => (MAC ? "⌘" : "Ctrl+") + k.toUpperCase());
+export const shown = (keys) => keys.replace(/\^([\w,])/g, (_, k) => (MAC ? "⌘" : "Ctrl+") + k.toUpperCase());

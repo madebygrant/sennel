@@ -28,6 +28,7 @@
     RotateCcwClock,
     Save,
     Search,
+    Settings as Gear,
     ShieldAlert,
     Tag,
     TextAlignStart,
@@ -52,6 +53,8 @@
   import Modal from "./Modal.svelte";
   import OtpCells from "./OtpCells.svelte";
   import Rekey from "./Rekey.svelte";
+  import Settings from "./Settings.svelte";
+  import { ORDERS } from "./settings.js";
   import { hasKids, parentOf, visibleGroups } from "./tree.js";
   import Sheet from "./Sheet.svelte";
 
@@ -82,9 +85,10 @@
   let cut = $state(null);
   let help = $state(false);
   let rekeying = $state(false);
+  let settings = $state(false);
   // Folded groups hide what is under them, for this session.
   let folded = $state(new Set());
-  const ORDERS = { stored: "File order", name: "Name", recent: "Newest", updated: "Recently changed" };
+  const ORDER_NAMES = Object.fromEntries(ORDERS);
 
   const fb = copyFeedback();
 
@@ -415,6 +419,7 @@
     { name: "save", keys: "^s", what: "save now", on: ["^s"], run: () => act("save") },
     { name: "lock", keys: "^l", what: "lock now", on: ["^l"], run: () => act("lock") },
     { name: "master", keys: "^p", what: "change the master password", on: ["^p"], run: () => (rekeying = true) },
+    { name: "settings", keys: "^,", what: "settings, such as how long before the vault locks", on: ["^,"], run: () => (settings = true) },
     { name: "audit", keys: "!", what: "reused, weak, expired and empty passwords", on: ["!"], run: () => (sheet = { kind: "audit" }) },
     { name: "fields", keys: "F", what: "custom fields and attachments", on: ["F"], when: () => detail, run: () => (sheet = { kind: "fields", id: detail.id }) },
     { name: "history", keys: "H", what: "old versions", on: ["H"], when: () => detail, run: () => (sheet = { kind: "history", id: detail.id }) },
@@ -446,7 +451,7 @@
   });
 
   function keys(event) {
-    if (form || envForm || sheet || prompt || rekeying || event.altKey || event.defaultPrevented) return;
+    if (form || envForm || sheet || prompt || rekeying || settings || event.altKey || event.defaultPrevented) return;
     if (help) {
       if (event.key === "h" || event.key === "?") help = false;
       return;
@@ -504,6 +509,7 @@
     <button class="tool" onclick={() => act("undo")} disabled={!status.undo} title={status.undo ? `Undo ${status.undo}  u` : "Nothing to undo"} aria-label="Undo"><Undo2 /></button>
     <button class="tool" onclick={() => act("save")} title="Save  ⌘S" aria-label="Save"><Save /></button>
     <button class="tool" onclick={() => (rekeying = true)} title="Change master password  ⌘P" aria-label="Change master password"><KeyRound /></button>
+    <button class="tool" onclick={() => (settings = true)} title="Settings  ⌘," aria-label="Settings"><Gear /></button>
     <button class="tool" onclick={() => act("lock")} title="Lock  ⌘L" aria-label="Lock"><Lock /></button>
   </header>
 
@@ -562,7 +568,7 @@
 
   <section class="list" aria-label="Entries" class:focused={pane === "entries"} bind:this={listBox}>
     <div class="listbar">
-      <button class="order" onclick={cycleSort} title="Change the order  o">{ORDERS[status.sort] ?? "File order"}</button>
+      <button class="order" onclick={cycleSort} title="Change the order  o">{ORDER_NAMES[status.sort] ?? "File order"}</button>
     </div>
     <ul>
       {#each rows as r (r.id)}
@@ -755,6 +761,10 @@
 
 {#if sheet}
   <Sheet {sheet} {say} {reload} {refresh} close={() => (sheet = null)} open={(id) => { sheet = null; group = null; needle = ""; pick(id); }} />
+{/if}
+
+{#if settings}
+  <Settings {say} {refresh} changed={loadRows} close={() => (settings = false)} />
 {/if}
 
 {#if rekeying}

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use desk::{
     AuditRow, Desk, EntryForm, EntryRow, EntryView, EnvPreview, FieldRow, Generated, GroupRow,
-    Note, PathCheck, Pick, Reply, Scanned, Status, VersionRow,
+    Note, PathCheck, Pick, PrefValue, Prefs, Reply, Scanned, Status, VersionRow,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -72,6 +72,16 @@ async fn quick_unlock(desk: Shared<'_>, key_file: Option<String>) -> Result<Repl
 #[tauri::command]
 async fn lock(desk: Shared<'_>) -> Result<Reply, String> {
     off_main(&desk, Desk::lock).await
+}
+
+#[tauri::command]
+async fn prefs(desk: Shared<'_>) -> Result<Prefs, String> {
+    off_main(&desk, Desk::prefs).await
+}
+
+#[tauri::command]
+async fn set_pref(desk: Shared<'_>, key: String, value: PrefValue) -> Result<Note, String> {
+    off_main(&desk, move |d| d.set_pref(&key, value)).await?
 }
 
 #[tauri::command]
@@ -400,6 +410,8 @@ pub fn run(context: tauri::Context) {
             unlock,
             quick_unlock,
             lock,
+            prefs,
+            set_pref,
             tree,
             entries,
             entry,

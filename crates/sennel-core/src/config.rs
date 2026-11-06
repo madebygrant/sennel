@@ -134,6 +134,19 @@ pub fn remember_theme(config_file: Option<&std::path::Path>, theme: &str) -> Res
     remember(config_file, "theme", &quote(theme))
 }
 
+/// A top-level number or switch a settings screen changed, such as `lock_timeout` or `single_keys`.
+pub fn remember_number(config_file: Option<&std::path::Path>, key: &str, n: u64) -> Result<()> {
+    remember(config_file, key, &n.to_string())
+}
+
+pub fn remember_flag(config_file: Option<&std::path::Path>, key: &str, on: bool) -> Result<()> {
+    remember(config_file, key, if on { "true" } else { "false" })
+}
+
+pub fn remember_word(config_file: Option<&std::path::Path>, key: &str, word: &str) -> Result<()> {
+    remember(config_file, key, &quote(word))
+}
+
 /// The vault library, newest first. Rewritten whole on every open: the order
 /// is most of what the list is for, and it changes each time.
 pub fn remember_recent(config_file: Option<&std::path::Path>, paths: &[PathBuf]) -> Result<()> {
@@ -157,10 +170,15 @@ fn remember(config_file: Option<&std::path::Path>, key: &str, value: &str) -> Re
     rewrite(config_file, key, Some(value))
 }
 
+// One write at a time: each reads the file, swaps a key and renames a shared temp file over it, so
+// two at once could collide on the temp name or lose the other's key.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>) -> Result<()> {
     let Some(path) = config_file else {
         anyhow::bail!("no config file in this session");
     };
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let line = value.map(|v| format!("{key} = {v}"));
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();

@@ -125,7 +125,9 @@ pub struct Status {
     pub vault_name: Option<String>,
     pub creates: bool,
     pub recent: Vec<String>,
-    pub touch_id: bool,
+    /// A fingerprint can open the vault aimed at now. Not the setting, which is `Prefs::touch_id`:
+    /// that turns on before the next password unlock seals a copy for this to find.
+    pub quick_ready: bool,
     pub yubikey: Option<String>,
     pub dirty: bool,
     pub conflict: bool,
@@ -139,6 +141,33 @@ pub struct Status {
     /// The entries order, as the config file spells it.
     pub sort: &'static str,
     pub undo: Option<String>,
+}
+
+// What the settings screen shows. Each value is the live one, which can differ from the file's
+// when a write to it failed.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Prefs {
+    pub lock_timeout: u64,
+    // The clipboard's Board keeps its own copy, which it times copies by. `set_pref` changes both.
+    pub clipboard_timeout: u64,
+    pub single_keys: bool,
+    /// The order the entries list opens in, as the config file spells it.
+    pub sort: &'static str,
+    pub backups: usize,
+    pub backups_max: usize,
+    /// None where there is no Touch ID, so the screen leaves the switch out.
+    pub touch_id: Option<bool>,
+    /// Where they are saved, or None when this run has no config file to write.
+    pub config_file: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum PrefValue {
+    Flag(bool),
+    Number(u64),
+    Word(String),
 }
 
 #[derive(Serialize, Debug)]
@@ -347,6 +376,8 @@ pub struct Desk {
     // The key file the open vault was unlocked with, so a re-key keeps it in the key.
     key_file: Mutex<Option<String>>,
     sort: Mutex<SortOrder>,
+    // Starts as the config file's, and the settings screen can change it while the window is open.
+    prefs: Mutex<Prefs>,
     settings: Settings,
     rows: Mutex<(Option<RowsKey>, Vec<EntryId>, Searcher)>,
     // Says "touch your key" before a write that blocks on one, since nothing else would.
@@ -363,6 +394,20 @@ pub fn group_id(text: &str) -> Result<GroupId, String> {
     uuid::Uuid::parse_str(text)
         .map(GroupId::from_uuid)
         .map_err(|_| "not a group id".to_string())
+}
+
+// The screen offers an hour at most for each; these stop a stray call from meaning forever.
+const MAX_LOCK_TIMEOUT: u64 = 7 * 24 * 3600;
+const MAX_CLIPBOARD_TIMEOUT: u64 = 3600;
+
+// "5 minutes", "1 hour", "90 seconds": whole units only, so an odd value reads exactly.
+fn spell_secs(secs: u64) -> String {
+    let (n, unit) = match secs {
+        s if s % 3600 == 0 => (s / 3600, "hour"),
+        s if s % 60 == 0 => (s / 60, "minute"),
+        s => (s, "second"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 fn name_of(path: &Path) -> String {
@@ -393,6 +438,19 @@ impl Desk {
             held: Mutex::new(None),
             key_file: Mutex::new(None),
             sort: Mutex::new(settings.sort),
+            prefs: Mutex::new(Prefs {
+                lock_timeout: settings.lock_timeout,
+                clipboard_timeout: settings.clipboard_timeout,
+                single_keys: settings.single_keys,
+                sort: settings.sort.short(),
+                backups: settings.backups,
+                backups_max: sennel_core::vault::BACKUPS_MAX,
+                touch_id: None,
+                config_file: settings
+                    .config_file
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+            }),
             settings,
             rows: Mutex::new((None, Vec::new(), Searcher::new())),
             prompt: None,
@@ -459,7 +517,7 @@ impl Desk {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
-            touch_id: s.quick_here(),
+            quick_ready: s.quick_here(),
             yubikey: self.settings.yubikey.as_ref().map(ToString::to_string),
             dirty: s.is_dirty(),
             conflict: s.in_conflict(),
@@ -469,8 +527,8 @@ impl Desk {
             locks_in: s
                 .locks_in(Instant::now())
                 .map(|left| left.as_secs() + u64::from(left.subsec_millis() > 0)),
-            lock_after: (self.settings.lock_timeout > 0).then_some(self.settings.lock_timeout),
-            single_keys: self.settings.single_keys,
+            lock_after: Some(self.lock_timeout()).filter(|&t| t > 0),
+            single_keys: self.live().single_keys,
             config_error: self.settings.config_error.clone(),
             sort: self.sort().short(),
             undo,
@@ -711,6 +769,118 @@ impl Desk {
         Reply::notes(notes)
     }
 
+    fn live(&self) -> MutexGuard<'_, Prefs> {
+        self.prefs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_timeout(&self) -> u64 {
+        self.live().lock_timeout
+    }
+
+    pub fn prefs(&self) -> Prefs {
+        let touch_id = self.session().touch_id;
+        Prefs {
+            // The session turns Touch ID off itself on a Mac with no sensor, so ask it.
+            touch_id: cfg!(target_os = "macos").then_some(touch_id),
+            ..self.live().clone()
+        }
+    }
+
+    /// Applies one setting to this window, then writes it to the config file the terminal app also
+    /// reads. A value out of range comes back as a warning and changes nothing.
+    pub fn set_pref(&self, key: &str, value: PrefValue) -> Result<Note, String> {
+        let file = self.settings.config_file.as_deref();
+        let (what, saved) = match (key, value) {
+            ("lock_timeout", PrefValue::Number(secs)) => {
+                if secs > MAX_LOCK_TIMEOUT {
+                    return Ok(warn("the idle lock can be a week at most"));
+                }
+                {
+                    let mut s = self.session();
+                    s.set_lock_timeout(secs);
+                    // The change itself is activity, so a shorter timeout does not lock at once.
+                    s.touch();
+                }
+                self.live().lock_timeout = secs;
+                let what = if secs == 0 {
+                    "the idle lock is off".to_string()
+                } else {
+                    format!("locks after {} idle", spell_secs(secs))
+                };
+                (what, config::remember_number(file, key, secs))
+            }
+            ("clipboard_timeout", PrefValue::Number(secs)) => {
+                if secs > MAX_CLIPBOARD_TIMEOUT {
+                    return Ok(warn("the clipboard can wait an hour at most"));
+                }
+                if let Some(board) = &self.board {
+                    board.set_timeout(secs);
+                }
+                self.live().clipboard_timeout = secs;
+                let what = if secs == 0 {
+                    "copies stay on the clipboard".to_string()
+                } else {
+                    format!("copies clear after {}", spell_secs(secs))
+                };
+                (what, config::remember_number(file, key, secs))
+            }
+            ("single_keys", PrefValue::Flag(on)) => {
+                self.live().single_keys = on;
+                let what = if on {
+                    "single-letter keys are on"
+                } else {
+                    "single-letter keys are off · ⌘ keys still work"
+                };
+                (what.to_string(), config::remember_flag(file, key, on))
+            }
+            ("sort", PrefValue::Word(word)) => {
+                let Ok(order) = SortOrder::parse(&word) else {
+                    return Ok(warn(format!("no entries order called {word}")));
+                };
+                // The list follows at once, as well as on the next launch.
+                *self.sort.lock().unwrap_or_else(|e| e.into_inner()) = order;
+                self.live().sort = order.short();
+                let what = match order {
+                    SortOrder::Stored => "entries open in file order".to_string(),
+                    order => format!("entries open {}", order.label()),
+                };
+                (what, config::remember_word(file, key, order.short()))
+            }
+            ("backups", PrefValue::Number(n)) => {
+                let keep = usize::try_from(n).unwrap_or(usize::MAX);
+                if let Err(e) = config::backups(Some(keep)) {
+                    return Ok(warn(format!("{e:#}")));
+                }
+                self.session()
+                    .set_backups(keep, self.settings.backup_dir.clone());
+                self.live().backups = keep;
+                let what = match keep {
+                    0 => "no backups are kept".to_string(),
+                    1 => "keeps 1 backup, from the next save".to_string(),
+                    n => format!("keeps {n} backups, from the next save"),
+                };
+                (what, config::remember_number(file, key, n))
+            }
+            ("touch_id", PrefValue::Flag(on)) => {
+                if !cfg!(target_os = "macos") {
+                    return Ok(warn("Touch ID is only on a Mac"));
+                }
+                self.session().set_touch_id(on);
+                let what = if on {
+                    "Touch ID turns on at the next unlock with the password"
+                } else {
+                    "Touch ID is off · the fingerprint unlock is forgotten"
+                };
+                (what.to_string(), config::remember_flag(file, key, on))
+            }
+            (key, value) => return Err(format!("no setting {key} takes {value:?}")),
+        };
+        Ok(match saved {
+            Ok(()) => info(what),
+            Err(e) => warn(format!("{what} until Sennel closes · not saved: {e:#}")),
+        })
+    }
+
     /// Locks when the vault has sat idle past the timeout. Called by the window's timer thread.
     // Returns the lock's notes, or None while the vault stays open.
     pub fn lock_if_idle(&self, now: Instant) -> Option<Vec<Note>> {
@@ -720,8 +890,8 @@ impl Desk {
         }
         let failed = s.lock();
         let mut notes = vec![warn(format!(
-            "locked after {} seconds idle",
-            self.settings.lock_timeout
+            "locked after {} idle",
+            spell_secs(self.lock_timeout())
         ))];
         if failed > 0 {
             notes.push(warn(format!(

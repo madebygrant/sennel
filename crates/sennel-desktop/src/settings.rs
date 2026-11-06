@@ -7,6 +7,8 @@ use sennel_core::config::{self, FileConfig, Generator};
 use sennel_core::sort::SortOrder;
 use sennel_core::vault::YubiSpec;
 
+// Read once at startup. Desk keeps live copies of what the settings screen can change, so read
+// those through `Desk::prefs`, not here.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// None in tests, which must not write anyone's config.

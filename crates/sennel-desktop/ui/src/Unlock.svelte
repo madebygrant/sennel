@@ -129,7 +129,7 @@
     try {
       const keys = { keyFile: keyFile || null };
       const reply =
-        mode === "open" && password === "" && status.touchId
+        mode === "open" && password === "" && status.quickReady
           ? await call("quick_unlock", keys)
           : await call("unlock", { password, confirm: mode === "new" ? confirm : null, ...keys });
       notes = reply.notes;
@@ -214,7 +214,7 @@
         bind:box={passwordBox}
         bind:value={password}
         {reveal}
-        hint={mode === "open" && status.touchId ? "enter for Touch ID" : ""}
+        hint={mode === "open" && status.quickReady ? "enter for Touch ID" : ""}
         autocomplete="off"
         oncopy={secretCopy("password", say)}
         oncut={secretCopy("password", say)}
@@ -275,7 +275,7 @@
     {/if}
 
     <button class="primary" type="submit" disabled={!ready}>
-      {#if busy}{mode === "new" ? "creating…" : "unlocking…"}{:else if mode === "new"}Create vault{:else if password === "" && status.touchId}Unlock with Touch ID{:else}Unlock{/if}
+      {#if busy}{mode === "new" ? "creating…" : "unlocking…"}{:else if mode === "new"}Create vault{:else if password === "" && status.quickReady}Unlock with Touch ID{:else}Unlock{/if}
     </button>
 
     {#if status.recent.length}

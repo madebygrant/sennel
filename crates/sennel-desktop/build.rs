@@ -8,6 +8,8 @@ const COMMANDS: &[&str] = &[
     "unlock",
     "quick_unlock",
     "lock",
+    "prefs",
+    "set_pref",
     "tree",
     "entries",
     "entry",

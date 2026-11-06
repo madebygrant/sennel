@@ -365,6 +365,16 @@ impl<S: Seal> Session<S> {
         self.ssh_lifetime
     }
 
+    // Off also drops the sealed copy, so a fingerprint stops opening the vault straight away. On
+    // takes effect at the next unlock with the password, which is when a copy can be sealed.
+    pub fn set_touch_id(&mut self, on: bool) {
+        self.touch_id = on;
+        if !on {
+            self.quick = None;
+            self.quick_here = false;
+        }
+    }
+
     pub fn set_lock_timeout(&mut self, secs: u64) {
         self.lock_after = (secs > 0).then(|| Duration::from_secs(secs));
     }
@@ -1626,6 +1636,18 @@ mod tests {
             matches!(opened.sealing, Sealing::Skipped),
             "a fingerprint unlock sealed again"
         );
+    }
+
+    #[test]
+    fn turning_touch_id_off_forgets_the_sealed_copy() {
+        let file = Temp::new("touch-off");
+        let mut s = session();
+        s.set_touch_id(true);
+        create(&mut s, &file, "pw").unwrap();
+        s.lock();
+        assert!(s.quick_here());
+        s.set_touch_id(false);
+        assert!(!s.quick_here() && s.quick.is_none());
     }
 
     #[test]

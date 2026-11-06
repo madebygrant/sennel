@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use sennel_core::vault::Vault;
 
-use crate::desk::{Desk, EntryForm, Level, OtpShape, PathKind, Pick, Style, open_with};
+use crate::desk::{Desk, EntryForm, Level, OtpShape, PathKind, Pick, PrefValue, Style, open_with};
 use crate::settings::Settings;
 
 fn vault() -> Vault {
@@ -210,7 +210,7 @@ fn an_idle_vault_locks_on_the_rust_timer() {
     let notes = desk
         .lock_if_idle(Instant::now() + Duration::from_secs(61))
         .expect("it did not lock");
-    assert!(notes[0].text.contains("60 seconds idle"), "{:?}", notes);
+    assert!(notes[0].text.contains("1 minute idle"), "{:?}", notes);
     assert!(!desk.status().open && desk.tree().is_empty());
 }
 
@@ -852,4 +852,194 @@ fn a_login_is_not_an_env_entry() {
             .ok
     );
     assert_eq!(desk.copy_env(&id).level, Level::Warn);
+}
+
+#[test]
+fn the_lock_timeout_changes_while_the_window_is_open() {
+    let desk = Desk::new(
+        Settings {
+            lock_timeout: 60,
+            ..Settings::default()
+        },
+        None,
+    );
+    desk.session().open(vault());
+    // Tests have no config file, so the change holds for the session and says it was not saved.
+    let note = desk
+        .set_pref("lock_timeout", PrefValue::Number(600))
+        .unwrap();
+    assert!(
+        note.text.starts_with("locks after 10 minutes idle"),
+        "{note:?}"
+    );
+    assert!(note.text.contains("not saved"), "{note:?}");
+    assert_eq!(desk.status().lock_after, Some(600));
+    assert!(
+        desk.lock_if_idle(Instant::now() + Duration::from_secs(61))
+            .is_none()
+    );
+    assert!(
+        desk.lock_if_idle(Instant::now() + Duration::from_secs(601))
+            .is_some()
+    );
+}
+
+#[test]
+fn a_zero_lock_timeout_never_locks() {
+    let desk = Desk::new(Settings::default(), None);
+    desk.session().open(vault());
+    assert!(
+        desk.set_pref("lock_timeout", PrefValue::Number(0))
+            .unwrap()
+            .text
+            .starts_with("the idle lock is off")
+    );
+    assert_eq!(desk.status().lock_after, None);
+    assert!(
+        desk.lock_if_idle(Instant::now() + Duration::from_secs(86_400))
+            .is_none()
+    );
+}
+
+#[test]
+fn the_lock_timeout_is_written_into_the_config_file() {
+    let path = std::env::temp_dir().join(format!("sennel-lock-{}.toml", std::process::id()));
+    std::fs::write(
+        &path,
+        "# mine\nlock_timeout = 60\n\n[generator]\nlength = 24\n",
+    )
+    .unwrap();
+    let desk = Desk::new(
+        Settings {
+            config_file: Some(path.clone()),
+            ..Settings::default()
+        },
+        None,
+    );
+    let note = desk
+        .set_pref("lock_timeout", PrefValue::Number(900))
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(note.text, "locks after 15 minutes idle");
+    assert_eq!(
+        text,
+        "# mine\nlock_timeout = 900\n\n[generator]\nlength = 24\n"
+    );
+}
+
+#[test]
+fn a_lock_timeout_past_a_week_is_refused() {
+    let desk = Desk::new(Settings::default(), None);
+    let note = desk
+        .set_pref("lock_timeout", PrefValue::Number(8 * 24 * 3600))
+        .unwrap();
+    assert!(note.text.contains("a week at most"), "{note:?}");
+    assert_eq!(desk.status().lock_after, Some(300));
+}
+
+#[test]
+fn each_setting_applies_at_once_and_reads_back() {
+    let desk = Desk::new(Settings::default(), None);
+    let set = |key: &str, value| desk.set_pref(key, value).unwrap();
+    assert!(
+        set("clipboard_timeout", PrefValue::Number(90))
+            .text
+            .starts_with("copies clear after 90 seconds")
+    );
+    assert!(
+        set("single_keys", PrefValue::Flag(false))
+            .text
+            .starts_with("single-letter keys are off")
+    );
+    assert!(
+        set("sort", PrefValue::Word("name".into()))
+            .text
+            .starts_with("entries open by name")
+    );
+    assert!(
+        set("backups", PrefValue::Number(5))
+            .text
+            .starts_with("keeps 5 backups")
+    );
+    let prefs = desk.prefs();
+    assert_eq!(
+        (
+            prefs.clipboard_timeout,
+            prefs.single_keys,
+            prefs.sort,
+            prefs.backups
+        ),
+        (90, false, "name", 5)
+    );
+    let status = desk.status();
+    assert!(!status.single_keys);
+    // The default order also becomes the current one, so the list follows straight away.
+    assert_eq!(status.sort, "name");
+}
+
+#[test]
+fn a_setting_out_of_range_changes_nothing() {
+    let desk = Desk::new(Settings::default(), None);
+    let before = desk.prefs();
+    let refused = [
+        desk.set_pref("clipboard_timeout", PrefValue::Number(3601)),
+        desk.set_pref("backups", PrefValue::Number(100)),
+        desk.set_pref("sort", PrefValue::Word("sideways".into())),
+    ];
+    for note in refused {
+        assert_eq!(note.unwrap().level, Level::Warn);
+    }
+    let after = desk.prefs();
+    assert_eq!(
+        (after.clipboard_timeout, after.backups, after.sort),
+        (before.clipboard_timeout, before.backups, before.sort)
+    );
+    // A key the screen does not offer, or a value of the wrong kind, is a programming error.
+    assert!(
+        desk.set_pref("db", PrefValue::Word("/x.kdbx".into()))
+            .is_err()
+    );
+    assert!(desk.set_pref("backups", PrefValue::Flag(true)).is_err());
+}
+
+#[test]
+fn each_setting_is_written_into_the_config_file() {
+    let path = std::env::temp_dir().join(format!("sennel-prefs-{}.toml", std::process::id()));
+    std::fs::write(&path, "# mine\n[generator]\nlength = 24\n").unwrap();
+    let desk = Desk::new(
+        Settings {
+            config_file: Some(path.clone()),
+            ..Settings::default()
+        },
+        None,
+    );
+    desk.set_pref("clipboard_timeout", PrefValue::Number(45))
+        .unwrap();
+    desk.set_pref("single_keys", PrefValue::Flag(false))
+        .unwrap();
+    desk.set_pref("sort", PrefValue::Word("updated".into()))
+        .unwrap();
+    desk.set_pref("backups", PrefValue::Number(0)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        text,
+        "# mine\nclipboard_timeout = 45\nsingle_keys = false\nsort = \"updated\"\nbackups = 0\n[generator]\nlength = 24\n"
+    );
+}
+
+#[test]
+fn touch_id_is_a_setting_only_on_a_mac() {
+    let desk = Desk::new(Settings::default(), None);
+    let note = desk.set_pref("touch_id", PrefValue::Flag(true)).unwrap();
+    if cfg!(target_os = "macos") {
+        assert!(note.text.starts_with("Touch ID turns on"), "{note:?}");
+        assert_eq!(desk.prefs().touch_id, Some(true));
+        // On, yet nothing a fingerprint can open until a password unlock seals a copy.
+        assert!(!desk.status().quick_ready);
+    } else {
+        assert_eq!(note.level, Level::Warn);
+        assert_eq!(desk.prefs().touch_id, None);
+    }
 }
