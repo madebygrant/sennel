@@ -33,7 +33,7 @@ zeroize = "1"
 
 [package]
 name = "sennel-tui"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "KeePass-style terminal password manager with one-key clipboard copy, folders and fuzzy search"
