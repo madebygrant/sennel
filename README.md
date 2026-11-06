@@ -27,7 +27,8 @@
   opens too, so Dropbox, Syncthing or a USB stick all work.
 - **Hard to lose a password.** Undo, a recycle bin, three local backups, and a merge when another
   app changed the file while you had it open.
-- **Locks itself.** Five idle minutes and every secret in memory is overwritten.
+- **Locks itself.** Five idle minutes, or however long you choose, and every secret in memory is
+  overwritten.
 
 ## Two apps, one vault
 
@@ -46,6 +47,8 @@ recent vaults. Run both at once if you like. [The desktop app](docs/desktop.md)
 - **Hardware keys.** YubiKey challenge-response, key files and Touch ID. [Security](docs/security.md)
 - **SSH keys for your agent.** Unlocking hands `ssh-agent` the keys in your vault, and locking takes them back. [Security](docs/security.md)
 - **Bring your passwords.** Import from KeePassXC, Bitwarden or 1Password. Export to CSV or JSON. [Importing](docs/import.md)
+- **Settings in the window.** The desktop app's ⌘, sets the idle lock, clipboard clearing, list order,
+  single-letter keys, backups and Touch ID, and saves them to the config file both apps read. [The desktop app](docs/desktop.md#using-it)
 - **Scriptable.** `sennel get`, `gen`, `audit` and `run`, with exit codes a script can branch on. [sennel get](docs/get.md)
 
 ## Secrets for your projects
