@@ -1,0 +1,62 @@
+# Outside the root workspace: libFuzzer needs nightly, and `cargo test --workspace` runs on stable.
+[workspace]
+
+[package]
+name = "sennel-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sennel-core = { path = "../crates/sennel-core" }
+# The same pin and features as the root workspace, for the key `kdbx_open` builds.
+keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge", "challenge_response"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "import_csv"
+path = "fuzz_targets/import_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envfile"
+path = "fuzz_targets/envfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "keeagent_settings"
+path = "fuzz_targets/keeagent_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otp_seed"
+path = "fuzz_targets/otp_seed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qr_decode"
+path = "fuzz_targets/qr_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kdbx_open"
+path = "fuzz_targets/kdbx_open.rs"
+test = false
+doc = false
+bench = false

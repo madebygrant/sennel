@@ -1,0 +1,10 @@
+# Each ignore says why the advisory cannot reach Sennel. Remove it once the dependency moves on.
+[advisories]
+ignore = [
+    # rsa: only in Cargo.lock as an optional dependency of ssh-key. Its `rsa` feature is off, so
+    # it is never compiled. No fixed version exists.
+    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5: timing leaks, pulled in by ssh-key's ECDSA curves. Sennel only reads a key
+    # and hands it to ssh-agent, and never signs. The fix needs an ssh-key built on 0.7.
+    "RUSTSEC-2026-0387",
+]

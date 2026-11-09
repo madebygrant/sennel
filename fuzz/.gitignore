@@ -1,0 +1,6 @@
+target/
+corpus/
+artifacts/
+coverage/
+# Copied from the root before each run, so fuzzing tests the versions the app ships.
+Cargo.lock

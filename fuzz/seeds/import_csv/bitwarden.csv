@@ -1,0 +1,2 @@
+name,login_username,login_password,login_uri,notes,login_totp
+Bank,me,secret,https://bank.example,,JBSWY3DPEHPK3PXP

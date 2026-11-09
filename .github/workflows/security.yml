@@ -1,0 +1,94 @@
+name: Security
+
+# Separate from CI because of the schedule: a new advisory or a slow fuzz crash can appear with no
+# commit to trigger a run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Audit dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit Cargo.lock
+        run: cargo audit
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [import_csv, envfile, keeagent_settings, otp_seed, qr_decode, kdbx_open]
+    env:
+      # Dated like rust-toolchain.toml, so a new nightly cannot fail the job without a commit.
+      NIGHTLY: nightly-2026-10-01
+      SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '900' || '60' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust nightly
+        run: rustup toolchain install "$NIGHTLY" --profile minimal
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
+
+      # What the app ships, not whatever is newest. Cargo adds libfuzzer-sys to the copy.
+      - name: Use the app's locked dependencies
+        run: cp Cargo.lock fuzz/Cargo.lock
+
+      - name: Restore the corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "fuzz/corpus/$TARGET"
+          seeds=("fuzz/seeds/$TARGET")
+          [ "$TARGET" = kdbx_open ] && seeds=(tests/fixtures)
+          cargo +"$NIGHTLY" fuzz run "$TARGET" "fuzz/corpus/$TARGET" "${seeds[@]}" -- \
+            -max_total_time="$SECONDS_PER_TARGET" -max_len=65536 -timeout=30
+
+      - name: Keep the input that crashed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: ignore

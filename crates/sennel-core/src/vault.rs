@@ -900,6 +900,36 @@ fn challenge_failure(why: &ChallengeResponseKeyError) -> VaultError {
     })
 }
 
+thread_local! {
+    static READING_DATABASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/* keepass 0.14 slices a malformed header without checking its length and panics, so a damaged
+file would take the whole app down. Installing the filter at the first read keeps it outermost:
+the TUI's hook, which restores the terminal, is already set by then and must not run for this. */
+pub fn read_database(
+    source: &mut dyn std::io::Read,
+    key: DatabaseKey,
+) -> Result<Database, VaultError> {
+    static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
+    QUIET_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !READING_DATABASE.get() {
+                previous(info);
+            }
+        }));
+    });
+    READING_DATABASE.set(true);
+    let read =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Database::open(source, key)));
+    READING_DATABASE.set(false);
+    match read {
+        Ok(opened) => opened.map_err(Vault::map_db_error),
+        Err(_) => Err(VaultError::Db("the file is damaged or not a vault".into())),
+    }
+}
+
 pub struct Vault {
     db: Database,
     /* The key stays with the vault so `save` needs no password prompt:
@@ -1208,7 +1238,7 @@ impl Vault {
     ) -> Result<Self, VaultError> {
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
         let key = Self::build_key(password, key_file, challenge.as_ref())?;
-        let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
+        let db = read_database(&mut file, key.clone())?;
         Ok(Vault {
             db,
             key: Some(key),
@@ -1287,7 +1317,7 @@ impl Vault {
             return Err(VaultError::Unsaved);
         };
         let mut file = std::fs::File::open(&path).map_err(|e| VaultError::Io(e.to_string()))?;
-        self.db = Database::open(&mut file, key).map_err(Self::map_db_error)?;
+        self.db = read_database(&mut file, key)?;
         self.stamp = Stamp::of(&path);
         self.backed_up = false;
         Ok(())
@@ -1329,7 +1359,7 @@ impl Vault {
         };
         let seen = Stamp::of(&path);
         let mut file = std::fs::File::open(&path).map_err(|e| VaultError::Io(e.to_string()))?;
-        let theirs = Database::open(&mut file, key).map_err(Self::map_db_error)?;
+        let theirs = read_database(&mut file, key)?;
         if let Some(title) = attachment_hazard(&self.db, &theirs) {
             return Err(VaultError::Merge(format!(
                 "\"{title}\" has files the other side changed, and a merge cannot carry files across"
@@ -1436,7 +1466,7 @@ impl Vault {
             return Err(VaultError::Unsaved);
         };
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
-        let db = Database::open(&mut file, key.clone()).map_err(Self::map_db_error)?;
+        let db = read_database(&mut file, key.clone())?;
         Ok(Vault {
             db,
             key: Some(key),
@@ -2644,6 +2674,22 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures")
             .join(name)
+    }
+
+    // Inputs the fuzzer found, one per place keepass 0.14 panics. The panic has to stay an error.
+    #[test]
+    fn a_malformed_file_is_an_error_not_a_panic() {
+        for name in [
+            "kdbx3-short-header.kdbx",
+            "kdbx4-short-field.kdbx",
+            "kdbx4-bad-kdf.kdbx",
+        ] {
+            let opened = Vault::open(&fixture(&format!("malformed/{name}")), "pw", None);
+            let Err(VaultError::Db(why)) = opened else {
+                panic!("{name} did not give a database error");
+            };
+            assert_eq!(why, "the file is damaged or not a vault", "{name}");
+        }
     }
 
     #[test]
