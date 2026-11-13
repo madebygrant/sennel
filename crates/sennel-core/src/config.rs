@@ -104,21 +104,59 @@ pub const DEFAULT_BACKUPS: usize = 3;
 /// juggles, short enough that the list is still a list and not a search.
 pub const RECENT_MAX: usize = 10;
 
+/// The home folder, which config and backups are found from. Refused when unset, empty or
+/// relative: `~/.config` would become `.config` in whatever folder Sennel was started in, and a
+/// cloned repository could then supply the config and receive the backups.
+pub fn home() -> Result<PathBuf, String> {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if home.is_absolute() => Ok(home),
+        _ => {
+            Err("HOME is not set to a folder · Sennel finds its config and backups from it".into())
+        }
+    }
+}
+
+// An XDG variable that is set to an absolute path. The spec says to ignore a relative one.
+fn xdg(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
 pub fn config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| expand("~/.config"), PathBuf::from);
+    let base = xdg("XDG_CONFIG_HOME").unwrap_or_else(|| expand("~/.config"));
     base.join("sennel").join("config.toml")
+}
+
+/// Where extracted attachments go: the state folder, never the vault's own folder, which is
+/// usually the one a sync client uploads.
+pub fn files_dir() -> PathBuf {
+    let base = xdg("XDG_STATE_HOME").unwrap_or_else(|| expand("~/.local/state"));
+    base.join("sennel").join("files")
 }
 
 // State rather than config or cache: data worth keeping that the user never edits.
 pub fn default_backup_dir() -> PathBuf {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| expand("~/.local/state"), PathBuf::from);
+    let base = xdg("XDG_STATE_HOME").unwrap_or_else(|| expand("~/.local/state"));
     base.join("sennel").join("backups")
+}
+
+/// A path written in the config file. A relative one is taken from the config file's folder,
+/// never from wherever Sennel happened to be started.
+pub fn from_config(value: &str, config_file: Option<&std::path::Path>) -> PathBuf {
+    let path = expand(value);
+    let beside = config_file
+        .and_then(|f| std::path::absolute(f).ok())
+        .and_then(|f| f.parent().map(std::path::Path::to_path_buf));
+    match beside {
+        Some(beside) if path.is_relative() => beside.join(path),
+        _ => path,
+    }
+}
+
+/// The config's `backup_dir`, or the default.
+pub fn backup_dir(value: Option<&str>, config_file: Option<&std::path::Path>) -> PathBuf {
+    value.map_or_else(default_backup_dir, |dir| from_config(dir, config_file))
 }
 
 /* Writing one key back into a file a person wrote by hand: the whole file is
@@ -180,7 +218,12 @@ fn rewrite(config_file: Option<&std::path::Path>, key: &str, value: Option<&str>
     };
     let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let line = value.map(|v| format!("{key} = {v}"));
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // A config that is there and cannot be read must not be replaced by one holding a single key.
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
     let mut first_table: Option<usize> = None;
@@ -282,6 +325,8 @@ fn quote(value: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            // Any other control character written raw makes the file unparseable.
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
             _ => out.push(c),
         }
     }
@@ -353,7 +398,8 @@ pub fn absolute(path: &std::path::Path) -> PathBuf {
 }
 
 pub fn expand(path: &str) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
+    // Read the way `home()` reads it, so a HOME the check accepted is the one used here.
+    let home = std::env::var_os("HOME").unwrap_or_default();
     if path == "~" {
         return PathBuf::from(home);
     }
@@ -532,6 +578,55 @@ pub fn generator(file: Option<&FileGenerator>) -> anyhow::Result<Generator> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_path_in_the_config_is_taken_from_the_config_files_folder() {
+        let file = std::path::Path::new("/etc/sennel/config.toml");
+        assert_eq!(
+            from_config("vault.kdbx", Some(file)),
+            PathBuf::from("/etc/sennel/vault.kdbx")
+        );
+        assert_eq!(from_config("/v.kdbx", Some(file)), PathBuf::from("/v.kdbx"));
+        // A config named relatively is made absolute from here first.
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            from_config("v.kdbx", Some(std::path::Path::new("sennel.toml"))),
+            here.join("v.kdbx")
+        );
+    }
+
+    #[test]
+    fn a_relative_backup_dir_is_taken_from_the_config_files_folder() {
+        let file = std::path::Path::new("/etc/sennel/config.toml");
+        assert_eq!(
+            backup_dir(Some("backups"), Some(file)),
+            PathBuf::from("/etc/sennel/backups")
+        );
+        assert_eq!(
+            backup_dir(Some("/mnt/safe"), Some(file)),
+            PathBuf::from("/mnt/safe")
+        );
+    }
+
+    #[test]
+    fn a_path_with_any_control_character_is_written_so_it_reads_back() {
+        let path = "/tmp/a\tb\u{7}c\u{1b}d\ne\"f\\g";
+        let line = format!("db = {}", quote(path));
+        let parsed: toml::Table = toml::from_str(&line).unwrap();
+        assert_eq!(parsed["db"].as_str(), Some(path));
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("sennel-cfg-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, [0xff, 0xfe, b'\n']).unwrap();
+        assert!(remember_db(Some(&file), std::path::Path::new("/v.kdbx")).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), [0xff, 0xfe, b'\n']);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /* --no-config asked for the file to be left out of the run, so it cannot
     be where a choice is kept. */

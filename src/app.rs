@@ -153,6 +153,12 @@ pub enum Confirm {
     Quit,
     // `^l` with changes that could not be saved; the reason rides along for the popup.
     Lock(String),
+    // `s` on a file: where it would go, shown in full, since the name came out of the vault.
+    Extract {
+        id: EntryId,
+        name: String,
+        to: PathBuf,
+    },
     /* The title travels with the id for the prompt line. It is a display
        copy of a name field, never the password: the confirm popup must stay
        safe to screenshot with the vault unlocked. */
@@ -4004,7 +4010,7 @@ impl App {
         }
     }
 
-    fn fields_selected(&self) -> Option<&crate::vault::Extra> {
+    pub(crate) fn fields_selected(&self) -> Option<&crate::vault::Extra> {
         let fields = self.fields.as_ref()?;
         fields.rows.get(fields.cursor)
     }
@@ -4059,7 +4065,16 @@ impl App {
         let Some(id) = self.fields.as_ref().map(|f| f.entry) else {
             return;
         };
-        match self.session.extract(id, &name) {
+        let Some(to) = self.session.extract_target(&name) else {
+            self.error("no vault file to write beside");
+            return;
+        };
+        self.confirm = Some(Confirm::Extract { id, name, to });
+    }
+
+    /// `s` answered yes, to the destination the popup showed.
+    pub fn fields_extract(&mut self, id: EntryId, name: &str, to: PathBuf) {
+        match self.session.extract_to(id, name, to) {
             Ok((at, len)) => self.warn(format!(
                 "wrote {} ·  {len} bytes, owner-only, outside the vault",
                 at.display()

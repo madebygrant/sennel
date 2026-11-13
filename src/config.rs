@@ -377,10 +377,12 @@ impl Config {
             loaded
         };
 
+        // A relative path on the command line is from here; one in the file is from the file.
+        let in_file = |p: &str| sennel_core::config::from_config(p, config_file.as_deref());
         let db = cli
             .db
             .map(|d| expand(&d))
-            .or_else(|| file.db.as_deref().map(expand));
+            .or_else(|| file.db.as_deref().map(in_file));
         let (palette, warnings) = theme(
             cli.theme.as_deref().or(file.theme.as_deref()),
             file.colors.as_ref(),
@@ -394,7 +396,7 @@ impl Config {
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
-                .map(|p| expand(p))
+                .map(|p| in_file(p))
                 .collect(),
             clipboard_timeout: cli
                 .clipboard_timeout
@@ -413,10 +415,10 @@ impl Config {
                 .or(file.yubikey.as_deref())
                 .map(|spec| spec.parse().map_err(|why: String| anyhow::anyhow!("{why}")))
                 .transpose()?,
-            backup_dir: file
-                .backup_dir
-                .as_deref()
-                .map_or_else(default_backup_dir, expand),
+            backup_dir: sennel_core::config::backup_dir(
+                file.backup_dir.as_deref(),
+                config_file.as_deref(),
+            ),
             sort: order(cli.sort.as_deref().or(file.sort.as_deref()))?,
             theme: palette,
             theme_warnings: warnings,

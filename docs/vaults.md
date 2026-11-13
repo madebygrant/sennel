@@ -54,8 +54,8 @@ entry arrived with, and clears them for good.
 ## Fields and attachments
 
 `F` opens what an entry's fixed rows cannot show: custom fields, such as recovery codes, and attached
-files. Sennel stores the fields you add as protected. An attachment can go out beside the vault,
-or to `ssh-agent` as a key. [The keys](keys.md#the-fields-screen-f).
+files. Sennel stores the fields you add as protected. An attachment can go out to Sennel's own
+files folder, or to `ssh-agent` as a key. [The keys](keys.md#the-fields-screen-f).
 
 ## Field references
 

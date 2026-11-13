@@ -394,6 +394,12 @@ pub fn run(context: tauri::Context) {
             sennel_core::agent::emergency_release();
         }
     }));
+    // A GUI session always has HOME. Without it every path below would be relative to wherever the
+    // app was started, so it does not start.
+    if let Err(why) = sennel_core::config::home() {
+        eprintln!("sennel-desktop: {why}");
+        std::process::exit(1);
+    }
     let settings = settings::Settings::load().unwrap_or_else(|why| {
         eprintln!("sennel-desktop: {why}");
         settings::Settings::fallback(why)

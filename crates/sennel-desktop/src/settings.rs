@@ -75,23 +75,23 @@ impl Settings {
         let file = FileConfig::load(&path, false).map_err(|e| format!("{e:#}"))?;
         let fail = |e: anyhow::Error| format!("{e:#}");
         Ok(Settings {
-            config_file: Some(path),
-            db: file.db.as_deref().map(config::expand),
+            config_file: Some(path.clone()),
+            db: file
+                .db
+                .as_deref()
+                .map(|p| config::from_config(p, Some(&path))),
             recent: file
                 .recent
                 .unwrap_or_default()
                 .iter()
-                .map(|p| config::expand(p))
+                .map(|p| config::from_config(p, Some(&path)))
                 .collect(),
             clipboard_timeout: file
                 .clipboard_timeout
                 .unwrap_or(config::DEFAULT_CLIPBOARD_TIMEOUT),
             lock_timeout: file.lock_timeout.unwrap_or(config::DEFAULT_LOCK_TIMEOUT),
             backups: config::backups(file.backups).map_err(fail)?,
-            backup_dir: file
-                .backup_dir
-                .as_deref()
-                .map_or_else(config::default_backup_dir, config::expand),
+            backup_dir: config::backup_dir(file.backup_dir.as_deref(), Some(&path)),
             yubikey: file.yubikey.as_deref().map(str::parse).transpose()?,
             ssh_agent: file.ssh_agent.unwrap_or(false),
             ssh_lifetime: config::lifetime(file.ssh_agent_lifetime).map_err(fail)?,

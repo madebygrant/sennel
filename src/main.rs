@@ -68,6 +68,7 @@ fn main() -> Result<()> {
         }
     }));
     let matches = Cli::command().get_matches();
+    sennel_core::config::home().map_err(|why| anyhow::anyhow!(why))?;
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
     if cfg.check {
         return check(&cfg);
@@ -2392,6 +2393,7 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         match question {
             Some(Confirm::Quit) => app.quit = true,
             Some(Confirm::Lock(_)) => app.lock_anyway(),
+            Some(Confirm::Extract { id, name, to }) => app.fields_extract(id, &name, to),
             /* The delete acts at once: the popup said what it was about, so
             a yes needs no second popup between answer and effect. */
             Some(Confirm::DeleteEntry { id, .. }) => app.confirm_delete_entry(id),
@@ -2885,6 +2887,8 @@ mod tests {
     #[test]
     fn a_password_changed_elsewhere_stops_the_offer() {
         let (mut app, tmp) = typed_then_locked(true);
+        // Replaced, as another program would: a new vault never lands on an existing file.
+        std::fs::remove_file(&tmp.0).unwrap();
         crate::vault::Vault::new()
             .save_as(&tmp.0, "changed elsewhere", None)
             .unwrap();

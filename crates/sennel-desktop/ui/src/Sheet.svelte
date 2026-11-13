@@ -165,7 +165,7 @@
             </span>
             <span class="actions">
               {#if r.file}
-                <button onclick={() => act("extract", { id: sheet.id, name: r.name })}>Save beside vault</button>
+                <button onclick={() => act("extract", { id: sheet.id, name: r.name })}>Save to files folder</button>
                 <button onclick={() => act("agent_give", { id: sheet.id, name: r.name })}>To ssh-agent</button>
               {:else}
                 <button onclick={() => copyOut(r.name, "copy_field", { id: sheet.id, name: r.name })}>{fb.copied === r.name ? "Copied" : "Copy"}</button>

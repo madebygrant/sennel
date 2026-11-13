@@ -84,3 +84,29 @@ fn the_deepest_group_column_allowed_imports_and_reopens() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("bottom"), "{out}");
 }
+
+// Without HOME, `~/.config` would be `.config` here, and a cloned repository could hand Sennel its
+// config and receive its backups.
+#[test]
+fn a_missing_home_is_refused_rather_than_read_from_here() {
+    let s = Scratch::new("nohome");
+    let planted = s.0.join(".config/sennel");
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::write(planted.join("config.toml"), "db = \"./planted.kdbx\"\n").unwrap();
+    for home in [None, Some(""), Some("relative")] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sennel"));
+        cmd.arg("--check")
+            .current_dir(&s.0)
+            .env_remove("XDG_CONFIG_HOME");
+        match home {
+            Some(value) => cmd.env("HOME", value),
+            None => cmd.env_remove("HOME"),
+        };
+        let out = cmd.output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_ne!(out.status.code(), Some(0), "{home:?}: {said}");
+        assert!(err.contains("HOME"), "{home:?}: {err}");
+        assert!(!said.contains("planted"), "{home:?}: {said}");
+    }
+}

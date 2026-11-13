@@ -1943,6 +1943,13 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
             Span::styled(" q  quit", Style::new().fg(p.accent)),
             "",
         ),
+        Confirm::Extract { to, .. } => (
+            "save the file?",
+            // The end is the part a name could hide something in, so it is the part kept.
+            truncate_start(&format!(" to {}", to.display()), room),
+            Span::styled(" y  save", Style::new().fg(p.accent)),
+            "owner-only · it leaves the vault",
+        ),
         Confirm::Lock(why) => (
             "lock?",
             truncate(&format!(" unsaved changes would be lost: {why}"), room),
@@ -3646,42 +3653,66 @@ mod tests {
     "File exists" it produced named neither the file nor the reason. */
     #[test]
     fn extracting_an_attachment_twice_says_which_file_is_in_the_way() {
+        use crate::app::Confirm;
         use crate::vault::Vault;
         let dir = std::env::temp_dir().join(format!("sennel-x-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("v.kdbx");
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_file(dir.join("key.pem")).ok();
+        let out = dir.join("files").join("v");
 
         let mut vault = Vault::new();
         let root = vault.root_id();
         let id = vault
             .create_entry(&root, "vpn", "octo", "p", "", "")
             .unwrap();
-        vault
-            .add_attachment(&id, "key.pem", b"-----BEGIN-----".to_vec())
-            .unwrap();
+        for (name, bytes) in [("key.pem", &b"-----BEGIN-----"[..]), ("x/.zshenv", b"rm")] {
+            vault.add_attachment(&id, name, bytes.to_vec()).unwrap();
+        }
         vault.save_as(&path, "pw", None).unwrap();
         let mut app = App::new();
+        app.session.set_files_dir(dir.join("files"));
         app.open_vault(vault);
         app.entry_cursor = Some(id);
         app.open_fields();
+        // `s` asks first, naming where the file goes, and the answer writes it there.
+        let save = |app: &mut App, name: &str| {
+            let to = app.session.extract_target(name).unwrap();
+            app.fields_extract(id, name, to);
+        };
+        let pick = |app: &mut App, name: &str| {
+            while !matches!(app.fields_selected(), Some(crate::vault::Extra::File { name: n, .. }) if n == name)
+            {
+                app.fields_move(true);
+            }
+        };
 
+        pick(&mut app, "key.pem");
         app.fields_save();
-        assert!(dir.join("key.pem").exists(), "{}", app.stage);
+        let Some(Confirm::Extract { to, .. }) = app.confirm.take() else {
+            panic!("s wrote without asking: {}", app.stage);
+        };
+        assert_eq!(to, out.join("key.pem"));
+        assert!(!to.exists(), "written before the answer");
+        save(&mut app, "key.pem");
+        assert!(out.join("key.pem").exists(), "{}", app.stage);
         assert!(app.stage.contains("wrote"), "{}", app.stage);
 
         app.expire_now();
-        app.fields_save();
+        save(&mut app, "key.pem");
         assert!(app.stage.contains("already there"), "{}", app.stage);
         assert!(app.stage.contains("key.pem"), "{}", app.stage);
         // And the file that was there is untouched.
         assert_eq!(
-            std::fs::read(dir.join("key.pem")).unwrap(),
+            std::fs::read(out.join("key.pem")).unwrap(),
             b"-----BEGIN-----"
         );
-        std::fs::remove_file(dir.join("key.pem")).ok();
-        std::fs::remove_file(&path).ok();
+
+        // A name a shell would read by itself loses its leading dot and any folder before it.
+        save(&mut app, "x/.zshenv");
+        assert!(out.join("zshenv").exists(), "{}", app.stage);
+        assert!(!dir.join(".zshenv").exists() && !out.join(".zshenv").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /* `D` removes the row under the cursor, and the list has to stop showing

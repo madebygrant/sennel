@@ -795,9 +795,86 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
         .mode(0o600)
         .open(path)
         .map_err(|e| VaultError::Io(format!("{e}")))?;
-    file.write_all(bytes)
-        .map_err(|e| VaultError::Io(e.to_string()))?;
+    // A half-written plaintext file is worse than none, and is ours to remove since we created it.
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(VaultError::Io(e.to_string()));
+    }
     Ok(())
+}
+
+// The vault's own file, through any symlink. Renaming over a link replaces the link with a file
+// and the real vault stops getting the saves. A path not yet created resolves through its folder.
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+// Temp files a crashed Sennel left beside the vault: `<stem>.<pid>.tmp` from a save and
+// `<stem>.<pid>.restore` from a checked save. Each is a whole vault under the key of its day, in
+// what is usually a synced folder. A pid says nothing about another machine sharing that folder,
+// so only one that has sat there a day, under a pid no process here has, is swept.
+pub fn sweep_leftovers(path: &Path) -> usize {
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) else {
+        return 0;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let stem = stem.to_string_lossy();
+    let mut swept = 0;
+    for found in listing.flatten() {
+        let name = found.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&*stem).and_then(|r| r.strip_prefix('.')) else {
+            continue;
+        };
+        let Some(pid) = rest
+            .strip_suffix(".tmp")
+            .or_else(|| rest.strip_suffix(".restore"))
+            .and_then(|pid| pid.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let stale = found
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(24 * 3600));
+        // SAFETY: signal 0 only asks whether the process exists; nothing is sent.
+        let gone = unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if pid != std::process::id() as i32
+            && stale
+            && gone
+            && std::fs::remove_file(found.path()).is_ok()
+        {
+            swept += 1;
+        }
+    }
+    swept
+}
+
+// A folder Sennel creates for a vault or its backups holds secrets, so only the owner gets in.
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
 }
 
 pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
@@ -1010,6 +1087,8 @@ pub struct Vault {
     // The hardware key inside `key`, kept so a re-key can include it again.
     challenge: Option<ChallengeResponseKey>,
     path: Option<PathBuf>,
+    // As the user named it, for showing. `path` is the real file behind any symlink, for writing.
+    shown: Option<PathBuf>,
     /* What the file looked like when this vault last agreed with it. Sennel
     autosaves after every change, so without this a KeePassXC edit (or a
     sync client, or a second Sennel) is overwritten by the next keypress
@@ -1183,24 +1262,40 @@ impl MergeSummary {
     }
 }
 
+// How a written vault replaces what is at its path.
+#[derive(Clone, Copy)]
+enum Publish {
+    Replace,
+    // Only while the file still has this stamp: somebody else's write in the meantime is a conflict.
+    ReplaceIf(Option<Stamp>),
+    // Only where nothing is: a new vault or a copy never lands on a file that appeared meanwhile.
+    New,
+}
+
 /// Enough of a file's identity to notice somebody else wrote it. Modified
 /// time and length rather than a hash: a vault is megabytes and this runs on
-/// every save.
+/// every save. The inode too, since every writer replaces the file with a new one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Stamp {
     modified: Option<std::time::SystemTime>,
     len: u64,
+    inode: u64,
 }
 
 impl Stamp {
     /// `None` when the file is not there to stamp — which is itself a change
     /// worth refusing on, since something removed it.
     fn of(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        Some(Stamp {
+        std::fs::metadata(path).ok().as_ref().map(Self::from)
+    }
+
+    fn from(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Stamp {
             modified: meta.modified().ok(),
             len: meta.len(),
-        })
+            inode: meta.ino(),
+        }
     }
 }
 
@@ -1216,6 +1311,7 @@ impl Vault {
             key: None,
             challenge: None,
             path: None,
+            shown: None,
             stamp: None,
             backups: 0,
             backup_dir: None,
@@ -1307,14 +1403,18 @@ impl Vault {
         key_file: Option<&[u8]>,
         challenge: Option<ChallengeResponseKey>,
     ) -> Result<Self, VaultError> {
+        let typed = path;
+        let path = &real_path(path);
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
         let key = Self::build_key(password, key_file, challenge.as_ref())?;
         let db = read_database(&mut file, key.clone())?;
+        sweep_leftovers(path);
         Ok(Vault {
             db,
             key: Some(key),
             challenge,
             path: Some(path.to_path_buf()),
+            shown: Some(typed.to_path_buf()),
             stamp: Stamp::of(path),
             backups: 0,
             backup_dir: None,
@@ -1383,7 +1483,7 @@ impl Vault {
         if self.changed_on_disk() {
             return Err(VaultError::ChangedOnDisk);
         }
-        self.write_and_stamp(false)
+        self.write_and_stamp(false, Publish::ReplaceIf(self.stamp))
     }
 
     /// Save regardless of what is on disk now. The caller has told the user
@@ -1393,7 +1493,7 @@ impl Vault {
             return Err(VaultError::ReadOnlyFormat(self.format()));
         }
         // The file being replaced is somebody else's work, so it is always kept.
-        self.write_and_stamp(true)
+        self.write_and_stamp(true, Publish::Replace)
     }
 
     /// Whether the file has moved on without us. False for a vault with no
@@ -1471,7 +1571,7 @@ impl Vault {
             return Err(VaultError::ChangedOnDisk);
         }
         let previous = std::mem::replace(&mut self.db, merged);
-        if let Err(e) = self.write_and_stamp(true) {
+        if let Err(e) = self.write_and_stamp(true, Publish::ReplaceIf(seen)) {
             self.db = previous;
             return Err(e);
         }
@@ -1488,8 +1588,9 @@ impl Vault {
     // One routine backup per session, and none if the newest is recent: autosave writes on every edit and
     // every unlock is a new session. `force` is for a write that discards somebody else's work.
     fn back_up(&mut self, force: bool) -> Result<(), VaultError> {
-        use std::os::unix::fs::DirBuilderExt;
-        let (Some(path), Some(dir)) = (self.path.as_deref(), self.backup_dir.as_deref()) else {
+        // Named for the path as the user gave it, as they always were, so backups made before
+        // symlinks were followed are still found, rotated and deleted on a rekey.
+        let (Some(path), Some(dir)) = (self.path(), self.backup_dir.as_deref()) else {
             return Ok(());
         };
         if self.backups == 0 || (self.backed_up && !force) || !path.exists() {
@@ -1506,11 +1607,9 @@ impl Vault {
             return Ok(());
         }
         let fail = |e: std::io::Error| VaultError::Io(format!("backup failed · {e}"));
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(fail)?;
+        // Closed to others only when Sennel makes it. A folder that was already there is the user's
+        // choice, and each backup in it is 0600 whatever the folder allows.
+        private_dir(dir).map_err(fail)?;
         // Written under a staging name first, so a failure leaves the existing backups as they were.
         let bytes = Zeroizing::new(std::fs::read(path).map_err(fail)?);
         let staging = backup_path(dir, path, 0);
@@ -1528,13 +1627,12 @@ impl Vault {
         Ok(())
     }
 
-    fn write_and_stamp(&mut self, force_backup: bool) -> Result<(), VaultError> {
+    fn write_and_stamp(&mut self, force_backup: bool, publish: Publish) -> Result<(), VaultError> {
         self.back_up(force_backup)?;
         let (Some(path), Some(key)) = (self.path.clone(), self.key.as_ref()) else {
             return Err(VaultError::Unsaved);
         };
-        Self::write_file(&self.db, key, &path)?;
-        self.stamp = Stamp::of(&path);
+        self.stamp = Self::write_file_as(&self.db, key, &path, publish)?;
         Ok(())
     }
 
@@ -1550,7 +1648,8 @@ impl Vault {
         let Some(key) = self.key.as_ref() else {
             return Err(VaultError::Unsaved);
         };
-        Self::write_file(&self.db, key, path)
+        // A copy goes where nothing is, never over a file that appeared since the caller looked.
+        Self::write_file_as(&self.db, key, path, Publish::New).map(|_| ())
     }
 
     /* A file written by `save_copy`, opened again with the same key. The
@@ -1569,6 +1668,7 @@ impl Vault {
             key: Some(key),
             challenge: self.challenge.clone(),
             path: Some(path.to_path_buf()),
+            shown: Some(path.to_path_buf()),
             stamp: Stamp::of(path),
             backups: 0,
             backup_dir: None,
@@ -1642,11 +1742,14 @@ impl Vault {
         challenge: Option<ChallengeResponseKey>,
     ) -> Result<(), VaultError> {
         let key = Self::build_key(password, key_file, challenge.as_ref())?;
-        Self::write_file(&self.db, &key, path)?;
+        let typed = path;
+        let path = real_path(path);
+        let written = Self::write_file_as(&self.db, &key, &path, Publish::New)?;
         self.key = Some(key);
         self.challenge = challenge;
-        self.path = Some(path.to_path_buf());
-        self.stamp = Stamp::of(path);
+        self.stamp = written;
+        self.path = Some(path);
+        self.shown = Some(typed.to_path_buf());
         // A file that has just been created holds nothing worth keeping.
         self.backed_up = true;
         Ok(())
@@ -1700,31 +1803,44 @@ impl Vault {
         // whose password has never been changed.
         let was = self.db.meta.master_key_changed;
         self.db.meta.master_key_changed = Some(Times::now());
-        if let Err(e) = Self::write_file(&self.db, &key, &path) {
-            self.db.meta.master_key_changed = was;
-            return Err(e);
-        }
+        let written = Self::write_file_as(&self.db, &key, &path, Publish::ReplaceIf(self.stamp));
+        let written = match written {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                self.db.meta.master_key_changed = was;
+                return Err(e);
+            }
+        };
         self.key = Some(key);
-        self.stamp = Stamp::of(&path);
+        self.stamp = written;
         // The copies still open with the old password, and a leaked password is a common reason to change it.
         let gone = self
             .backup_dir
             .as_deref()
-            .map_or(0, |dir| forget_backups(dir, &path));
+            .map_or(0, |dir| forget_backups(dir, self.path().unwrap_or(&path)));
+        // Leftovers from a crash also open with the old password.
+        sweep_leftovers(&path);
         self.backed_up = false;
         Ok(gone)
     }
 
     pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+        self.shown.as_deref().or(self.path.as_deref())
     }
 
     /* Beside the target and renamed over it: a truncated write turns a
     half-written kdbx into nothing. Mode 0600, because this file holds
     every secret at once. */
-    fn write_file(db: &Database, key: &DatabaseKey, path: &Path) -> Result<(), VaultError> {
+    // Returns the written file's stamp, taken from the file itself before it is renamed into place,
+    // so a write by somebody else landing just after is never taken for ours.
+    fn write_file_as(
+        db: &Database,
+        key: &DatabaseKey,
+        path: &Path,
+        publish: Publish,
+    ) -> Result<Option<Stamp>, VaultError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir).map_err(|e| VaultError::Io(e.to_string()))?;
+            private_dir(dir).map_err(|e| VaultError::Io(e.to_string()))?;
         }
         let temp = path.with_extension(format!("{}.tmp", std::process::id()));
         use std::os::unix::fs::OpenOptionsExt;
@@ -1768,10 +1884,39 @@ impl Vault {
             let _ = std::fs::remove_file(&temp);
             return Err(VaultError::Io(e.to_string()));
         }
+        let written = out.metadata().ok().map(|meta| Stamp::from(&meta));
         drop(out);
-        if let Err(e) = std::fs::rename(&temp, path) {
+        #[cfg(test)]
+        tests::BEFORE_PUBLISH.with_borrow(|hook| {
+            if let Some(hook) = hook {
+                hook(path)
+            }
+        });
+        // The key derivation and any key touch above can take seconds, which is long enough for a
+        // sync client or KeePassXC to write the file, so the check is made again at the last moment.
+        if let Publish::ReplaceIf(seen) = publish
+            && Stamp::of(path) != seen
+        {
             let _ = std::fs::remove_file(&temp);
-            return Err(VaultError::Io(e.to_string()));
+            return Err(VaultError::ChangedOnDisk);
+        }
+        let published = match publish {
+            Publish::Replace | Publish::ReplaceIf(_) => std::fs::rename(&temp, path),
+            // A hard link fails if anything is at the path. A filesystem without them gets a check
+            // and a rename, which leaves only a moment for something to appear.
+            Publish::New => match std::fs::hard_link(&temp, path) {
+                Ok(()) => std::fs::remove_file(&temp),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+                Err(_) if path.exists() => Err(std::io::ErrorKind::AlreadyExists.into()),
+                Err(_) => std::fs::rename(&temp, path),
+            },
+        };
+        if let Err(e) = published {
+            let _ = std::fs::remove_file(&temp);
+            return Err(VaultError::Io(match e.kind() {
+                std::io::ErrorKind::AlreadyExists => format!("{} is already there", path.display()),
+                _ => e.to_string(),
+            }));
         }
         /* And the directory entry, so the rename itself survives the same
         crash. Best effort: a filesystem that refuses to sync a directory
@@ -1779,7 +1924,14 @@ impl Vault {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
         }
-        Ok(())
+        // Read back from the path once it is ours: a network or sync-client drive may set the time
+        // when the file closes. Only while it is still our file, by inode, or a write landing just
+        // after would be taken for ours.
+        let now = Stamp::of(path);
+        Ok(match (written, now) {
+            (Some(ours), Some(now)) if ours.inode == now.inode => Some(now),
+            _ => written,
+        })
     }
 
     /* Escape hatch for exceptional reads. The 0.13 rewrite left no prod
@@ -2883,6 +3035,15 @@ impl Default for Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Hook = Option<Box<dyn Fn(&Path)>>;
+
+    thread_local! {
+        // Run by `write_file_as` just before it puts the file in place, to stand in for another
+        // program writing the vault during a save.
+        pub(super) static BEFORE_PUBLISH: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     fn vault() -> Vault {
         Vault::new()
@@ -5374,6 +5535,155 @@ mod tests {
         let err = read_database(&mut std::io::Cursor::new(file), key).unwrap_err();
         assert!(matches!(err, VaultError::TooMuchWork(_)), "{err}");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sennel-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_vault_opened_through_a_symlink_is_saved_and_rekeyed_through_it() {
+        let dir = scratch_dir("symlink");
+        let real = dir.join("synced").join("vault.kdbx");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        vault().save_as(&real, "old", None).unwrap();
+        let link = dir.join("vault.kdbx");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let backups = dir.join("backups");
+
+        let mut v = Vault::open(&link, "old", None).unwrap();
+        assert_eq!(
+            v.path(),
+            Some(link.as_path()),
+            "the path shown is the one typed"
+        );
+        v.set_backups(3, &backups);
+        v.create_entry(&v.root_id(), "edit", "u", "p", "", "")
+            .unwrap();
+        v.save().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(Vault::open(&real, "old", None).unwrap().entry_count(), 1);
+
+        assert_eq!(
+            v.rekey("new", None).unwrap(),
+            1,
+            "the backup was not found to delete"
+        );
+        assert!(Vault::open(&real, "old", None).is_err());
+        assert!(Vault::open(&real, "new", None).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_vault_or_a_copy_never_lands_on_a_file_already_there() {
+        let dir = scratch_dir("noreplace");
+        let there = dir.join("there.kdbx");
+        std::fs::write(&there, b"somebody else's").unwrap();
+        let err = vault().save_as(&there, "pw", None).unwrap_err();
+        assert!(err.to_string().contains("already there"), "{err}");
+        let mut v = vault();
+        v.save_as(&dir.join("mine.kdbx"), "pw", None).unwrap();
+        assert!(v.save_copy(&there).is_err());
+        assert_eq!(std::fs::read(&there).unwrap(), b"somebody else's");
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 2, "a temp file was left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_crashed_saves_temp_file_is_swept_and_a_live_ones_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("sweep");
+        let path = dir.join("new").join("vault.kdbx");
+        vault().save_as(&path, "pw", None).unwrap();
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "a folder made for the vault is open to others"
+        );
+
+        let dead = path.with_extension("999999.tmp");
+        let dead_restore = path.with_extension("999998.restore");
+        // Another machine's save, arrived through the sync client a moment ago.
+        let fresh = path.with_extension("999997.tmp");
+        let live = path.with_extension(format!("{}.tmp", std::process::id()));
+        let other = path.with_file_name("vault.notes.txt");
+        let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+        for file in [&dead, &dead_restore, &fresh, &live, &other] {
+            std::fs::write(file, b"x").unwrap();
+            if file != &fresh {
+                let handle = std::fs::File::options().write(true).open(file).unwrap();
+                handle.set_modified(two_days).unwrap();
+            }
+        }
+        Vault::open(&path, "pw", None).unwrap();
+        assert!(!dead.exists() && !dead_restore.exists());
+        assert!(
+            fresh.exists(),
+            "a recent temp file from another machine was swept"
+        );
+        assert!(live.exists() && other.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_backup_folder_the_user_made_is_left_as_it_is_and_each_backup_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("backup-mode");
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("vault.kdbx");
+        vault().save_as(&path, "pw", None).unwrap();
+        let mut v = Vault::open(&path, "pw", None).unwrap();
+        v.set_backups(2, &backups);
+        v.create_entry(&v.root_id(), "e", "u", "p", "", "").unwrap();
+        v.save().unwrap();
+        let mode = std::fs::metadata(&backups).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "a folder the user chose was changed");
+        let made = backups_of(&backups, &path);
+        assert_eq!(made.len(), 1);
+        let mode = std::fs::metadata(&made[0]).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_write_landing_during_the_save_is_a_conflict_not_overwritten() {
+        let dir = scratch_dir("late-write");
+        let path = dir.join("vault.kdbx");
+        vault().save_as(&path, "pw", None).unwrap();
+        let mut v = Vault::open(&path, "pw", None).unwrap();
+        v.create_entry(&v.root_id(), "ours", "u", "p", "", "")
+            .unwrap();
+        BEFORE_PUBLISH.set(Some(Box::new(|at: &Path| {
+            std::fs::write(at, b"theirs, written during our key derivation").unwrap();
+        })));
+        let saved = v.save();
+        BEFORE_PUBLISH.set(None);
+        assert_eq!(saved, Err(VaultError::ChangedOnDisk));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"theirs, written during our key derivation"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a temp file was left"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

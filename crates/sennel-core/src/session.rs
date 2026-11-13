@@ -279,6 +279,8 @@ pub struct Session<S> {
     ssh_lifetime: u32,
     backups: usize,
     backup_dir: PathBuf,
+    // Where extracted attachments go; see `extract_target`.
+    files_dir: Option<PathBuf>,
     pub lock_after: Option<Duration>,
     pub last_activity: Instant,
     // `Instant` stops during suspend on macOS and Linux, so idleness reads both clocks.
@@ -311,6 +313,7 @@ impl<S: Seal> Session<S> {
             ssh_lifetime: 3600,
             backups: 0,
             backup_dir: PathBuf::new(),
+            files_dir: None,
             lock_after: None,
             last_activity: Instant::now(),
             last_activity_wall: SystemTime::now(),
@@ -376,6 +379,12 @@ impl<S: Seal> Session<S> {
 
     pub fn take_pending(&mut self) -> Option<Pending> {
         self.pending.take()
+    }
+
+    /// Where extracted attachments go, in place of Sennel's state folder. For tests, which must not
+    /// write into the user's home.
+    pub fn set_files_dir(&mut self, dir: PathBuf) {
+        self.files_dir = Some(dir);
     }
 
     pub fn set_backups(&mut self, keep: usize, dir: PathBuf) {
@@ -1115,27 +1124,43 @@ impl<S: Seal> Session<S> {
     // Writes an attachment beside the vault, owner-only: that folder is where the user already keeps
     // secrets, and the working directory is wherever they launched from. Returns where and how big.
     pub fn extract(&self, id: EntryId, name: &str) -> Result<(PathBuf, usize), Extract> {
+        let at = self.extract_target(name).ok_or(Extract::NoFolder)?;
+        self.extract_to(id, name, at)
+    }
+
+    /// `extract` to a destination the user has already been shown and agreed to.
+    pub fn extract_to(
+        &self,
+        id: EntryId,
+        name: &str,
+        at: PathBuf,
+    ) -> Result<(PathBuf, usize), Extract> {
         let vault = self.vault.as_ref().ok_or(Extract::Gone)?;
         let bytes = vault.attachment_bytes(&id, name).ok_or(Extract::Gone)?;
-        let dir = vault
-            .path()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .ok_or(Extract::NoFolder)?;
-        // The name comes out of the vault and may hold a path separator, so only its last part counts.
-        let leaf = Path::new(name)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty() && n != "." && n != "..")
-            .unwrap_or_else(|| "attachment".to_string());
-        let at = dir.join(&leaf);
         // Named before the write: the exclusive create would only say "File exists".
         if at.exists() {
             return Err(Extract::Exists(at));
+        }
+        if let Some(dir) = at.parent() {
+            crate::vault::private_dir(dir)
+                .map_err(|e| Extract::Write(at.clone(), VaultError::Io(e.to_string())))?;
         }
         match crate::vault::write_owner_only(&at, &bytes) {
             Ok(()) => Ok((at, bytes.len())),
             Err(e) => Err(Extract::Write(at, e)),
         }
+    }
+
+    /// Where `extract` writes an attachment: a folder named for the vault in Sennel's state folder.
+    /// Never beside the vault, which is usually a synced folder, or `~` for `~/vault.kdbx`.
+    pub fn extract_target(&self, name: &str) -> Option<PathBuf> {
+        let path = self.vault.as_ref()?.path()?;
+        let stem = path.file_stem()?.to_string_lossy();
+        let base = self
+            .files_dir
+            .clone()
+            .unwrap_or_else(crate::config::files_dir);
+        Some(base.join(&*stem).join(safe_leaf(name)))
     }
 
     // Gives the agent the keys this vault's KeeAgent entries ask for. Opt-in, since it hands keys to
@@ -1238,6 +1263,43 @@ fn since_boot() -> Option<Duration> {
         u64::try_from(now.tv_sec).ok()?,
         u32::try_from(now.tv_nsec).ok()?,
     ))
+}
+
+// An attachment's name comes out of the vault, so a shared vault's author chooses it. Only the last
+// path part is kept, control characters are replaced, and leading dots are dropped so `.zshenv` or
+// `.envrc` can never land as a file a shell or a tool reads by itself.
+fn safe_leaf(name: &str) -> String {
+    let leaf: String = Path::new(name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_control() || invisible(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let leaf = leaf.trim_start_matches('.');
+    match leaf.is_empty() {
+        true => "attachment".to_string(),
+        false => leaf.to_string(),
+    }
+}
+
+// Characters that change how a name reads without showing: bidi overrides and isolates can turn
+// `fdp.command` into what looks like `.pdf`, and zero-width ones hide in the middle.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Where the entry form writes.
@@ -1374,6 +1436,18 @@ mod tests {
         assert!(matches!(result, Err(UnlockError::Mismatch)));
         assert!(!file.0.exists() && !s.is_open());
         assert!(matches!(unlock(&mut s, &file, ""), Err(UnlockError::Empty)));
+    }
+
+    #[test]
+    fn an_attachment_name_cannot_hide_its_type_or_land_as_a_dotfile() {
+        assert_eq!(
+            safe_leaf("invoice\u{202E}fdp.command"),
+            "invoice_fdp.command"
+        );
+        assert_eq!(safe_leaf("a\u{200B}b"), "a_b");
+        assert_eq!(safe_leaf("../../.ssh/.authorized_keys"), "authorized_keys");
+        assert_eq!(safe_leaf("..."), "attachment");
+        assert_eq!(safe_leaf("ok\u{1b}[31m.txt"), "ok_[31m.txt");
     }
 
     #[test]

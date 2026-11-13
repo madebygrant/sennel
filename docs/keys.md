@@ -106,7 +106,7 @@ attachments.
 | ----- | ------------------------------------------------------------------- |
 | `j k` | move                                                                |
 | `y`   | copy a field's value, through the same clipboard wipe as a password |
-| `s`   | write an attachment out beside the vault, owner-only                |
+| `s`   | write an attachment out to Sennel's files folder, owner-only        |
 | `g`   | give an attachment to ssh-agent as a key, for `ssh_agent_lifetime`  |
 | `*`   | reveal the protected fields                                         |
 | `a`   | add a custom field (name, then value)                               |
@@ -115,8 +115,11 @@ attachments.
 | `esc` | close                                                               |
 
 Fields you add go in protected, because a field somebody adds by hand to a password manager is more
-likely to be a secret than not. An extracted attachment is written beside the vault file rather than
-into the working directory, and loses the vault's protection the moment it lands.
+likely to be a secret than not. An extracted attachment goes into `~/.local/state/sennel/files/<vault>/`
+(`XDG_STATE_HOME` if set), never the working directory or the vault's own folder, which a sync client
+usually watches. `s` shows where before it writes. The name loses any folder, any leading dot and any
+character that hides or reorders text, so `.zshenv` cannot land where a shell reads it and a name
+cannot pass for another type. It loses the vault's protection the moment it lands.
 
 ## The marks in the list
 
