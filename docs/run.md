@@ -27,6 +27,10 @@ one, such as `username`, is reached by the fixed meaning, not the custom one.
 
 The needle works as it does for [sennel get](get.md): an exact title wins, then a single fuzzy match.
 
+Variable names are not restricted, so `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
+`NODE_OPTIONS` or `BASH_ENV` can be set too. Whoever can write a reference, or an env entry in a
+shared vault, can use one of those to run code in the program `run` starts.
+
 ## A file per project
 
 Put a project's references in a file it can commit, and point `run` at it:
@@ -49,7 +53,11 @@ sennel run --group Projects/myapp --env-file sennel.env -- npm run dev
   line, is refused.
 - `--env-file` can be given more than once. A mistake in a file is reported with its line number.
 - The file is safe to commit and safe for an AI agent to read only while it names entries and holds
-  no values. Do not point `--env-file` at a real `.env` full of secrets. It looks similar, but every
+  no values. It is not safe for anyone to write: whoever can change it chooses which entries the
+  program gets, from anywhere in the vault, and a pull request or a dependency's install script can
+  change it. Pass `--group` in every script that uses a committed file, so it can only reach that
+  group. Without `--group`, `run` says so on stderr each time. Do not point `--env-file` at a real
+  `.env` full of secrets. It looks similar, but every
   value would be treated as an entry name to search for.
 - If that happens anyway, nothing leaks into messages. A reference from a file is reported by its
   variable and line, such as `nothing matches DATABASE_URL at sennel.env:2`, never by what is on

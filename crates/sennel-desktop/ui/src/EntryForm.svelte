@@ -13,7 +13,7 @@
 
   // The boxes are seeded once and then belong to the user.
   const d = untrack(() => form.detail ?? {});
-  let title = $state(d.title ?? "");
+  let title = $state(d.raw?.title ?? d.title ?? "");
   // The stored text, not the shown one, so saving keeps a field reference as a reference.
   let username = $state(d.raw?.username ?? d.username ?? "");
   let url = $state(d.raw?.url ?? d.url ?? "");
@@ -114,7 +114,7 @@
 
   const fb = copyFeedback();
   const dirty = $derived(
-    title !== (d.title ?? "") ||
+    title !== (d.raw?.title ?? d.title ?? "") ||
       username !== (d.username ?? "") ||
       url !== (d.url ?? "") ||
       notes !== (d.notes ?? "") ||

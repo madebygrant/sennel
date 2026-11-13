@@ -25,8 +25,13 @@ Going the other way is [`sennel export`](export.md).
 
 Case, spaces, underscores and hyphens are ignored when matching, so `Login Name` and `login_name`
 are the same column. Columns nothing is done with are named on stderr rather than dropped in
-silence. A file with no title column is refused, and the message lists the header it found
-instead.
+silence. A file with no title column is refused, and the message says how many columns it found.
+It never repeats the cells: a file with no header row has somebody's login where the header goes.
+
+A cell holding a KeePass field reference, such as `{REF:P@T:bank}`, is refused, and the message
+names the rows. Once in the vault, a reference hands out whatever it points at, so a URL with one
+in it would carry another entry's password. `--allow-references` imports them as written, for a
+KeePass export that uses them on purpose.
 
 ## Where it lands
 

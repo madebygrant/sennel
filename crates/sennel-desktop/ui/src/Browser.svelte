@@ -241,7 +241,7 @@
   }
 
   function askGroup(kind) {
-    prompt = { kind, value: kind === "rename" ? current?.name ?? "" : "" };
+    prompt = { kind, value: kind === "rename" ? current?.raw_name ?? current?.name ?? "" : "" };
   }
 
   async function submitPrompt(event) {
@@ -733,7 +733,7 @@
       <div class="entry-actions">
         <button class="icon" onclick={() => (form = { id: detail.id, detail })} title="Edit" aria-label="Edit"><Pencil /></button>
         {#if detail.env}
-          <button class="icon" onclick={() => (envForm = { id: detail.id, title: detail.title })} title="Replace from a .env file" aria-label="Replace from a .env file"><ClipboardPaste /></button>
+          <button class="icon" onclick={() => (envForm = { id: detail.id, title: detail.raw?.title ?? detail.title })} title="Replace from a .env file" aria-label="Replace from a .env file"><ClipboardPaste /></button>
           <button class="icon" onclick={copyEnv} title="Copy as a .env file" aria-label={fb.copied === "env" ? "Copied" : "Copy as a .env file"}>
             {#if fb.copied === "env"}<Check />{:else}<ClipboardCopy />{/if}
           </button>

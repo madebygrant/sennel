@@ -215,6 +215,34 @@ fn an_idle_vault_locks_on_the_rust_timer() {
 }
 
 #[test]
+fn the_page_shows_cleaned_names_but_edits_start_from_the_stored_ones() {
+    let desk = Desk::new(Settings::default(), None);
+    let mut v = vault();
+    let root = v.root_id();
+    let tricky = "pay\u{202E}lap";
+    let joined = "🏳️\u{200D}🌈 wifi";
+    v.create_group(&root, tricky).unwrap();
+    let id = v.create_entry(&root, tricky, "u", "p", "", "").unwrap();
+    v.create_entry(&root, joined, "u", "p", "", "").unwrap();
+    desk.session().open(v);
+
+    let row = desk
+        .tree()
+        .into_iter()
+        .find(|g| g.raw_name == tricky)
+        .unwrap();
+    assert_eq!(row.name, "pay·lap");
+    let view = desk.entry(&id.to_string()).unwrap();
+    assert_eq!(view.title, "pay·lap");
+    assert_eq!(view.raw.title, tricky, "an edit would write the · back");
+    let rows = desk.entries(None, None).unwrap();
+    assert!(
+        rows.iter().any(|r| r.title == joined),
+        "a joiner was taken for a trick"
+    );
+}
+
+#[test]
 fn lock_with_changes_it_cannot_save_asks_for_a_second_press() {
     // An in-memory vault has no file to save to, the plainest save that cannot land.
     let desk = Desk::new(Settings::default(), None);

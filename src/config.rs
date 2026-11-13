@@ -217,6 +217,10 @@ pub enum Command {
         /// Say what would be imported and write nothing
         #[arg(long)]
         dry_run: bool,
+
+        /// Import cells holding KeePass field references ({REF:…}) as written
+        #[arg(long)]
+        allow_references: bool,
     },
 
     /// Write every entry out as plaintext CSV or JSON. The file holds every password.

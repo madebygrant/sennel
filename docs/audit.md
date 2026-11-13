@@ -58,7 +58,11 @@ Two implementation choices worth knowing, because both are unusual:
   not care that SHA-1 is broken.
 - **The request goes through `curl`.** A TLS stack and an HTTP parser are a lot of code to add to a
   password manager for one optional GET. This way the exact command is something you can read, run
-  yourself and see in `ps`. If curl is missing, `--pwned` says so and nothing else changes.
+  yourself and see in `ps`. If curl is missing, `--pwned` says so and nothing else changes. It runs
+  as `curl -q --proto =https --tlsv1.2 --max-filesize 4194304 -H 'Add-Padding: true' …`: `-q` keeps
+  `~/.curlrc` from turning off certificate checks, and padding means the size of each answer says
+  nothing about which prefix was asked. An answer that is not a list of hash suffixes, such as a
+  proxy's block page, is an error, never "not breached".
 
 This is the only feature that touches the network. It is opt-in per run, and never reachable from a
 keystroke inside the TUI.

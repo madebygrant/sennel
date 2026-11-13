@@ -119,6 +119,14 @@ fn list_prints_the_inventory_without_secrets() {
         !out.contains("sennel-entry-pw"),
         "--list printed a password"
     );
+
+    // This one has `old-card` in its recycle bin, which is deleted and stays out like search.
+    let (out, err, code) = run(&["--list", "--db", "tests/fixtures/keepassxc4.kdbx"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !out.contains("Recycle Bin") && !out.contains("old-card"),
+        "{out}"
+    );
 }
 
 /* `sennel import` end to end. Migration is when people try a new password
@@ -179,8 +187,28 @@ fn import_dry_run_needs_no_password_and_writes_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    // With no header row at all, the first row is a login, and none of it is repeated back.
+    let headerless = dir.join("headerless.csv");
+    std::fs::write(&headerless, "https://bank.example,alice,Hunter2-Secret!\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sennel"))
+        .args([
+            "import",
+            headerless.to_str().unwrap(),
+            "--dry-run",
+            "--db",
+            FIXTURE,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("found 3 columns"), "{err}");
+    assert!(!err.contains("Hunter2") && !err.contains("alice"), "{err}");
     std::fs::remove_file(&csv).ok();
     std::fs::remove_file(&bad).ok();
+    std::fs::remove_file(&headerless).ok();
 }
 
 /* `sennel audit` offline. The `--pwned` half is not tested here: it reaches

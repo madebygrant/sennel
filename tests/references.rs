@@ -54,6 +54,16 @@ fn vault() -> Temp {
         "",
     )
     .unwrap();
+    // A reference carrying an escape: a shared vault's author can put this in any field.
+    v.create_entry(
+        &root,
+        "escape",
+        "",
+        "{REF:P@I:\u{1b}]0;owned\u{7}zz}",
+        "",
+        "",
+    )
+    .unwrap();
     v.save_as(&path, PASSWORD, None).unwrap();
     Temp(path)
 }
@@ -127,4 +137,20 @@ fn the_audit_does_not_call_a_reference_reuse() {
         !out.contains("alias"),
         "the alias was judged as a password: {out}"
     );
+}
+
+#[test]
+fn a_reference_error_never_carries_vault_text_to_the_terminal() {
+    let file = vault();
+    let db = file.0.to_str().unwrap();
+    let runs: [&[&str]; 2] = [
+        &["get", "escape", "-p", "--stdout", "--db", db],
+        &["run", "--db", db, "-e", "PW=escape", "--", "echo", "ran"],
+    ];
+    for args in runs {
+        let (_, err, code) = sennel(args);
+        assert_eq!(code, 1, "{err}");
+        let raw = err.chars().find(|c| c.is_control() && *c != '\n');
+        assert_eq!(raw, None, "{args:?} printed a control character: {err:?}");
+    }
 }

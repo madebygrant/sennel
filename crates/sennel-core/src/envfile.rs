@@ -461,7 +461,8 @@ pub fn rows(
 pub fn quoted(value: &str, one_line: bool) -> Zeroizing<String> {
     let bare = value
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:@+,%=~^".contains(c));
+        // No `~`: a shell sourcing the file expands a leading one and any after a `:`.
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:@+,%=^".contains(c));
     if bare {
         return Zeroizing::new(value.to_string());
     }
@@ -503,7 +504,8 @@ pub fn render_var(
     line.push_str(name);
     line.push('=');
     line.push_str(&quoted(value, disabled));
-    if !comment.is_empty() {
+    // A comment with a line break in it would start a line of its own, which is not a comment.
+    if !comment.is_empty() && !comment.contains(['\n', '\r']) {
         line.push_str(" # ");
         line.push_str(comment);
     }
@@ -584,7 +586,16 @@ pub fn export(vault: &Vault, entry: &EntryRef<'_>) -> (Zeroizing<String>, Vec<St
     let layout = layout_of(entry);
     for line in &layout {
         match line {
-            Line::Text(text) => out.push_str(text),
+            // The layout is stored in the vault, so whoever wrote the vault wrote it. Only what an
+            // import could have put there goes out: a blank line, a comment, a valid name. Anything
+            // else could run as a command or define a variable when the file is sourced.
+            Line::Text(text) => {
+                let comment = text.trim().is_empty() || text.trim_start().starts_with('#');
+                if !comment || text.contains(['\n', '\r']) {
+                    continue;
+                }
+                out.push_str(text);
+            }
             Line::Var {
                 field,
                 name,
@@ -592,6 +603,9 @@ pub fn export(vault: &Vault, entry: &EntryRef<'_>) -> (Zeroizing<String>, Vec<St
                 comment,
             } => {
                 if !entry.fields.contains_key(field) || STANDARD.contains(&field.as_str()) {
+                    continue;
+                }
+                if !valid_name(name) {
                     continue;
                 }
                 if !written.insert(field) {
@@ -1043,6 +1057,42 @@ export TOKEN='a b#c'
             .unwrap_err();
         assert_eq!(err, VaultError::Db("line 2: not NAME=value".into()));
         assert!(!is_env(&vault.get_entry(&id).unwrap()));
+    }
+
+    #[test]
+    fn a_layout_written_by_somebody_else_cannot_put_commands_in_the_export() {
+        let (mut vault, id) = vault_with_entry();
+        vault.write_env(&id, &parse("A=1\nB=2\n")).unwrap();
+        // As a shared vault's author could store it: a command, a name that defines two variables,
+        // and a comment that breaks onto a line of its own.
+        let layout = "t$(touch pwned)\nt# kept\nv\tA\tX=1; rm -rf ~\t\nv\tB\tB\tok\rY=2\n";
+        vault.db_mut().entry_mut(id).unwrap().custom_data.insert(
+            LAYOUT_KEY.into(),
+            CustomDataItem {
+                value: Some(CustomDataValue::String(layout.to_string())),
+                last_modification_time: None,
+            },
+        );
+        let entry = vault.get_entry(&id).unwrap();
+        let (out, skipped) = export(&vault, &entry);
+        assert!(
+            !out.contains("touch") && !out.contains("rm -rf"),
+            "{}",
+            out.as_str()
+        );
+        assert!(!out.contains("Y=2"), "{}", out.as_str());
+        assert!(out.contains("# kept"), "{}", out.as_str());
+        assert!(out.contains("B=2"), "{}", out.as_str());
+        // A's name in the layout is not a variable name, so A is left out and reported.
+        assert!(!out.contains("A=1"), "{}", out.as_str());
+        assert_eq!(skipped, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn a_value_starting_with_a_tilde_is_quoted_so_a_shell_leaves_it_alone() {
+        assert_eq!(quoted("~/x", false).as_str(), "'~/x'");
+        assert_eq!(quoted("a:~/x", false).as_str(), "'a:~/x'");
+        assert_eq!(quoted("plain-value", false).as_str(), "plain-value");
     }
 
     #[test]

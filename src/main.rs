@@ -232,10 +232,11 @@ fn main() -> Result<()> {
         file,
         group,
         dry_run,
+        allow_references,
     }) = &cfg.command
     {
         let (file, group, dry_run) = (file.clone(), group.clone(), *dry_run);
-        return import_csv(&cfg, &file, group.as_deref(), dry_run);
+        return import_csv(&cfg, &file, group.as_deref(), dry_run, *allow_references);
     }
     if let Some(Command::Export {
         format,
@@ -357,22 +358,20 @@ a bug report: what Sennel read, and whether the clipboard it copies to is
 there. Exits non-zero when copying could never work, so a script can act
 on it. */
 fn check(cfg: &Config) -> Result<()> {
+    // Paths come from the config file and the command line, and a file name can hold an escape.
+    let shown = |p: &std::path::Path| printable(&p.display().to_string());
     say!("Sennel {}", env!("CARGO_PKG_VERSION"));
     say!(
         "config    {}",
         cfg.config_file
             .as_deref()
-            .map_or("(none · --no-config)".to_string(), |p| p
-                .display()
-                .to_string())
+            .map_or("(none · --no-config)".to_string(), shown)
     );
     say!(
         "db        {}",
         cfg.db
             .as_deref()
-            .map_or("(none · pass a file)".to_string(), |p| p
-                .display()
-                .to_string())
+            .map_or("(none · pass a file)".to_string(), shown)
     );
     /* What a bug report needs and what a first run wants to know: not only
     which file was configured, but whether it is there and writable. A
@@ -397,7 +396,7 @@ fn check(cfg: &Config) -> Result<()> {
         for (n, path) in cfg.recent.iter().enumerate() {
             let label = if n == 0 { "library  " } else { "         " };
             let state = if path.is_file() { "" } else { " · missing" };
-            say!("{label} {}{state}", path.display());
+            say!("{label} {}{state}", shown(path));
         }
     }
     say!(
@@ -435,7 +434,7 @@ fn check(cfg: &Config) -> Result<()> {
     say!(
         "backups   {} kept in {} (0 = off)",
         cfg.backups,
-        cfg.backup_dir.display()
+        shown(&cfg.backup_dir)
     );
     let state = if cfg.ssh_agent { "on" } else { "off" };
     match agent::Agent::connect().and_then(|mut a| a.count()) {
@@ -443,7 +442,7 @@ fn check(cfg: &Config) -> Result<()> {
             "ssh agent {state} · reachable, holding {n} keys · lifetime {}s",
             cfg.ssh_agent_lifetime
         ),
-        Err(why) => say!("ssh agent {state} · {why}"),
+        Err(why) => say!("ssh agent {state} · {}", printable(&why)),
     }
     if let Some(spec) = &cfg.yubikey {
         match keepass::ChallengeResponseKey::get_available_yubikeys() {
@@ -458,7 +457,7 @@ fn check(cfg: &Config) -> Result<()> {
     }
     if let Some(db) = &cfg.db {
         for found in vault::backups_of(&cfg.backup_dir, db) {
-            say!("          {}", found.display());
+            say!("          {}", shown(&found));
         }
     }
     match arboard::Clipboard::new() {
@@ -477,13 +476,14 @@ fn check(cfg: &Config) -> Result<()> {
 only — the point is scripting and inventory, not display. */
 fn list(cfg: &Config) -> Result<()> {
     let vault = unlock(cfg)?;
-    say!(
-        "{} groups · {} entries",
-        vault.num_groups(),
-        vault.entry_count()
-    );
+    // What is deleted stays out, as it does from search: a script would take it for live.
+    let live: Vec<_> = walk_groups(&vault)
+        .into_iter()
+        .filter(|(id, _)| !vault.in_recycle_bin(id))
+        .collect();
+    say!("{} groups · {} entries", live.len(), vault.entry_count());
     /* Walk the whole tree root-down so the output reads like the browser. */
-    for (id, depth) in walk_groups(&vault) {
+    for (id, depth) in live {
         let indent = "  ".repeat(depth);
         say!(
             "{}[{}]",
@@ -708,7 +708,13 @@ fn export_vault(
     Ok(())
 }
 
-fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> Result<()> {
+fn import_csv(
+    cfg: &Config,
+    file: &str,
+    group: Option<&str>,
+    dry_run: bool,
+    allow_references: bool,
+) -> Result<()> {
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
@@ -722,6 +728,33 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
     let found = found?;
     if found.rows.is_empty() {
         anyhow::bail!("{file} has a header and no entries");
+    }
+    // Rows counted from 1 after the header. Refused before the password prompt, like a dry run.
+    let referencing: Vec<String> = found
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.has_reference())
+        .map(|(at, _)| (at + 1).to_string())
+        .collect();
+    if !referencing.is_empty() && !allow_references {
+        let shown = referencing
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = match referencing.len() {
+            n if n > 10 => format!(" and {} more", n - 10),
+            _ => String::new(),
+        };
+        let (rows, hold) = match referencing.len() {
+            1 => ("row", "holds a field reference"),
+            _ => ("rows", "hold field references"),
+        };
+        anyhow::bail!(
+            "{file}: {rows} {shown}{more} {hold} ({{REF:…}}), which would hand out other entries' values · --allow-references imports them as written"
+        );
     }
     /* Said before the password prompt: a dry run should not need the vault's
     password to tell you what is in somebody else's csv. */
@@ -1046,15 +1079,6 @@ enum RunField {
     Custom(String),
 }
 
-impl RunField {
-    fn name(&self) -> &str {
-        match self {
-            RunField::Fixed(field) => field.name(),
-            RunField::Custom(name) => name,
-        }
-    }
-}
-
 // The last `::` splits off the field, so a needle may hold one; a field name rarely does.
 fn parse_env_ref(text: &str) -> Result<EnvRef> {
     let Some((var, rest)) = text.split_once('=') else {
@@ -1179,6 +1203,15 @@ fn run_program(
     if refs.is_empty() && entries.is_empty() {
         anyhow::bail!("nothing to set · pass -e VAR=NEEDLE, --env-file FILE or --entry NEEDLE");
     }
+    // Whoever can edit the file chooses which entries the program gets, so it is said once, here.
+    if group.is_none() {
+        for file in files {
+            eprintln!(
+                "note: {} can name any entry in the vault · pass --group to limit it",
+                printable(&file.display().to_string())
+            );
+        }
+    }
     let vault = unlock(cfg)?;
     let within = group
         .map(|path| vault.find_group(path).map_err(|e| anyhow::anyhow!(e)))
@@ -1250,11 +1283,25 @@ fn run_program(
             },
             RunField::Custom(name) => match entry.fields.contains_key(name.as_str()) {
                 true => referenced(name)?.to_string(),
-                false => anyhow::bail!("{title} has no field {name}"),
+                // Named by the variable, as a file reference's needle is: the text after `::`
+                // came from the file and is never echoed.
+                false => anyhow::bail!(
+                    "{title} has no such field · {} asked for it",
+                    printable(&r.var)
+                ),
             },
         });
         if value.is_empty() {
-            anyhow::bail!("{title} has no {}", r.field.name());
+            // A built-in field's name is Sennel's own, so it is said; a custom one came from the file.
+            match &r.field {
+                RunField::Fixed(field) => anyhow::bail!("{title} has no {}", field.name()),
+                RunField::Custom(_) => {
+                    anyhow::bail!(
+                        "{title} has an empty field · {} asked for it",
+                        printable(&r.var)
+                    )
+                }
+            }
         }
         values.push((r.var.clone(), value));
     }

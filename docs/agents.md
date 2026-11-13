@@ -17,6 +17,11 @@ TTY. Use the subcommands below instead. Each one runs, prints and exits.
 - `get` exit codes 2 and 3 are not failures to retry blindly. See [get](#sennel-get).
 - To give a secret to another program, use `sennel run`. It never prints the secret, so it stays
   out of your context.
+- That is a convention, not a barrier. An agent that holds the master password can read every entry
+  with `get --stdout`, `export --stdout`, or `run` and a program that prints its environment. Give an
+  agent a separate vault holding only what it needs, not the one with your bank login.
+- Pass `--group` with every `--env-file`. Anyone who can edit the file can otherwise name any entry
+  in the vault, and `run` says so on stderr.
 - Field references such as `{REF:P@I:<uuid>}` are resolved in what `get` and `run` hand out. A
   reference that is broken or matches more than one entry is an error there, never the raw
   `{REF:...}` text. `export` and `env export` write the raw text for a broken one instead.

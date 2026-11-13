@@ -148,7 +148,9 @@ fn a_missing_entry_or_field_never_starts_the_program() {
         "sennel-fixture\n",
     );
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("has no field api key"), "{err}");
+    // Named by its variable: the field name came from the reference and is not echoed.
+    assert!(err.contains("has no such field · K asked for it"), "{err}");
+    assert!(!err.contains("api key"), "{err}");
     assert!(!out.contains(marker), "{out}");
 }
 
@@ -313,4 +315,35 @@ fn a_program_that_is_not_there_exits_127() {
     );
     assert_eq!(code, 127, "{err}");
     assert!(err.contains("cannot run sennel-no-such-program"), "{err}");
+}
+
+// Whoever can edit an env file chooses which entries the program gets, so a run without --group says so.
+#[test]
+fn an_env_file_without_a_group_is_named_as_able_to_reach_any_entry() {
+    let file = std::env::temp_dir().join(format!("sennel-run-note-{}.env", std::process::id()));
+    std::fs::write(&file, "PW=xc entry\n").unwrap();
+    let path = file.to_str().unwrap();
+    let (_, err, code) = run(
+        &["run", "--db", FIXTURE, "--env-file", path, "--", "true"],
+        "sennel-fixture\n",
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("can name any entry in the vault"), "{err}");
+
+    let (_, err, _) = run(
+        &[
+            "run",
+            "--db",
+            FIXTURE,
+            "--group",
+            "Root",
+            "--env-file",
+            path,
+            "--",
+            "true",
+        ],
+        "sennel-fixture\n",
+    );
+    assert!(!err.contains("can name any entry"), "{err}");
+    std::fs::remove_file(&file).ok();
 }

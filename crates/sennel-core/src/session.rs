@@ -1275,7 +1275,7 @@ fn safe_leaf(name: &str) -> String {
         .unwrap_or_default()
         .chars()
         .map(|c| {
-            if c.is_control() || invisible(c) {
+            if c.is_control() || crate::vault::invisible(c) {
                 '_'
             } else {
                 c
@@ -1287,19 +1287,6 @@ fn safe_leaf(name: &str) -> String {
         true => "attachment".to_string(),
         false => leaf.to_string(),
     }
-}
-
-// Characters that change how a name reads without showing: bidi overrides and isolates can turn
-// `fdp.command` into what looks like `.pdf`, and zero-width ones hide in the middle.
-fn invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
-    )
 }
 
 /// Where the entry form writes.

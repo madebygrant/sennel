@@ -77,16 +77,30 @@ impl_entry_ext!(Entry);
 impl_entry_ext!(EntryRef<'_>);
 impl_entry_ext!(EntryMut<'_>);
 
-/* Text from a vault, on its way somewhere that is not the TUI. Ratatui drops
-control characters on the way into its cell buffer, so the browser is safe
-by construction; `println!` and the terminal-title escape are not, and a
-`.kdbx` is a file that can arrive from anyone. An entry titled
-"\x1b]0;owned\x07" would otherwise retitle the window of whoever ran
-`--list`, and OSC 52 can reach the clipboard on some terminals. */
+// Vault text on its way to a screen, since a `.kdbx` can come from anyone. Control characters would
+// drive a terminal (OSC 52 can reach the clipboard) and `invisible` ones disguise a name. Each becomes
+// one `·`, so a search highlight's character positions still line up.
 pub fn printable(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_control() { '·' } else { c })
+        .map(|c| {
+            if c.is_control() || invisible(c) {
+                '·'
+            } else {
+                c
+            }
+        })
         .collect()
+}
+
+/// Characters that change how text reads without being part of it: bidi embeddings, overrides and
+/// isolates can reverse a name or make two look the same, and a zero-width space hides inside one.
+/// Not the joiners (U+200C, U+200D) or direction marks (U+200E, U+200F): emoji sequences and
+/// Persian, Indic, Hebrew and Arabic text need those, and they cannot reorder anything.
+pub fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 /// The raw `otp` field, which is an `otpauth://` URL when there is one.
@@ -389,6 +403,19 @@ pub fn has_reference(text: &str) -> bool {
     find_ref(text).is_some()
 }
 
+// What a reference asks for and where it looks, such as `{REF:P@T:…}`, to tell two apart in a
+// message. Never the search text, which is vault text and may be part of a value.
+fn kind_of(body: &str) -> String {
+    let head: String = body
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(3)
+        .collect();
+    format!("{{REF:{}:…}}", printable(&head))
+}
+
 // Where the next `{REF:` starts, in any case, without copying the text: this runs on every list
 // row and every redraw.
 fn find_ref(text: &str) -> Option<usize> {
@@ -482,7 +509,12 @@ impl<'v> Refs<'v> {
         }
         self.budget -= 1;
         let vault = self.vault;
-        let unreadable = || format!("{{REF:{body}}} is not a field reference Sennel can read");
+        let unreadable = || {
+            format!(
+                "a field reference ({}) is not one Sennel can read",
+                kind_of(body)
+            )
+        };
         let mut chars = body.chars();
         let (Some(wanted), Some('@'), Some(search_in), Some(':')) =
             (chars.next(), chars.next(), chars.next(), chars.next())
@@ -504,8 +536,10 @@ impl<'v> Refs<'v> {
         let target: EntryId = match search_in.to_ascii_uppercase() {
             // By ID, recycle bin included: it names one entry exactly, wherever it now sits.
             'I' => {
-                let missing =
-                    || format!("{{REF:{body}}} points at an entry that is not in this vault");
+                let missing = || {
+                    "a field reference here points at an entry that is not in this vault"
+                        .to_string()
+                };
                 let wanted_id = (needle.len() == 32
                     && needle.bytes().all(|b| b.is_ascii_hexdigit()))
                 .then(|| u128::from_str_radix(needle, 16).ok())
@@ -542,10 +576,16 @@ impl<'v> Refs<'v> {
                     .collect();
                 match hits.as_slice() {
                     [one] => *one,
-                    [] => return Err(format!("{{REF:{body}}} matches no entry")),
+                    [] => {
+                        return Err(format!(
+                            "a field reference ({}) matches no entry",
+                            kind_of(body)
+                        ));
+                    }
                     many => {
                         return Err(format!(
-                            "{{REF:{body}}} matches {} entries · KeePassXC can rewrite it to name one by ID",
+                            "a field reference ({}) matches {} entries · KeePassXC can rewrite it to name one by ID",
+                            kind_of(body),
                             many.len()
                         ));
                     }
@@ -1968,11 +2008,6 @@ impl Vault {
     /// Total entries across all groups, for the unlock flash.
     pub fn entry_count(&self) -> usize {
         self.db.num_entries() - self.recycled().len()
-    }
-
-    /// Total groups, for the --list header.
-    pub fn num_groups(&self) -> usize {
-        self.db.num_groups()
     }
 
     /* Recycle-bin entries are trash: the group walk still surfaces the bin to
@@ -4778,12 +4813,17 @@ mod tests {
                 "{REF:P@I:00000000000000000000000000000000}",
                 "not in this vault",
             ),
-            ("{REF:Q@T:mail}", "not a field reference Sennel can read"),
+            ("{REF:Q@T:mail}", "not one Sennel can read"),
             ("{REF:P@I:abc", "no closing }"),
         ];
         for (text, said) in refused {
             let why = resolve_text(&v, text).unwrap_err();
             assert!(why.contains(said), "{text}: {why}");
+            // What it asks for is named; what it searches for is vault text and is not.
+            assert!(
+                !why.contains("mail") && !why.contains("nothing like"),
+                "{text}: {why}"
+            );
         }
         let e = v.get_entry(&looped).unwrap();
         assert!(
@@ -5684,6 +5724,19 @@ mod tests {
             "a temp file was left"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn printable_shows_what_would_hide_or_reorder_text() {
+        assert_eq!(printable("a\u{1b}]0;x\u{7}b"), "a·]0;x·b");
+        assert_eq!(printable("bank\u{202E}moc.live"), "bank·moc.live");
+        assert_eq!(printable("pay\u{200B}pal \u{2066}x\u{2069}"), "pay·pal ·x·");
+        assert_eq!(printable("\u{feff}C1\u{9b}31m"), "·C1·31m");
+        assert_eq!(printable("café ✓"), "café ✓");
+        // Joiners and direction marks are part of the text, not tricks played with it.
+        for kept in ["🏳️\u{200D}🌈 wifi", "می\u{200C}خواهم", "עבודה\u{200F}"] {
+            assert_eq!(printable(kept), kept);
+        }
     }
 
     #[test]

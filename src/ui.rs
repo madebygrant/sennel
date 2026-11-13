@@ -575,7 +575,7 @@ fn draw_groups(frame: &mut Frame, app: &mut App, area: Rect) {
                 .session
                 .vault()
                 .and_then(|v| v.get_group(id))
-                .map(|g| (g.name.clone(), g.is_expanded))
+                .map(|g| (crate::vault::printable(&g.name), g.is_expanded))
                 .unwrap_or_default();
             /* ▸/▾ only where folding means something: a leaf gets blanks so
             names still line up down the pane. */
@@ -700,9 +700,11 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                     let env = crate::envfile::is_env(&entry);
                     let user = match env {
                         true => vars_label(crate::envfile::var_count(&entry)),
-                        false => EntryExt::username(&entry).to_string(),
+                        false => crate::vault::printable(EntryExt::username(&entry)),
                     };
-                    Some((EntryExt::title(&entry).to_string(), user, path, env))
+                    // Vault text, drawn: characters that hide or reorder it are shown as `·`.
+                    let title = crate::vault::printable(EntryExt::title(&entry));
+                    Some((title, user, crate::vault::printable(&path), env))
                 })
                 .unwrap_or_default();
             let (name, user, group) = fit_row(
@@ -838,7 +840,10 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let faint = Style::new().fg(p.muted);
     let mut copy_rows: Vec<(usize, app::CopyRow)> = Vec::new();
     let mut lines = vec![
-        Line::from(Span::styled(truncate(entry.title(), width), p.row(true))),
+        Line::from(Span::styled(
+            truncate(&crate::vault::printable(entry.title()), width),
+            p.row(true),
+        )),
         Line::default(),
     ];
     let env = crate::envfile::is_env(&entry);
@@ -847,7 +852,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(copyable(
             "user",
             truncate(
-                &shown(app, entry.username()),
+                &crate::vault::printable(&shown(app, entry.username())),
                 width.saturating_sub(LABEL + 1),
             ),
             cream,
@@ -872,7 +877,10 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
             "url",
-            truncate(&shown(app, entry.url()), width.saturating_sub(LABEL + 1)),
+            truncate(
+                &crate::vault::printable(&shown(app, entry.url())),
+                width.saturating_sub(LABEL + 1),
+            ),
             faint,
             app::CopyRow::Url,
         ));
@@ -988,7 +996,7 @@ fn env_lines(entry: &keepass::db::EntryRef<'_>, width: usize, p: &Palette) -> Ve
             (None, true) => "commented out".into(),
             (None, false) => String::new(),
         };
-        let name = truncate(&r.name, name_width);
+        let name = truncate(&crate::vault::printable(&r.name), name_width);
         let pad = name_width.saturating_sub(cols(&name));
         let room = width.saturating_sub(name_width + 5);
         lines.push(Line::from(vec![
@@ -1083,7 +1091,10 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         copy_rows.push((lines.len(), app::CopyRow::Username));
         lines.push(copyable(
             "user",
-            truncate(&shown(app, entry.username()), value),
+            truncate(
+                &crate::vault::printable(&shown(app, entry.username())),
+                value,
+            ),
             cream,
             app::CopyRow::Username,
         ));
@@ -1103,7 +1114,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         copy_rows.push((lines.len(), app::CopyRow::Url));
         lines.push(copyable(
             "url",
-            truncate(&shown(app, entry.url()), value),
+            truncate(&crate::vault::printable(&shown(app, entry.url())), value),
             faint,
             app::CopyRow::Url,
         ));
@@ -1162,7 +1173,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         Span::styled("esc", Style::new().fg(p.accent)),
         p.faint(" close"),
     ]));
-    let title = truncate(entry.title(), inner);
+    let title = truncate(&crate::vault::printable(entry.title()), inner);
     let at = popup(frame, &title, lines, width, &p);
     // The popup's own line numbers become screen rows once it has landed.
     app.copy_rows = copy_rows
@@ -1631,9 +1642,9 @@ fn draw_browse(frame: &mut Frame, app: &App) {
         let live = n == browse.cursor;
         let mark = if live { p.lit("▌") } else { Span::raw(" ") };
         let name = if row.dir {
-            format!("{}/", row.name)
+            format!("{}/", crate::vault::printable(&row.name))
         } else {
-            row.name.clone()
+            crate::vault::printable(&row.name)
         };
         let style = if row.dir {
             Style::new().fg(p.muted)
@@ -2311,7 +2322,10 @@ fn draw_history(frame: &mut Frame, app: &App) {
     let title = app
         .session
         .vault()
-        .and_then(|v| v.get_entry(&history.entry).map(|e| e.title().to_string()))
+        .and_then(|v| {
+            v.get_entry(&history.entry)
+                .map(|e| crate::vault::printable(e.title()))
+        })
         .unwrap_or_default();
     let area = frame.area();
     let width = area.width.saturating_sub(8).clamp(40, 76);
@@ -2373,7 +2387,10 @@ fn draw_fields(frame: &mut Frame, app: &App) {
     let title = app
         .session
         .vault()
-        .and_then(|v| v.get_entry(&fields.entry).map(|e| e.title().to_string()))
+        .and_then(|v| {
+            v.get_entry(&fields.entry)
+                .map(|e| crate::vault::printable(e.title()))
+        })
         .unwrap_or_default();
     let area = frame.area();
     let width = area.width.saturating_sub(8).clamp(34, 76);
@@ -2529,7 +2546,7 @@ fn draw_audit(frame: &mut Frame, app: &App) {
         let title = app
             .session
             .vault()
-            .and_then(|v| v.get_entry(id).map(|e| e.title().to_string()))
+            .and_then(|v| v.get_entry(id).map(|e| crate::vault::printable(e.title())))
             .unwrap_or_default();
         let say = issue.say();
         /* Reuse is the finding a person cannot spot themselves and the one

@@ -83,10 +83,30 @@ pub fn count_in(body: &str, suffix: &str) -> u64 {
             /* Some responses carry thousands separators; anything that is not
             a digit is not part of the number. */
             let digits: String = count.chars().filter(|c| c.is_ascii_digit()).collect();
-            return digits.parse().unwrap_or(0);
+            // A count too big to read is still a breach, never a clean result.
+            return digits.parse().unwrap_or(u64::MAX);
         }
     }
     0
+}
+
+/// Whether a body is a range answer at all: every line a 35-character hex suffix, a colon and a
+/// count. A proxy's block page or a cut-off reply would otherwise read as "no breach found".
+pub fn is_range(body: &str) -> bool {
+    let mut lines = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .peekable();
+    lines.peek().is_some()
+        && lines.all(|line| {
+            line.split_once(':').is_some_and(|(suffix, count)| {
+                suffix.len() == 35
+                    && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                    && count.chars().any(|c| c.is_ascii_digit())
+                    && count.chars().all(|c| c.is_ascii_digit() || c == ',')
+            })
+        })
 }
 
 /// The five characters that leave this machine, and the rest that never do.
@@ -106,13 +126,23 @@ pub fn fetch_range(prefix: &str) -> Result<String, String> {
         return Err("bad prefix".into());
     }
     let url = format!("https://api.pwnedpasswords.com/range/{prefix}");
+    // `-q` first, so ~/.curlrc cannot turn off certificate checks or add a proxy. HTTPS only, even
+    // on a redirect, a bounded reply, and padding so the reply's size says nothing of the prefix.
     let out = std::process::Command::new("curl")
         .args([
+            "-q",
             "--silent",
             "--show-error",
             "--fail",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
             "--max-time",
             "20",
+            "--max-filesize",
+            "4194304",
+            "-H",
+            "Add-Padding: true",
             &url,
         ])
         .output()
@@ -126,12 +156,39 @@ pub fn fetch_range(prefix: &str) -> Result<String, String> {
         let why = String::from_utf8_lossy(&out.stderr);
         return Err(format!("the api call failed · {}", why.trim()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !is_range(&body) {
+        return Err("the breach service's answer was not understood · nothing was checked".into());
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_real_range_answer_counts_and_a_padded_one_still_does() {
+        let suffix = "0018A45C4D1DEF81644B54AB7F969B88D65";
+        let real = format!("{suffix}:3\r\n003D68EB55068C33ACE09247EE4C639306B:0\r\n");
+        assert!(is_range(&real));
+        assert_eq!(count_in(&real, suffix), 3);
+        // Padding lines carry a count of 0, which is not found.
+        assert_eq!(count_in(&real, "003D68EB55068C33ACE09247EE4C639306B"), 0);
+        for bad in [
+            "",
+            "<html>blocked by policy</html>",
+            &format!("{suffix}:"),
+            "ABC:1",
+            &format!("{suffix}:,"),
+        ] {
+            assert!(!is_range(bad), "{bad}");
+        }
+        assert_eq!(
+            count_in(&format!("{suffix}:99999999999999999999999"), suffix),
+            u64::MAX
+        );
+    }
 
     /* Known vectors, because a hash implementation that is subtly wrong finds
     nothing and looks exactly like a clean vault. */

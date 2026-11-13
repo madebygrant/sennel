@@ -174,7 +174,10 @@ pub enum PrefValue {
 #[derive(Serialize, Debug)]
 pub struct GroupRow {
     pub id: String,
+    // For showing: characters that hide or reorder text become `·`.
     pub name: String,
+    // As stored, for the rename box, so a rename never writes the `·` back.
+    pub raw_name: String,
     pub depth: usize,
     pub entries: usize,
     pub bin: bool,
@@ -257,6 +260,7 @@ pub struct RefusedLine {
 
 #[derive(Serialize, Debug)]
 pub struct RawFields {
+    pub title: String,
     pub username: String,
     pub url: String,
     pub notes: String,
@@ -518,14 +522,16 @@ impl Desk {
     pub fn status(&self) -> Status {
         let db = self.db();
         let s = self.session();
-        let undo = s.undo_steps().last().map(|step| match step {
-            Undo::Edit { before, .. } => format!("edit of {}", before.title()),
-            Undo::Delete { before, .. } | Undo::Recycle { before, .. } => {
-                format!("restore {}", before.title())
-            }
-            Undo::RecycleGroup { title, .. } => format!("restore {title}"),
-            Undo::AddEntry { title, .. } => format!("remove {title}"),
-            Undo::Rename { before, .. } => format!("name {before}"),
+        let undo = s.undo_steps().last().map(|step| {
+            sennel_core::vault::printable(&match step {
+                Undo::Edit { before, .. } => format!("edit of {}", before.title()),
+                Undo::Delete { before, .. } | Undo::Recycle { before, .. } => {
+                    format!("restore {}", before.title())
+                }
+                Undo::RecycleGroup { title, .. } => format!("restore {title}"),
+                Undo::AddEntry { title, .. } => format!("remove {title}"),
+                Undo::Rename { before, .. } => format!("name {before}"),
+            })
         });
         let clears_in = self.board.as_ref().and_then(Board::clears_in);
         Status {
@@ -970,7 +976,8 @@ impl Desk {
             };
             out.push(GroupRow {
                 id: id.to_string(),
-                name: group.name.clone(),
+                name: sennel_core::vault::printable(&group.name),
+                raw_name: group.name.clone(),
                 depth,
                 entries: vault.entries_in(&id).len(),
                 bin: Some(id) == bin,
@@ -1023,9 +1030,10 @@ impl Desk {
             .filter_map(|id| {
                 vault.get_entry(id).map(|e| EntryRow {
                     id: id.to_string(),
-                    title: e.title().to_string(),
-                    username: shown(vault, e.username()),
-                    url: shown(vault, e.url()),
+                    // Vault text, shown: characters that hide or reorder it become `·`.
+                    title: sennel_core::vault::printable(e.title()),
+                    username: sennel_core::vault::printable(&shown(vault, e.username())),
+                    url: sennel_core::vault::printable(&shown(vault, e.url())),
                     vars: envfile::is_env(&e).then(|| envfile::var_count(&e)),
                 })
             })
@@ -1044,6 +1052,7 @@ impl Desk {
                     .group_path(&g)
                     .into_iter()
                     .skip(1)
+                    .map(|name| sennel_core::vault::printable(&name))
                     .collect::<Vec<_>>()
                     .join(" / ")
             })
@@ -1055,9 +1064,9 @@ impl Desk {
         Ok(EntryView {
             id: id.to_string(),
             group,
-            title: e.title().to_string(),
-            username: shown(vault, e.username()),
-            url: shown(vault, e.url()),
+            title: sennel_core::vault::printable(e.title()),
+            username: sennel_core::vault::printable(&shown(vault, e.username())),
+            url: sennel_core::vault::printable(&shown(vault, e.url())),
             notes: shown(vault, e.notes()),
             tags: e.tags.join(", "),
             expires: sennel_core::vault::expires_at(&e)
@@ -1076,6 +1085,7 @@ impl Desk {
             fields: rows.into_iter().filter(|r| !r.file).collect(),
             recycled: vault.is_recycled(&id),
             raw: RawFields {
+                title: e.title().to_string(),
                 username: e.username().to_string(),
                 url: e.url().to_string(),
                 notes: e.notes().to_string(),
@@ -1545,7 +1555,7 @@ impl Desk {
             .filter_map(|(id, issue)| {
                 vault.get_entry(&id).map(|e| AuditRow {
                     id: id.to_string(),
-                    title: e.title().to_string(),
+                    title: sennel_core::vault::printable(e.title()),
                     issue: issue.say(),
                 })
             })

