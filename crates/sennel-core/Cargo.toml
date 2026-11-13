@@ -25,6 +25,9 @@ keepass.workspace = true
 # builds on macOS again.
 challenge_response = { version = "=0.5.38", default-features = false, features = ["nusb"] }
 chrono.workspace = true
+# Only for the Argon2 version type in the key-derivation settings new vaults are written with.
+# keepass names it in its public config without re-exporting it, so this must match keepass's.
+argon2 = { package = "rust-argon2", version = "3.0" }
 # Reads the OpenSSH private keys stored beside KeeAgent settings (bcrypt-pbkdf and
 # AES for the passphrase) so they can be handed to ssh-agent. Without `rsa` and
 # `ed25519`: they only add conversions to signing crates, and Sennel never signs.

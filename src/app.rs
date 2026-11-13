@@ -1652,6 +1652,9 @@ impl App {
                 "{what}  ·  read-only  ·  Sennel writes KDBX 4.1 only, so edits cannot be saved"
             ));
         }
+        if let Some(mib) = unlocked.kdf_raised_from {
+            self.warn(sennel_core::session::kdf_raised_note(mib));
+        }
         /* A vault that opened is a vault worth remembering. Written after
         the unlock, never before, so a mistyped path cannot become the
         default. */

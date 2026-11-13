@@ -742,6 +742,9 @@ impl Desk {
                 "{format} · read-only · edits cannot be saved"
             )));
         }
+        if let Some(mib) = unlocked.kdf_raised_from {
+            notes.push(warn(sennel_core::session::kdf_raised_note(mib)));
+        }
         self.remember(path);
         Reply::notes(notes)
     }

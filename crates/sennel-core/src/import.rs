@@ -184,6 +184,23 @@ pub fn into_vault(
     rows: &[Row],
     into: &str,
 ) -> Result<(usize, Vec<String>), String> {
+    // Checked before anything is created, so a refused import leaves the vault as it was.
+    let base = vault.group_depth(&vault.root_id()) + 1;
+    for (at, row) in rows.iter().enumerate() {
+        let parts = row
+            .group
+            .split('/')
+            .filter(|p| !p.trim().is_empty())
+            .count();
+        if base + parts > crate::vault::MAX_GROUP_DEPTH {
+            return Err(format!(
+                "row {} nests its group {} deep · {} is the most a vault can open",
+                at + 1,
+                parts,
+                crate::vault::MAX_GROUP_DEPTH - base
+            ));
+        }
+    }
     let root = vault.root_id();
     let top = vault.create_group(&root, into).map_err(|e| e.to_string())?;
     let mut made: std::collections::HashMap<String, keepass::db::GroupId> =
@@ -306,6 +323,29 @@ mod tests {
         assert_eq!(got.rows[0].title, "a,b");
         assert_eq!(got.rows[0].notes, "line one\nline two");
         assert_eq!(got.rows[1].notes, "he said \"hi\"");
+    }
+
+    #[test]
+    fn a_group_column_too_deep_to_reopen_is_refused_before_anything_changes() {
+        use crate::vault::MAX_GROUP_DEPTH;
+        let path = |n: usize| vec!["g"; n].join("/");
+        // The import's own group takes one level.
+        let fits = MAX_GROUP_DEPTH - 1;
+
+        let mut vault = crate::vault::Vault::new();
+        let csv = format!("Title,Group\nok,{}\nfar,{}\n", path(1), path(fits + 1));
+        let found = read_csv(&csv).unwrap();
+        let err = into_vault(&mut vault, &found.rows, "Imported").unwrap_err();
+        assert!(err.starts_with("row 2 "), "{err}");
+        assert!(vault.groups_in(&vault.root_id()).is_empty());
+        assert_eq!(vault.entry_count(), 0);
+
+        let csv = format!("Title,Group\nfar,{}\n", path(fits));
+        let found = read_csv(&csv).unwrap();
+        assert_eq!(
+            into_vault(&mut vault, &found.rows, "Imported").unwrap().0,
+            1
+        );
     }
 
     /* The shape that lands in the vault: one new group, the file's own groups

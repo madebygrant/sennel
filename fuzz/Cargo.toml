@@ -7,6 +7,10 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[patch.crates-io]
+# The app's patched keepass, so the fuzzer runs the code that ships.
+keepass = { path = "../vendor/keepass" }
+
 [package.metadata]
 cargo-fuzz = true
 

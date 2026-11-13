@@ -17,6 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use keepass::{
     ChallengeResponseKey, Database, DatabaseKey,
+    config::KdfConfig,
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
         ChallengeResponseKeyError, CryptographyError, DatabaseKeyError, DatabaseOpenError,
@@ -792,6 +793,43 @@ pub fn extras(entry: &EntryRef<'_>) -> Vec<String> {
     out
 }
 
+// Argon2id at 64 MiB and 3 passes, RFC 9106's second recommended setting. keepass's own default is
+// Argon2d at 1 MiB, which a GPU can run thousands of at once.
+pub fn strong_kdf() -> KdfConfig {
+    KdfConfig::Argon2id {
+        iterations: 3,
+        memory: 64 * 1024 * 1024,
+        parallelism: 4,
+        version: argon2::Version::Version13,
+    }
+}
+
+// Core's own tests write hundreds of vaults, and their timing tests share the CPU with them. This
+// stays at the weak line, so it is never raised and still counts as strong.
+fn new_vault_kdf() -> KdfConfig {
+    if cfg!(test) {
+        KdfConfig::Argon2id {
+            iterations: 1,
+            memory: WEAK_ARGON2_MEMORY,
+            parallelism: 1,
+            version: argon2::Version::Version13,
+        }
+    } else {
+        strong_kdf()
+    }
+}
+
+// Below this, an Argon2 vault is raised to `strong_kdf` on its next save. KeePassXC's settings
+// start at 64 MiB; files from keepass's default and KeePass 2.x's Argon2 default (1 MiB) fall under it.
+const WEAK_ARGON2_MEMORY: u64 = 16 * 1024 * 1024;
+
+/// An entry's files: name, bytes, and whether they were stored protected.
+pub type Files = Vec<(String, Zeroizing<Vec<u8>>, bool)>;
+
+// The KDBX parser refuses XML nested past 128 elements, and an entry with history sits about ten
+// below its group, so a vault with groups much deeper than this saves but never opens again.
+pub const MAX_GROUP_DEPTH: usize = 64;
+
 /// What a guarded vault op refused, and why. A plain enum rather than anyhow:
 /// the UI matches on variants to name the next step ("empty the group first").
 /* Payloads are Strings, not sources: io and database errors stay
@@ -817,6 +855,8 @@ pub enum VaultError {
     /// The file changed under us since it was opened or last written, so a
     /// save would overwrite whatever wrote it. Refused until forced.
     ChangedOnDisk,
+    /// A group would sit deeper than `MAX_GROUP_DEPTH`.
+    TooDeep,
     Io(String),
     Db(String),
 }
@@ -839,6 +879,7 @@ impl std::fmt::Display for VaultError {
             VaultError::WrongPassword => write!(f, "wrong password or key file"),
             VaultError::Unsaved => write!(f, "nothing to save to yet"),
             VaultError::ChangedOnDisk => write!(f, "the file changed on disk"),
+            VaultError::TooDeep => write!(f, "groups can be nested {MAX_GROUP_DEPTH} deep at most"),
             VaultError::Io(e) => write!(f, "file error: {e}"),
             VaultError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -1139,6 +1180,7 @@ impl Vault {
     /// generates the root itself; this just names it.
     pub fn new() -> Self {
         let mut db = Database::new();
+        db.config.kdf_config = new_vault_kdf();
         db.root_mut().name = "Root".into();
         Vault {
             db,
@@ -1252,6 +1294,30 @@ impl Vault {
         })
     }
 
+    /// An Argon2 setting light enough that a stolen copy is cheap to guess at.
+    pub fn kdf_is_weak(&self) -> bool {
+        match self.db.config.kdf_config {
+            KdfConfig::Argon2 { memory, .. } | KdfConfig::Argon2id { memory, .. } => {
+                memory < WEAK_ARGON2_MEMORY
+            }
+            _ => false,
+        }
+    }
+
+    /// Swaps a weak setting for `strong_kdf`, which the next save writes. Returns the memory it
+    /// had, in bytes, when it changed anything.
+    pub fn raise_weak_kdf(&mut self) -> Option<u64> {
+        if !self.writable() || !self.kdf_is_weak() {
+            return None;
+        }
+        let was = match self.db.config.kdf_config {
+            KdfConfig::Argon2 { memory, .. } | KdfConfig::Argon2id { memory, .. } => memory,
+            _ => return None,
+        };
+        self.db.config.kdf_config = new_vault_kdf();
+        Some(was)
+    }
+
     /// Whether every save has to ask a hardware key, which can need a touch.
     pub fn has_challenge(&self) -> bool {
         self.challenge.is_some()
@@ -1320,6 +1386,8 @@ impl Vault {
         self.db = read_database(&mut file, key)?;
         self.stamp = Stamp::of(&path);
         self.backed_up = false;
+        // Said once at unlock; a reload must not quietly undo it.
+        self.raise_weak_kdf();
         Ok(())
     }
 
@@ -1480,6 +1548,39 @@ impl Vault {
         })
     }
 
+    /// `save`, then reopen with the same key. On a failure the previous file is put back.
+    pub fn save_checked(&mut self) -> Result<(), VaultError> {
+        let Some(path) = self.path.clone() else {
+            return Err(VaultError::Unsaved);
+        };
+        let before =
+            Zeroizing::new(std::fs::read(&path).map_err(|e| VaultError::Io(e.to_string()))?);
+        let expected = self.entry_count();
+        self.save()?;
+        let why = match self.open_copy(&path) {
+            Ok(fresh) if fresh.entry_count() == expected => return Ok(()),
+            Ok(fresh) => format!("{} entries in, {} out", expected, fresh.entry_count()),
+            // Nothing says the file is bad, so a good save is not thrown away.
+            Err(e @ (VaultError::Challenge(_) | VaultError::Io(_))) => {
+                return Err(VaultError::Io(format!(
+                    "saved, but it could not be opened again to check · {e}"
+                )));
+            }
+            Err(e) => e.to_string(),
+        };
+        let temp = path.with_extension(format!("{}.restore", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        write_owner_only(&temp, &before)?;
+        std::fs::rename(&temp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            VaultError::Io(format!("the saved file did not open again ({why}), and putting the old one back failed · {e}"))
+        })?;
+        self.stamp = Stamp::of(&path);
+        Err(VaultError::Db(format!(
+            "the saved file did not open again ({why}) · the file on disk was put back as it was"
+        )))
+    }
+
     /// First save of a new vault: records the path and key, so later `save`
     /// calls need neither.
     #[cfg(any(test, feature = "test-support"))]
@@ -1546,6 +1647,7 @@ impl Vault {
             )));
         }
         self.db.config = keepass::config::DatabaseConfig::default();
+        self.db.config.kdf_config = new_vault_kdf();
         Ok(())
     }
 
@@ -1786,6 +1888,29 @@ impl Vault {
         path
     }
 
+    /// 0 for the root.
+    pub fn group_depth(&self, id: &GroupId) -> usize {
+        let mut depth = 0;
+        let mut at = *id;
+        while let Some(parent) = self.parent_group(&at) {
+            depth += 1;
+            at = parent;
+        }
+        depth
+    }
+
+    fn subtree_height(&self, id: &GroupId) -> usize {
+        let Some(group) = self.db.group(*id) else {
+            return 0;
+        };
+        let children: Vec<GroupId> = group.groups().map(|g| g.id()).collect();
+        children
+            .iter()
+            .map(|c| 1 + self.subtree_height(c))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Parent of a group via the stored back-pointer.
     pub fn parent_group(&self, id: &GroupId) -> Option<GroupId> {
         self.db
@@ -1856,6 +1981,9 @@ impl Vault {
         if self.db.group(*parent).is_none() {
             return Err(VaultError::GroupNotFound);
         }
+        if self.group_depth(parent) + 1 > MAX_GROUP_DEPTH {
+            return Err(VaultError::TooDeep);
+        }
         let mut parent = self
             .db
             .group_mut(*parent)
@@ -1880,11 +2008,33 @@ impl Vault {
     /* A group moves with its whole subtree: children live behind the group's
     id, so only the child lists change. The move_to guard mirrors ours. */
     pub fn move_group(&mut self, id: &GroupId, new_parent: &GroupId) -> Result<(), VaultError> {
+        self.move_group_checked(id, new_parent, true)
+    }
+
+    /// Undo of a delete: back where it was, which no depth limit refuses.
+    pub fn put_group_back(&mut self, id: &GroupId, parent: &GroupId) -> Result<(), VaultError> {
+        self.move_group_checked(id, parent, false)
+    }
+
+    fn move_group_checked(
+        &mut self,
+        id: &GroupId,
+        new_parent: &GroupId,
+        check_depth: bool,
+    ) -> Result<(), VaultError> {
         if *id == self.root_id() {
             return Err(VaultError::CannotMoveRoot);
         }
         if self.db.group(*new_parent).is_none() {
             return Err(VaultError::GroupNotFound);
+        }
+        // The bin is never refused, and nor is a move that leaves the subtree no deeper than it was.
+        let height = self.subtree_height(id);
+        let after = self.group_depth(new_parent) + 1 + height;
+        let now = self.group_depth(id) + height;
+        if check_depth && after > MAX_GROUP_DEPTH && after > now && !self.in_recycle_bin(new_parent)
+        {
+            return Err(VaultError::TooDeep);
         }
         let Some(mut group) = self.db.group_mut(*id) else {
             return Err(VaultError::GroupNotFound);
@@ -2099,30 +2249,67 @@ impl Vault {
         Ok(())
     }
 
+    /// An entry's files by name, for an undo step that has to put them back.
+    pub fn files_of(&self, id: &EntryId) -> Files {
+        self.db.entry(*id).map_or_else(Vec::new, |e| {
+            e.attachments_named()
+                .map(|(name, a)| {
+                    let bytes = Zeroizing::new(a.data.get().clone());
+                    (name.to_string(), bytes, a.data.is_protected())
+                })
+                .collect()
+        })
+    }
+
+    // A snapshot's attachment ids may name blobs that are gone or now belong to another entry, so
+    // they are dropped and the files added again from bytes.
+    fn put_back_files(&mut self, id: &EntryId, files: &Files, history: bool) {
+        if let Some(mut slot) = self.db.entry_mut(*id) {
+            slot.forget_attachments(history);
+        }
+        self.db.collect_attachments();
+        for (name, bytes, protected) in files {
+            let value = match protected {
+                true => keepass::db::Value::protected(bytes.to_vec()),
+                false => keepass::db::Value::unprotected(bytes.to_vec()),
+            };
+            if let Some(mut slot) = self.db.entry_mut(*id) {
+                slot.add_attachment(name.clone(), value);
+            }
+        }
+    }
+
     /// Swap an entry wholesale — the original timestamps ride along, which
-    /// an update_entry-based undo would not preserve.
-    pub fn replace_entry(&mut self, entry: &Entry) -> Result<(), VaultError> {
+    /// an update_entry-based undo would not preserve. `files` is for a step that changed them;
+    /// without it the entry keeps the files it has now, under the same ids.
+    pub fn replace_entry(
+        &mut self,
+        entry: &Entry,
+        files: Option<&Files>,
+    ) -> Result<(), VaultError> {
         let Some(mut slot) = self.db.entry_mut(entry.id()) else {
             return Err(VaultError::EntryNotFound);
         };
-        *slot = entry.clone();
+        // The live history, not the snapshot's: Sennel's edits never add to it, and a cleared
+        // history must stay cleared.
+        let history = slot.history.take();
+        slot.restore_keeping_attachments(entry);
+        slot.history = history;
         // An undone edit is a new edit to a merge, and must beat the old one.
         slot.times.last_modification = Some(Times::now());
+        if let Some(files) = files {
+            self.put_back_files(&entry.id(), files, false);
+        }
         Ok(())
     }
 
-    /// Re-insert a deleted entry under `parent`. Appends at the end: the
-    /// snapshot carries the record but not its slot in the child list, and
-    /// a one-level undo that restores content is worth the position it
-    /// cannot bring back.
-    /* The caller must hand back the parent the snapshot was taken from —
-    that is what the undo slot records — because the whole-record clone
-    also carries the snapshot's own back-pointer, and a different parent
-    would leave group child list and entry pointing at different places
-    (Entry's parent field is crate-private, so we cannot fix it here).
-    DuplicateEntryIdError maps to EntryNotFound as "cannot restore into
-    a slot that is not empty": the entry exists where it should not. */
-    pub fn restore_entry(&mut self, entry: &Entry, parent: &GroupId) -> Result<(), VaultError> {
+    // History versions lose their files: the delete removed them, and only the current ones were kept.
+    pub fn restore_entry(
+        &mut self,
+        entry: &Entry,
+        parent: &GroupId,
+        files: &Files,
+    ) -> Result<(), VaultError> {
         let Some(mut group) = self.db.group_mut(*parent) else {
             return Err(VaultError::GroupNotFound);
         };
@@ -2132,6 +2319,7 @@ impl Vault {
         *slot = entry.clone();
         slot.times.last_modification = Some(Times::now());
         self.db.deleted_objects.remove(&entry.id().uuid());
+        self.put_back_files(&entry.id(), files, true);
         Ok(())
     }
 
@@ -2362,11 +2550,7 @@ impl Vault {
         let Some(mut entry) = self.db.entry_mut(*id) else {
             return Err(VaultError::EntryNotFound);
         };
-        /* Through the entry, not through the attachment. `AttachmentMut::
-        remove` clears the back-references it knows about, and a file
-        loaded from disk arrives with those back-references empty — so it
-        dropped the bytes and left the entry pointing at them, which is a
-        panic the next time anything reads the list. */
+        // Through the entry: it drops the bytes once no other entry or version uses them.
         entry.remove_attachment_by_name(name);
         entry.times.last_modification = Some(Times::now());
         Ok(())
@@ -2389,6 +2573,8 @@ impl Vault {
         keeping the element is the smaller change to the file. */
         entry.history = Some(keepass::db::History::default());
         entry.times.last_modification = Some(Times::now());
+        // A file only the old versions used would otherwise stay in the vault with every save.
+        self.db.collect_attachments();
         Ok(gone)
     }
 
@@ -4924,6 +5110,272 @@ mod tests {
             .unwrap();
         v.save_as(&file.path, "correct horse", None).unwrap();
         v
+    }
+
+    // A chain of groups `depth` deep under the root; returns the deepest.
+    fn chain(v: &mut Vault, depth: usize) -> GroupId {
+        let mut at = v.root_id();
+        for n in 0..depth {
+            at = v.create_group(&at, &format!("g{n}")).unwrap();
+        }
+        at
+    }
+
+    fn kdf_of(v: &Vault) -> KdfConfig {
+        v.db.config.kdf_config.clone()
+    }
+
+    #[test]
+    fn sennels_own_settings_survive_a_save_and_count_as_strong() {
+        let file = Temp::new("strong-kdf");
+        let mut v = vault();
+        v.db.config.kdf_config = strong_kdf();
+        v.save_as(&file.path, "pw", None).unwrap();
+        let open = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(kdf_of(&open), strong_kdf());
+        assert!(!open.kdf_is_weak());
+        // And a new vault is not written with the crate's 1 MiB default.
+        assert!(!vault().kdf_is_weak());
+    }
+
+    #[test]
+    fn a_vault_written_with_the_crates_default_is_raised_on_its_next_save() {
+        let file = Temp::new("weak-kdf");
+        let mut v = vault();
+        v.db.config.kdf_config = keepass::config::DatabaseConfig::default().kdf_config;
+        v.create_entry(&v.root_id(), "kept", "u", "p", "", "")
+            .unwrap();
+        v.save_as(&file.path, "pw", None).unwrap();
+
+        let mut open = Vault::open(&file.path, "pw", None).unwrap();
+        assert!(open.kdf_is_weak());
+        assert_eq!(open.raise_weak_kdf(), Some(1 << 20));
+        assert_eq!(open.raise_weak_kdf(), None);
+        open.save().unwrap();
+
+        let again = Vault::open(&file.path, "pw", None).unwrap();
+        assert!(!again.kdf_is_weak());
+        assert_eq!(again.entry_count(), 1);
+    }
+
+    #[test]
+    fn a_keepassxc_vault_is_left_as_it_was_made() {
+        let mut open = Vault::open(&fixture("keepassxc4.kdbx"), "sennel-fixture", None).unwrap();
+        let made = kdf_of(&open);
+        assert!(!open.kdf_is_weak(), "{made:?}");
+        assert_eq!(open.raise_weak_kdf(), None);
+        assert_eq!(kdf_of(&open), made);
+    }
+
+    // Three entries a, b and c, each with a file named after it holding its own name.
+    fn three_with_files(v: &mut Vault, group: &GroupId) -> Vec<EntryId> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let id = v.create_entry(group, name, "u", "p", "", "").unwrap();
+                v.add_attachment(&id, &format!("{name}.txt"), name.as_bytes().to_vec())
+                    .unwrap();
+                id
+            })
+            .collect()
+    }
+
+    fn file_of(v: &Vault, id: &EntryId, name: &str) -> Option<Vec<u8>> {
+        v.attachment_bytes(id, name).map(|b| b.to_vec())
+    }
+
+    #[test]
+    fn removing_one_attachment_leaves_every_other_entrys_bytes_where_they_were() {
+        for removed in 0..3 {
+            let file = Temp::new("attach-remove");
+            let mut v = vault();
+            let root = v.root_id();
+            let ids = three_with_files(&mut v, &root);
+            v.save_as(&file.path, "pw", None).unwrap();
+
+            let mut v = Vault::open(&file.path, "pw", None).unwrap();
+            let name = ["a", "b", "c"][removed];
+            v.remove_attachment(&ids[removed], &format!("{name}.txt"))
+                .unwrap();
+            v.save().unwrap();
+
+            let v = Vault::open(&file.path, "pw", None).unwrap();
+            for (at, name) in ["a", "b", "c"].iter().enumerate() {
+                let got = file_of(&v, &ids[at], &format!("{name}.txt"));
+                let want = (at != removed).then(|| name.as_bytes().to_vec());
+                assert_eq!(got, want, "removed {removed}, read {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_an_entry_or_group_with_files_leaves_the_rest_intact() {
+        let file = Temp::new("attach-expunge");
+        let mut v = vault();
+        let root = v.root_id();
+        let ids = three_with_files(&mut v, &root);
+        let doomed = v.create_group(&root, "doomed").unwrap();
+        let inside = v.create_entry(&doomed, "inside", "u", "p", "", "").unwrap();
+        v.add_attachment(&inside, "in.txt", b"in".to_vec()).unwrap();
+        let last = v.create_entry(&root, "last", "u", "p", "", "").unwrap();
+        v.add_attachment(&last, "last.txt", b"last".to_vec())
+            .unwrap();
+        v.save_as(&file.path, "pw", None).unwrap();
+
+        let mut v = Vault::open(&file.path, "pw", None).unwrap();
+        v.expunge_entry(&ids[0]).unwrap();
+        v.delete_group_tree(&doomed).unwrap();
+        v.save().unwrap();
+
+        let v = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(file_of(&v, &ids[1], "b.txt"), Some(b"b".to_vec()));
+        assert_eq!(file_of(&v, &ids[2], "c.txt"), Some(b"c".to_vec()));
+        assert_eq!(file_of(&v, &last, "last.txt"), Some(b"last".to_vec()));
+    }
+
+    #[test]
+    fn a_file_a_history_version_still_uses_outlives_its_removal_from_the_entry() {
+        let file = Temp::new("attach-history");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "kept", "u", "p", "", "").unwrap();
+        v.add_attachment(&id, "id_rsa", b"key".to_vec()).unwrap();
+        // KeePassXC's way of keeping history: the version points at the entry's own blob.
+        v.db.entry_mut(id)
+            .unwrap()
+            .edit_tracking(|e| e.set_unprotected("Title", "kept 2"));
+        v.save_as(&file.path, "pw", None).unwrap();
+
+        let mut v = Vault::open(&file.path, "pw", None).unwrap();
+        v.remove_attachment(&id, "id_rsa").unwrap();
+        v.save().unwrap();
+
+        let v = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(file_of(&v, &id, "id_rsa"), None);
+        let entry = v.db.entry(id).unwrap();
+        let old = entry.historical(0).expect("the history version");
+        let bytes = old
+            .attachment_by_name("id_rsa")
+            .map(|a| a.data.get().clone());
+        assert_eq!(bytes, Some(b"key".to_vec()));
+    }
+
+    #[test]
+    fn groups_stop_at_the_depth_a_vault_can_still_open() {
+        let file = Temp::new("deep");
+        let mut v = vault();
+        let deepest = chain(&mut v, MAX_GROUP_DEPTH);
+        assert_eq!(v.group_depth(&deepest), MAX_GROUP_DEPTH);
+        assert_eq!(
+            v.create_group(&deepest, "one more"),
+            Err(VaultError::TooDeep)
+        );
+
+        v.create_entry(&deepest, "bottom", "u", "p", "", "")
+            .unwrap();
+        v.save_as(&file.path, "pw", None).unwrap();
+        let open = Vault::open(&file.path, "pw", None).unwrap();
+        assert_eq!(open.entry_count(), 1);
+    }
+
+    #[test]
+    fn a_move_counts_the_groups_it_carries() {
+        let mut v = vault();
+        let deep = chain(&mut v, MAX_GROUP_DEPTH - 2);
+        let root = v.root_id();
+        let top = v.create_group(&root, "top").unwrap();
+        let mid = v.create_group(&top, "mid").unwrap();
+        v.create_group(&mid, "low").unwrap();
+        // top, mid and low would sit at MAX - 1, MAX and MAX + 1.
+        assert_eq!(v.move_group(&top, &deep), Err(VaultError::TooDeep));
+        assert_eq!(v.move_group(&mid, &deep), Ok(()));
+    }
+
+    #[test]
+    fn a_group_at_the_depth_limit_can_still_go_to_the_bin_and_come_back() {
+        let mut v = vault();
+        let root = v.root_id();
+        let top = v.create_group(&root, "top").unwrap();
+        let mut at = top;
+        for n in 1..MAX_GROUP_DEPTH {
+            at = v.create_group(&at, &format!("g{n}")).unwrap();
+        }
+        v.recycle_group(&top).unwrap();
+        assert!(v.in_recycle_bin(&top));
+        v.put_group_back(&top, &root).unwrap();
+        assert_eq!(v.parent_group(&top), Some(root));
+    }
+
+    #[test]
+    fn a_group_deeper_than_the_limit_may_move_up_but_not_down() {
+        let mut v = vault();
+        let root = v.root_id();
+        // As KeePassXC could have written it, past what `create_group` allows.
+        let mut at = root;
+        let mut chain = Vec::new();
+        for n in 0..MAX_GROUP_DEPTH + 4 {
+            at = v.db.group_mut(at).unwrap().add_group().id();
+            v.db.group_mut(at).unwrap().name = format!("g{n}");
+            chain.push(at);
+        }
+        let sibling = v.create_group(&root, "sibling").unwrap();
+        let deep = chain[MAX_GROUP_DEPTH];
+        assert_eq!(v.move_group(&deep, &sibling), Ok(()));
+        assert_eq!(
+            v.move_group(&deep, &chain[MAX_GROUP_DEPTH + 2]),
+            Err(VaultError::WouldCycle)
+        );
+        // What is left under chain[2] now ends exactly at the limit, so one level lower is too far.
+        let lower = v.create_group(&sibling, "lower").unwrap();
+        assert_eq!(v.move_group(&chain[2], &lower), Ok(()));
+        let lowest = v.create_group(&lower, "lowest").unwrap();
+        assert_eq!(v.move_group(&chain[2], &lowest), Err(VaultError::TooDeep));
+    }
+
+    #[test]
+    fn clearing_history_lets_a_file_only_old_versions_used_go() {
+        let file = Temp::new("history-clear");
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "kept", "u", "p", "", "").unwrap();
+        v.add_attachment(&id, "id_rsa", b"key".to_vec()).unwrap();
+        v.db.entry_mut(id)
+            .unwrap()
+            .edit_tracking(|e| e.set_unprotected("Title", "kept 2"));
+        v.save_as(&file.path, "pw", None).unwrap();
+
+        let mut v = Vault::open(&file.path, "pw", None).unwrap();
+        v.clear_history(&id).unwrap();
+        v.remove_attachment(&id, "id_rsa").unwrap();
+        assert_eq!(v.db.num_attachments(), 0);
+    }
+
+    #[test]
+    fn a_checked_save_that_cannot_reopen_puts_the_old_file_back() {
+        // The crate's XML writer recurses per group, which a debug build's 2 MiB test stack cannot hold.
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(checked_save_restores)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn checked_save_restores() {
+        let file = Temp::new("checked");
+        let mut v = saved_vault(&file);
+        let before = std::fs::read(&file.path).unwrap();
+        // Past the parser's nesting limit, built under the guard that `create_group` would apply.
+        let mut at = v.root_id();
+        for n in 0..130 {
+            at = v.db.group_mut(at).unwrap().add_group().id();
+            v.db.group_mut(at).unwrap().name = format!("g{n}");
+        }
+        let err = v.save_checked().unwrap_err();
+        assert!(err.to_string().contains("put back"), "{err}");
+        assert_eq!(std::fs::read(&file.path).unwrap(), before);
+        // The restored file is stamped as ours, so the next save is not a conflict.
+        assert!(!v.changed_on_disk());
     }
 
     #[test]

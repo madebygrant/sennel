@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::Loaded;
 use crate::touchid::Refused;
-use crate::vault::{EntryExt, Extra, FieldKind, MergeSummary, Vault, VaultError, YubiSpec};
+use crate::vault::{EntryExt, Extra, FieldKind, Files, MergeSummary, Vault, VaultError, YubiSpec};
 
 /// A password sealed so only the user's presence opens it again. Generic so a test can stand in
 /// for the Secure Enclave without any binary linking the stand-in.
@@ -38,13 +38,19 @@ pub enum Pending {
 // One step of work, undone. The snapshot carries the whole entry, secrets included and zeroized
 // on drop, because a field-by-field restore would miss the timestamps the form never touches.
 pub enum Undo {
-    /// Before-state of an edited entry; restore swaps it wholesale.
-    Edit { id: EntryId, before: Entry },
+    /// Before-state of an edited entry; restore swaps it wholesale. `files` is set when the step
+    /// changed the entry's files, since the snapshot's own references may point at nothing.
+    Edit {
+        id: EntryId,
+        before: Entry,
+        files: Option<Files>,
+    },
     /// An entry destroyed inside the bin, which only a snapshot brings back.
     Delete {
         id: EntryId,
         parent: GroupId,
         before: Entry,
+        files: Files,
     },
     // An entry moved to the bin. It still exists, so undo is a move home and the snapshot rides
     // along only to name it.
@@ -135,8 +141,26 @@ pub struct Unlocked {
     pub created: bool,
     /// The format, when it opened but can never be written.
     pub read_only: Option<String>,
+    /// The Argon2 memory in bytes the file had, when it was too weak and the next save raises it.
+    pub kdf_raised_from: Option<u64>,
     pub sealing: Sealing,
     pub agent: AgentReport,
+}
+
+// The Argon2 memory a file had, in bytes, as the unlock note names it.
+pub fn kdf_raised_note(was: u64) -> String {
+    let size = |bytes: u64| match bytes {
+        b if b >= 1 << 20 => format!("{} MiB", b >> 20),
+        b => format!("{} KiB", b >> 10),
+    };
+    let to = match crate::vault::strong_kdf() {
+        keepass::config::KdfConfig::Argon2id { memory, .. } => size(memory),
+        _ => "more".to_string(),
+    };
+    format!(
+        "key derivation memory raised from {} to {to} on the next save",
+        size(was)
+    )
 }
 
 #[derive(Debug)]
@@ -429,7 +453,8 @@ impl<S: Seal> Session<S> {
             _ => Sealing::Skipped,
         };
         password.zeroize();
-        let vault = result?;
+        let mut vault = result?;
+        let kdf_raised_from = vault.raise_weak_kdf();
         let entries = vault.entry_count();
         let read_only = (!vault.writable()).then(|| vault.format());
         let agent = self.open(vault);
@@ -437,6 +462,7 @@ impl<S: Seal> Session<S> {
             entries,
             created: confirm.is_some(),
             read_only,
+            kdf_raised_from,
             sealing,
             agent,
         })
@@ -669,13 +695,23 @@ impl<S: Seal> Session<S> {
             .map(|e| e.clone())
             .ok_or(Delete::Missing)?;
         let forever = vault.is_recycled(&id);
+        let files = if forever {
+            vault.files_of(&id)
+        } else {
+            Vec::new()
+        };
         match forever {
             true => vault.expunge_entry(&id),
             false => vault.recycle_entry(&id),
         }
         .map_err(Delete::Vault)?;
         self.push_undo(match forever {
-            true => Undo::Delete { id, parent, before },
+            true => Undo::Delete {
+                id,
+                parent,
+                before,
+                files,
+            },
             false => Undo::Recycle { id, parent, before },
         });
         Ok(forever)
@@ -821,7 +857,11 @@ impl<S: Seal> Session<S> {
                     })
                     .map_err(EntryError::Vault)?;
                 if let Some(before) = before {
-                    self.push_undo(Undo::Edit { id, before });
+                    self.push_undo(Undo::Edit {
+                        id,
+                        before,
+                        files: None,
+                    });
                 }
                 None
             }
@@ -864,15 +904,20 @@ impl<S: Seal> Session<S> {
     pub fn undo(&mut self) -> Option<Undone> {
         let vault = self.vault.as_mut()?;
         Some(match self.undo.pop()? {
-            Undo::Edit { id, before } => {
-                let _ = vault.replace_entry(&before);
+            Undo::Edit { id, before, files } => {
+                let _ = vault.replace_entry(&before, files.as_ref());
                 Undone::Edit {
                     id,
                     title: before.title().to_string(),
                 }
             }
-            Undo::Delete { id, parent, before } => {
-                let _ = vault.restore_entry(&before, &parent);
+            Undo::Delete {
+                id,
+                parent,
+                before,
+                files,
+            } => {
+                let _ = vault.restore_entry(&before, &parent, &files);
                 Undone::Entry {
                     id,
                     title: before.title().to_string(),
@@ -887,7 +932,7 @@ impl<S: Seal> Session<S> {
                 }
             }
             Undo::RecycleGroup { id, parent, title } => {
-                let _ = vault.move_group(&id, &parent);
+                let _ = vault.put_group_back(&id, &parent);
                 Undone::Group { id, title }
             }
             Undo::AddEntry { id, title } => {
@@ -928,24 +973,29 @@ impl<S: Seal> Session<S> {
 
     // Every field and file change is its own undo step. An undo writes back the whole entry, so a
     // change left off the stack would be wiped by undoing an older step. Pushed only on a change.
+    // `touches_files` keeps the entry's file bytes with the step, for a change that adds or removes one.
     fn as_edit(
         &mut self,
         id: EntryId,
+        touches_files: bool,
         change: impl FnOnce(&mut Vault) -> Result<bool, VaultError>,
     ) -> Result<bool, VaultError> {
         let vault = self.vault.as_mut().ok_or(VaultError::EntryNotFound)?;
         let before = vault.get_entry(&id).map(|e| e.clone());
+        let files = touches_files.then(|| vault.files_of(&id));
         let changed = change(vault)?;
         if let (true, Some(before)) = (changed, before) {
-            self.push_undo(Undo::Edit { id, before });
+            self.push_undo(Undo::Edit { id, before, files });
         }
         Ok(changed)
     }
 
     /// Added protected: a field somebody adds by hand to a password manager is more often a secret than not.
     pub fn add_field(&mut self, id: EntryId, name: &str, value: &str) -> Result<(), VaultError> {
-        self.as_edit(id, |v| v.set_field(&id, name, value, true).map(|()| true))
-            .map(|_| ())
+        self.as_edit(id, false, |v| {
+            v.set_field(&id, name, value, true).map(|()| true)
+        })
+        .map(|_| ())
     }
 
     pub fn add_typed_field(
@@ -955,7 +1005,7 @@ impl<S: Seal> Session<S> {
         value: &str,
         kind: FieldKind,
     ) -> Result<(), VaultError> {
-        self.as_edit(id, |v| {
+        self.as_edit(id, false, |v| {
             v.add_typed_field(&id, name, value, kind).map(|()| true)
         })
         .map(|_| ())
@@ -970,16 +1020,21 @@ impl<S: Seal> Session<S> {
         value: Option<&str>,
         kind: FieldKind,
     ) -> Result<bool, VaultError> {
-        self.as_edit(id, |v| v.edit_typed_field(&id, name, new_name, value, kind))
+        self.as_edit(id, false, |v| {
+            v.edit_typed_field(&id, name, new_name, value, kind)
+        })
     }
 
     pub fn attach(&mut self, id: EntryId, name: &str, bytes: Vec<u8>) -> Result<(), VaultError> {
-        self.as_edit(id, |v| v.add_attachment(&id, name, bytes).map(|()| true))
-            .map(|_| ())
+        self.as_edit(id, true, |v| {
+            v.add_attachment(&id, name, bytes).map(|()| true)
+        })
+        .map(|_| ())
     }
 
     pub fn remove_extra(&mut self, id: EntryId, row: &Extra) -> Result<(), VaultError> {
-        self.as_edit(id, |v| {
+        let file = matches!(row, Extra::File { .. });
+        self.as_edit(id, file, |v| {
             match row {
                 Extra::Field { name, .. } => v.remove_field(&id, name),
                 Extra::File { name, .. } => v.remove_attachment(&id, name),
@@ -999,7 +1054,7 @@ impl<S: Seal> Session<S> {
     ) -> Result<(EntryId, bool), VaultError> {
         match target {
             EntryTarget::Edit(id) => self
-                .as_edit(id, |v| v.write_env(&id, parsed))
+                .as_edit(id, false, |v| v.write_env(&id, parsed))
                 .map(|c| (id, c)),
             EntryTarget::Add(group) => {
                 if title.trim().is_empty() {
@@ -1607,6 +1662,137 @@ mod tests {
         let e = s.vault.as_ref().unwrap().get_entry(&entry).unwrap();
         assert_eq!(e.fields["pin"].get(), "1234");
         assert!(e.fields["pin"].is_protected());
+    }
+
+    fn file_row(name: &str) -> Extra {
+        Extra::File {
+            name: name.into(),
+            bytes: 0,
+        }
+    }
+
+    fn bytes_of(s: &Session<Fake>, id: EntryId, name: &str) -> Option<Vec<u8>> {
+        s.vault
+            .as_ref()?
+            .attachment_bytes(&id, name)
+            .map(|b| b.to_vec())
+    }
+
+    fn reopen(file: &Temp) -> Session<Fake> {
+        let mut s = session();
+        unlock(&mut s, file, "pw").unwrap();
+        s
+    }
+
+    #[test]
+    fn undoing_a_removed_file_brings_its_bytes_back_through_a_save() {
+        let file = Temp::new("undo-file");
+        let mut s = session();
+        create(&mut s, &file, "pw").unwrap();
+        let root = s.vault.as_ref().unwrap().root_id();
+        let id = s
+            .vault
+            .as_mut()
+            .unwrap()
+            .create_entry(&root, "e", "u", "p", "", "")
+            .unwrap();
+        s.attach(id, "a.txt", b"aaa".to_vec()).unwrap();
+        s.persist(true);
+
+        let mut s = reopen(&file);
+        s.remove_extra(id, &file_row("a.txt")).unwrap();
+        s.persist(true);
+        s.undo().unwrap();
+        // Reading the list is what panicked on a reference to a removed blob.
+        let rows = crate::vault::extra_rows(&s.vault.as_ref().unwrap().get_entry(&id).unwrap());
+        assert_eq!(rows.len(), 1);
+        s.persist(true);
+
+        let s = reopen(&file);
+        assert_eq!(bytes_of(&s, id, "a.txt"), Some(b"aaa".to_vec()));
+    }
+
+    #[test]
+    fn undoing_older_steps_after_a_file_step_keeps_the_right_bytes() {
+        let (mut s, _, id) = open();
+        s.attach(id, "a.txt", b"aaa".to_vec()).unwrap();
+        s.add_field(id, "note", "x").unwrap();
+        s.remove_extra(id, &file_row("a.txt")).unwrap();
+        s.undo().unwrap();
+        s.undo().unwrap();
+        assert_eq!(bytes_of(&s, id, "a.txt"), Some(b"aaa".to_vec()));
+        s.undo().unwrap();
+        assert_eq!(bytes_of(&s, id, "a.txt"), None);
+    }
+
+    #[test]
+    fn an_entry_restored_from_the_bin_gets_its_own_file_not_a_newer_ones() {
+        let file = Temp::new("undo-delete");
+        let mut s = session();
+        create(&mut s, &file, "pw").unwrap();
+        let root = s.vault.as_ref().unwrap().root_id();
+        let v = s.vault.as_mut().unwrap();
+        let doomed = v.create_entry(&root, "doomed", "u", "p", "", "").unwrap();
+        let other = v.create_entry(&root, "other", "u", "p", "", "").unwrap();
+        s.attach(doomed, "mine.txt", b"mine".to_vec()).unwrap();
+        s.persist(true);
+
+        let mut s = reopen(&file);
+        assert!(!s.delete_entry(doomed).unwrap());
+        assert!(s.delete_entry(doomed).unwrap());
+        // The freed id is the next one handed out. Straight to the vault, so it is not an undo step.
+        let v = s.vault.as_mut().unwrap();
+        v.add_attachment(&other, "theirs.txt", b"theirs".to_vec())
+            .unwrap();
+        s.undo().unwrap();
+        assert_eq!(bytes_of(&s, doomed, "mine.txt"), Some(b"mine".to_vec()));
+        assert_eq!(bytes_of(&s, other, "theirs.txt"), Some(b"theirs".to_vec()));
+        s.persist(true);
+
+        let s = reopen(&file);
+        assert_eq!(bytes_of(&s, doomed, "mine.txt"), Some(b"mine".to_vec()));
+        assert_eq!(bytes_of(&s, other, "theirs.txt"), Some(b"theirs".to_vec()));
+    }
+
+    #[test]
+    fn undoing_an_attach_takes_the_bytes_out_of_the_file() {
+        let file = Temp::new("undo-attach");
+        let mut s = session();
+        create(&mut s, &file, "pw").unwrap();
+        let root = s.vault.as_ref().unwrap().root_id();
+        let id = s
+            .vault
+            .as_mut()
+            .unwrap()
+            .create_entry(&root, "e", "u", "p", "", "")
+            .unwrap();
+        s.attach(id, "a.txt", b"aaa".to_vec()).unwrap();
+        s.undo().unwrap();
+        s.persist(true);
+
+        let s = reopen(&file);
+        assert_eq!(s.vault.as_ref().unwrap().db().num_attachments(), 0);
+    }
+
+    #[test]
+    fn undoing_a_field_edit_leaves_the_files_exactly_as_they_are() {
+        let (mut s, _, id) = open();
+        let v = s.vault.as_mut().unwrap();
+        v.add_attachment(&id, "a.txt", b"aaa".to_vec()).unwrap();
+        s.add_field(id, "note", "x").unwrap();
+        s.undo().unwrap();
+        let v = s.vault.as_ref().unwrap();
+        assert_eq!(v.db().num_attachments(), 1);
+        assert_eq!(bytes_of(&s, id, "a.txt"), Some(b"aaa".to_vec()));
+    }
+
+    #[test]
+    fn the_raise_note_names_sizes_under_a_mebibyte() {
+        assert_eq!(
+            kdf_raised_note(512 << 10),
+            "key derivation memory raised from 512 KiB to 64 MiB on the next save"
+        );
+        assert!(kdf_raised_note(1 << 20).contains("from 1 MiB"));
     }
 
     #[test]

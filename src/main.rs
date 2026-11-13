@@ -744,7 +744,7 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
     for note in &skipped {
         eprintln!("{}", printable(note));
     }
-    vault.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+    vault.save_checked().map_err(|e| anyhow::anyhow!("{e}"))?;
     say!("imported {added} entries into {into}");
     /* The export is still sitting on disk in the clear, which is the part
     people forget once the import worked. */

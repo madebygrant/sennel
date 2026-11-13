@@ -1,6 +1,13 @@
 [workspace]
 members = [".", "crates/sennel-core", "crates/sennel-desktop"]
+# Third-party source patched in place: built as a dependency, never linted or tested as ours.
+exclude = ["vendor"]
 resolver = "3"
+
+[patch.crates-io]
+# keepass 0.14.0 with two attachment fixes. vendor/keepass/SENNEL-PATCHES.md says what and why, and
+# what a version bump has to carry over or drop.
+keepass = { path = "vendor/keepass" }
 
 # Shared by both crates, so the pins and features are written once.
 [workspace.dependencies]
@@ -19,6 +26,7 @@ toml = "1"
 # challenge_response: a YubiKey (or OnlyKey) HMAC-SHA1 slot as part of the key,
 # which is how KeePassXC vaults protected by a hardware key are opened. It pulls
 # in the `challenge_response` crate over `nusb`, pure Rust with no libusb.
+# Built from vendor/keepass through [patch.crates-io] below, which fixes how it writes attachments.
 keepass = { version = "=0.14.0", features = ["save_kdbx4", "totp", "_merge", "challenge_response"] }
 # Already in the tree under keepass, named here for the one thing the vault
 # cannot do: KDBX stamps are UTC, and a timestamp is read in local time.
@@ -63,6 +71,20 @@ rpassword = "7"
 
 [dev-dependencies]
 sennel-core = { path = "crates/sennel-core", features = ["clap", "test-support"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Every save and open runs Argon2 at 64 MiB, which takes seconds unoptimised and would make each
+# debug run and test that touches a vault file wait on it.
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
+opt-level = 3
 
 [profile.release]
 strip = true

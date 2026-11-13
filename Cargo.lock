@@ -2629,8 +2629,6 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ec7f77f645a12a7671cc1a514429bc73f71897818f8bdbb5962c1563c42c7c2"
 dependencies = [
  "aes 0.9.2",
  "base32",
@@ -4552,6 +4550,7 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "rqrr",
+ "rust-argon2",
  "security-framework",
  "security-framework-sys",
  "serde",
