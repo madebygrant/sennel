@@ -42,11 +42,12 @@
     noteTimer = setTimeout(() => (note = null), note.level === "info" ? 4000 : 10000);
   }
 
-  // Keys, clicks and pointer moves restart the idle clock, at most every two seconds. Focus does not.
-  // macOS delivers scrolls and hovers to background windows, so those count only while focused.
+  // Keys, clicks and scrolls restart the idle clock, at most every two seconds. A pointer passing over
+  // the window and focus do not. macOS delivers scrolls to background windows, so they count only
+  // while focused.
   let lastTouch = 0;
   function activity(event) {
-    if ((event.type === "pointermove" || event.type === "wheel") && !document.hasFocus()) return;
+    if (event.type === "wheel" && !document.hasFocus()) return;
     const now = Date.now();
     if (now - lastTouch > 2000) {
       lastTouch = now;
@@ -73,7 +74,7 @@
   });
 </script>
 
-<svelte:window onkeydown={activity} onmousedown={activity} onpointermove={activity} onwheel={activity} />
+<svelte:window onkeydown={activity} onmousedown={activity} onwheel={activity} />
 
 {#if status === null}
   <main class="loading dim">…</main>

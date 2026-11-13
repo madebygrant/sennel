@@ -6,6 +6,7 @@
 
   let { say, close } = $props();
 
+  let current = $state("");
   let password = $state("");
   let confirm = $state("");
   let reveal = $state(false);
@@ -17,6 +18,7 @@
 
   function done(reply) {
     // A JS string cannot be wiped, only dropped; Rust wipes its own copies.
+    current = "";
     password = "";
     confirm = "";
     close(reply);
@@ -27,13 +29,15 @@
     if (busy) return;
     busy = true;
     try {
-      const reply = await call("rekey", { password, confirm });
+      const reply = await call("rekey", { current, password, confirm });
       if (reply.ok) {
         say(reply.notes);
         done(reply);
       } else {
         error = reply.notes.at(-1)?.text ?? null;
-        confirm = "";
+        // Only the box that was wrong is cleared: a typo in the retype costs the retype.
+        if (error?.includes("current password")) current = "";
+        else confirm = "";
       }
     } catch (why) {
       error = String(why);
@@ -47,8 +51,12 @@
   <form onsubmit={submit}>
     <h2>Change master password</h2>
     <label>
-      <span class="split">New password <button type="button" class="small" onclick={() => (reveal = !reveal)}>{reveal ? "Hide" : "Show"}</button></span>
-      <SecretInput bind:box={first} bind:value={password} {reveal} autocomplete="off" oninput={() => (error = null)} oncopy={secretCopy("password", say)} oncut={secretCopy("password", say)} />
+      <span class="split">Current password <button type="button" class="small" onclick={() => (reveal = !reveal)}>{reveal ? "Hide" : "Show"}</button></span>
+      <SecretInput bind:box={first} bind:value={current} {reveal} autocomplete="off" hint="empty uses Touch ID, if it is on" oninput={() => (error = null)} oncopy={secretCopy("password", say)} oncut={secretCopy("password", say)} />
+    </label>
+    <label>
+      New password
+      <SecretInput bind:value={password} {reveal} autocomplete="off" oninput={() => (error = null)} oncopy={secretCopy("password", say)} oncut={secretCopy("password", say)} />
     </label>
     <label>
       Again

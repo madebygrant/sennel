@@ -27,6 +27,8 @@
     bind:value
     type={reveal ? "text" : "password"}
     spellcheck="false"
+    autocorrect="off"
+    autocapitalize="off"
     oninput={(e) => {
       place();
       oninput?.(e);

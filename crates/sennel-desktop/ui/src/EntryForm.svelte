@@ -172,6 +172,9 @@
         oncut={secretCopy("password", say)}
         placeholder={form.id && !passwordTouched ? "unchanged" : ""}
         autocomplete="off"
+        spellcheck="false"
+        autocorrect="off"
+        autocapitalize="off"
       />
     </label>
     {#if made}

@@ -40,7 +40,7 @@ pub struct Note {
     pub text: String,
 }
 
-fn info(text: impl Into<String>) -> Note {
+pub(crate) fn info(text: impl Into<String>) -> Note {
     Note {
         level: Level::Info,
         text: text.into(),
@@ -347,7 +347,7 @@ pub struct Reply {
 }
 
 impl Reply {
-    fn notes(notes: Vec<Note>) -> Self {
+    pub(crate) fn notes(notes: Vec<Note>) -> Self {
         Reply {
             notes,
             select: None,
@@ -389,6 +389,10 @@ pub struct Desk {
     prompt: Option<Box<dyn Fn(Note) + Send + Sync>>,
     // When Lock last said it would lose unsaved changes.
     lock_asked: Mutex<Option<Instant>>,
+    // Whether this unlock's first key for ssh-agent has been confirmed. A lock asks again.
+    agent_confirmed: std::sync::atomic::AtomicBool,
+    // Counts unlocks, so an answer given across a lock and a new unlock is not taken for this one.
+    unlocks: std::sync::atomic::AtomicU64,
 }
 
 pub fn entry_id(text: &str) -> Result<EntryId, String> {
@@ -462,6 +466,8 @@ impl Desk {
             rows: Mutex::new((None, Vec::new(), Searcher::new())),
             prompt: None,
             lock_asked: Mutex::new(None),
+            agent_confirmed: std::sync::atomic::AtomicBool::new(false),
+            unlocks: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -525,9 +531,7 @@ impl Desk {
         let undo = s.undo_steps().last().map(|step| {
             sennel_core::vault::printable(&match step {
                 Undo::Edit { before, .. } => format!("edit of {}", before.title()),
-                Undo::Delete { before, .. } | Undo::Recycle { before, .. } => {
-                    format!("restore {}", before.title())
-                }
+                Undo::Recycle { title, .. } => format!("restore {title}"),
                 Undo::RecycleGroup { title, .. } => format!("restore {title}"),
                 Undo::AddEntry { title, .. } => format!("remove {title}"),
                 Undo::Rename { before, .. } => format!("name {before}"),
@@ -566,6 +570,11 @@ impl Desk {
 
     /// Points the window at a vault file, typed or picked from the library.
     pub fn choose(&self, typed: &str) -> Result<Status, String> {
+        // The page offers this only while locked. A second vault aimed at under an open one would
+        // take over its undo stack and its key file.
+        if self.session().is_open() {
+            return Err("lock the open vault first".into());
+        }
         let typed = typed.trim();
         if config::is_other_home(typed) {
             return Err("another user's ~ cannot be resolved · type the full path".into());
@@ -650,8 +659,11 @@ impl Desk {
     ) -> Reply {
         let mut bytes = password.as_bytes().to_vec();
         password.zeroize();
-        *self.key_file.lock().unwrap_or_else(|e| e.into_inner()) = key_file.clone();
         let confirm = confirm.map(Zeroizing::new);
+        if self.session().is_open() {
+            bytes.zeroize();
+            return Reply::one(warn("a vault is already open · lock it first"));
+        }
         let Some(path) = self.db() else {
             bytes.zeroize();
             return Reply::one(warn("choose a vault file first"));
@@ -686,11 +698,13 @@ impl Desk {
             self.settings.yubikey.as_ref(),
             again,
         );
-        self.after_unlock(&path, result.map_err(QuickError::Unlock))
+        self.after_unlock(&path, key_file, result.map_err(QuickError::Unlock))
     }
 
     pub fn quick_unlock(&self, key_file: Option<String>) -> Reply {
-        *self.key_file.lock().unwrap_or_else(|e| e.into_inner()) = key_file.clone();
+        if self.session().is_open() {
+            return Reply::one(warn("a vault is already open · lock it first"));
+        }
         let Some(path) = self.db() else {
             return Reply::one(warn("choose a vault file first"));
         };
@@ -703,7 +717,7 @@ impl Desk {
             key.as_deref().map(|k| k.as_slice()),
             self.settings.yubikey.as_ref(),
         );
-        self.after_unlock(&path, result)
+        self.after_unlock(&path, key_file, result)
     }
 
     fn read_key(&self, key_file: Option<&str>) -> Result<Option<Zeroizing<Vec<u8>>>, Note> {
@@ -715,7 +729,14 @@ impl Desk {
         }
     }
 
-    fn after_unlock(&self, path: &Path, result: Result<Unlocked, QuickError>) -> Reply {
+    // The key file is kept only once it has opened the vault: a rekey re-reads it, and a failed
+    // attempt with another one must not change what that rekey would use.
+    fn after_unlock(
+        &self,
+        path: &Path,
+        key_file: Option<String>,
+        result: Result<Unlocked, QuickError>,
+    ) -> Reply {
         let unlocked = match result {
             Ok(unlocked) => unlocked,
             Err(QuickError::Nothing) => {
@@ -741,6 +762,9 @@ impl Desk {
                 });
             }
         };
+        *self.key_file.lock().unwrap_or_else(|e| e.into_inner()) = key_file;
+        self.unlocks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut notes = Vec::new();
         let agent = unlocked.agent;
         if let Some(first) = agent.problems.first() {
@@ -814,6 +838,8 @@ impl Desk {
         }
         let failed = s.lock();
         drop(s);
+        self.agent_confirmed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut notes = vec![info("locked")];
         if let Some(why) = lost {
             notes.push(error(format!("unsaved changes were lost: {why}")));
@@ -843,9 +869,42 @@ impl Desk {
         }
     }
 
+    /// The question to ask before a setting that weakens protection, or None for one that does
+    /// not. Weaker is any move that way, not only off: a week-long idle lock is nearly no lock.
+    pub fn lowers_protection(&self, key: &str, value: &PrefValue) -> Option<String> {
+        let now = self.live().clone();
+        let longer = |was: u64, to: u64| to == 0 || (was != 0 && to > was);
+        match (key, value) {
+            ("lock_timeout", PrefValue::Number(to)) if longer(now.lock_timeout, *to) => {
+                Some(match to {
+                    0 => "Turn off the idle lock? An unlocked vault will stay open until you lock it.".into(),
+                    _ => format!("Let the vault stay unlocked for {} idle?", spell_secs(*to)),
+                })
+            }
+            ("clipboard_timeout", PrefValue::Number(to)) if longer(now.clipboard_timeout, *to) => {
+                Some(match to {
+                    0 => "Stop clearing the clipboard? Copied passwords will stay on it.".into(),
+                    _ => format!("Leave copied passwords on the clipboard for {}?", spell_secs(*to)),
+                })
+            }
+            ("backups", PrefValue::Number(to)) if (*to as usize) < now.backups => Some(match to {
+                0 => "Stop keeping backups? A bad save could not be undone from a copy.".into(),
+                _ => format!("Keep only {to} backups?"),
+            }),
+            ("touch_id", PrefValue::Flag(true)) => Some(
+                "Turn on Touch ID? The password is kept, sealed, while the vault is locked.".into(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Applies one setting to this window, then writes it to the config file the terminal app also
-    /// reads. A value out of range comes back as a warning and changes nothing.
+    /// reads. A value out of range comes back as a warning and changes nothing. One that weakens
+    /// protection is refused while locked, and the caller has confirmed it in a native dialog.
     pub fn set_pref(&self, key: &str, value: PrefValue) -> Result<Note, String> {
+        if self.lowers_protection(key, &value).is_some() && !self.session().is_open() {
+            return Ok(warn("unlock first to change that"));
+        }
         let file = self.settings.config_file.as_deref();
         let (what, saved) = match (key, value) {
             ("lock_timeout", PrefValue::Number(secs)) => {
@@ -947,6 +1006,8 @@ impl Desk {
         }
         let lost = s.unsaved_before_lock(false);
         let failed = s.lock();
+        self.agent_confirmed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut notes = vec![warn(format!(
             "locked after {} idle{}",
             spell_secs(self.lock_timeout()),
@@ -1669,13 +1730,23 @@ impl Desk {
         ))
     }
 
-    pub fn attach(&self, id: &str, name: &str, path: &str) -> Result<Reply, String> {
-        if name.trim().is_empty() {
+    // The path comes from the native picker the user just answered, never from the page, so a
+    // script there cannot read a file of its choosing into a vault that syncs to somebody else.
+    pub fn attach(&self, id: &str, name: &str, path: &Path) -> Result<Reply, String> {
+        if !self.session().is_open() {
+            return Ok(Reply::one(info("locked")));
+        }
+        let picked = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let name = match name.trim() {
+            "" => picked.unwrap_or_default(),
+            typed => typed.to_string(),
+        };
+        if name.is_empty() {
             return Ok(Reply::one(warn("a name is the only must")));
         }
+        let name = name.as_str();
         let id = entry_id(id)?;
-        let path = config::expand(path.trim());
-        let bytes = match capped::read_capped_file(&path, capped::ATTACHMENT_MAX) {
+        let bytes = match capped::read_capped_file(path, capped::ATTACHMENT_MAX) {
             Ok(bytes) => bytes,
             Err(e) => {
                 return Ok(Reply::one(error(format!(
@@ -1727,6 +1798,26 @@ impl Desk {
         })
     }
 
+    pub fn agent_confirmed(&self) -> bool {
+        self.agent_confirmed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Which unlock this is, for an answer that has to belong to the unlock it was asked under.
+    pub fn unlock_count(&self) -> u64 {
+        self.unlocks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Records the confirmation, unless the vault locked, or locked and opened again, meanwhile.
+    pub fn confirm_agent(&self, asked_under: u64) -> bool {
+        let same = self.session().is_open() && self.unlock_count() == asked_under;
+        if same {
+            self.agent_confirmed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        same
+    }
+
     pub fn agent_give(&self, id: &str, name: &str) -> Result<Note, String> {
         let id = entry_id(id)?;
         Ok(match self.session().agent_give(id, name) {
@@ -1737,13 +1828,21 @@ impl Desk {
     }
 
     // Cleared only once it holds a one-time code: any other image on the clipboard is left alone.
+    // Only for the entry form, so only while a vault is open: locked, a script in the page would
+    // otherwise be lifting a 2FA seed from a screenshot the user had just copied.
     pub fn scan_clipboard(&self, title: &str, username: &str) -> Result<Scanned, String> {
+        if !self.session().is_open() {
+            return Err("locked".into());
+        }
         let found = scanned(Zeroizing::new(qr::from_clipboard()?), title, username)?;
         qr::clear_clipboard();
         Ok(found)
     }
 
     pub fn scan_file(&self, path: &str, title: &str, username: &str) -> Result<Scanned, String> {
+        if !self.session().is_open() {
+            return Err("locked".into());
+        }
         scanned(
             Zeroizing::new(qr::from_file(Path::new(path))?),
             title,
@@ -1762,9 +1861,11 @@ impl Desk {
         info(format!("entries {}", sort.label()))
     }
 
-    // Both boxes must agree: nothing else can ever tell the user what the new password was. The key
-    // file the vault was unlocked with stays part of the key, or the vault would not open again.
-    pub fn rekey(&self, mut password: String, mut confirm: String) -> Reply {
+    // `current` is checked in Rust, so neither a script in the page nor someone at an unlocked
+    // window can change the password without knowing it. Both new boxes must agree, and the key
+    // file the vault was unlocked with stays part of the key.
+    pub fn rekey(&self, current: String, mut password: String, mut confirm: String) -> Reply {
+        let current = Zeroizing::new(current);
         let same = password == confirm;
         confirm.zeroize();
         let refuse = |password: &mut String, text: &str| {
@@ -1798,7 +1899,7 @@ impl Desk {
         };
         let mut s = self.session();
         self.ask_for_key(&s, "to save");
-        let done = s.rekey(&password, key.as_deref().map(|k| k.as_slice()));
+        let done = s.rekey(&current, &password, key.as_deref().map(|k| k.as_slice()));
         password.zeroize();
         match done {
             Ok(rekeyed) => {
@@ -1822,6 +1923,13 @@ impl Desk {
                 }
                 Reply::one(info(said))
             }
+            Err(sennel_core::vault::VaultError::WrongPassword) => Reply {
+                notes: vec![warn(
+                    "that is not the current password · password unchanged",
+                )],
+                select: None,
+                ok: false,
+            },
             // The write comes before the swap, so the old password still opens the file.
             Err(e) => Reply {
                 notes: vec![error(format!("password unchanged · {e}"))],

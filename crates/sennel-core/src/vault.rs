@@ -21,7 +21,7 @@ use keepass::{
     db::{Entry, EntryId, EntryMut, EntryRef, GroupId, GroupRef, Times},
     error::{
         ChallengeResponseKeyError, CryptographyError, DatabaseKeyError, DatabaseOpenError,
-        DatabaseSaveError, DestinationGroupNotFoundError, DuplicateEntryIdError, MoveGroupError,
+        DatabaseSaveError, DestinationGroupNotFoundError, MoveGroupError,
     },
 };
 
@@ -1823,6 +1823,13 @@ impl Vault {
         Ok(())
     }
 
+    /// Whether `password` with `key_file` is the key this vault is held with. Compared against the
+    /// key in memory, so it needs no key derivation, no read of the file and no key touch.
+    pub fn holds_key(&self, password: &str, key_file: Option<&[u8]>) -> Result<bool, VaultError> {
+        let key = Self::build_key(password, key_file, self.challenge.as_ref())?;
+        Ok(self.key.as_ref() == Some(&key))
+    }
+
     /* Re-key: the same database, written again under a new password. The
     file is written before the key is swapped, so a refused or failed write
     leaves the vault openable with the password it already had — a rekey
@@ -2295,6 +2302,13 @@ impl Vault {
         subtree(&self.db, id, groups, entries);
     }
 
+    /// Every entry in a group and the groups under it.
+    pub fn entries_under(&self, id: &GroupId) -> Vec<EntryId> {
+        let (mut groups, mut entries) = (Vec::new(), Vec::new());
+        self.collect_subtree(id, &mut groups, &mut entries);
+        entries
+    }
+
     /* Notes ride protected here where KeePass convention stores them in the
     clear. It round-trips (a keepassxc-cli-written fixture's notes read
     back; our files open there too) and protecting them only ever hides
@@ -2483,9 +2497,9 @@ impl Vault {
 
     // A snapshot's attachment ids may name blobs that are gone or now belong to another entry, so
     // they are dropped and the files added again from bytes.
-    fn put_back_files(&mut self, id: &EntryId, files: &Files, history: bool) {
+    fn put_back_files(&mut self, id: &EntryId, files: &Files) {
         if let Some(mut slot) = self.db.entry_mut(*id) {
-            slot.forget_attachments(history);
+            slot.forget_attachments(false);
         }
         self.db.collect_attachments();
         for (name, bytes, protected) in files {
@@ -2518,28 +2532,8 @@ impl Vault {
         // An undone edit is a new edit to a merge, and must beat the old one.
         slot.times.last_modification = Some(Times::now());
         if let Some(files) = files {
-            self.put_back_files(&entry.id(), files, false);
+            self.put_back_files(&entry.id(), files);
         }
-        Ok(())
-    }
-
-    // History versions lose their files: the delete removed them, and only the current ones were kept.
-    pub fn restore_entry(
-        &mut self,
-        entry: &Entry,
-        parent: &GroupId,
-        files: &Files,
-    ) -> Result<(), VaultError> {
-        let Some(mut group) = self.db.group_mut(*parent) else {
-            return Err(VaultError::GroupNotFound);
-        };
-        let mut slot = group
-            .add_entry_with_id(entry.id())
-            .map_err(|_: DuplicateEntryIdError| VaultError::EntryNotFound)?;
-        *slot = entry.clone();
-        slot.times.last_modification = Some(Times::now());
-        self.db.deleted_objects.remove(&entry.id().uuid());
-        self.put_back_files(&entry.id(), files, true);
         Ok(())
     }
 

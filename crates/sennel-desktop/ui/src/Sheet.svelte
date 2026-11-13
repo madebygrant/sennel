@@ -71,7 +71,8 @@
     const name = formName;
     const value = formValue;
     closeForm();
-    if (file) await act("attach", { id: sheet.id, name, path: value });
+    // Rust opens the file picker: the page never names a path to read.
+    if (file) await act("attach", { id: sheet.id, name });
     else if (edit !== null) await act("edit_field", { id: sheet.id, name: edit, newName: name, value: secret && value === "" ? null : value, kind });
     else await act("add_field", { id: sheet.id, name, value, kind });
   }
@@ -199,11 +200,11 @@
         {/each}
       </div>
     {/if}
-    <input bind:value={formName} placeholder="Name" />
+    <input bind:value={formName} placeholder={adding?.file ? "Name · empty uses the file's" : "Name"} />
     {#if adding?.file}
-      <input class="mono" bind:value={formValue} placeholder="Path to the file" spellcheck="false" />
+      <p class="dim">Choose file opens a picker.</p>
     {:else if adding?.kind === "textarea"}
-      <textarea class="mono" rows="4" bind:value={formValue} placeholder={adding?.secret ? "Unchanged · type to replace" : "Value"} spellcheck="false" oncopy={secretCopy(formName || "the value", say)} oncut={secretCopy(formName || "the value", say)}></textarea>
+      <textarea class="mono" rows="4" bind:value={formValue} placeholder={adding?.secret ? "Unchanged · type to replace" : "Value"} spellcheck="false" autocorrect="off" autocapitalize="off" oncopy={secretCopy(formName || "the value", say)} oncut={secretCopy(formName || "the value", say)}></textarea>
     {:else}
       <input
         class="mono"
@@ -212,13 +213,15 @@
         bind:value={formValue}
         placeholder={adding?.secret ? "Unchanged · type to replace" : adding?.kind === "password" ? "Value (stored protected)" : adding?.kind === "number" ? "Digits, like 0042 or 3.5" : "Value"}
         spellcheck="false"
+        autocorrect="off"
+        autocapitalize="off"
         oncopy={secretCopy(formName || "the value", say)}
         oncut={secretCopy(formName || "the value", say)}
       />
     {/if}
     <div class="submit">
       <button type="button" onclick={closeForm}>Cancel</button>
-      <button class="primary" type="submit">{adding?.edit === null ? "Add" : "Save"}</button>
+      <button class="primary" type="submit">{adding?.file ? "Choose file…" : adding?.edit === null ? "Add" : "Save"}</button>
     </div>
   </form>
 {/snippet}

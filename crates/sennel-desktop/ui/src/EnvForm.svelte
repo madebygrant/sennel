@@ -84,6 +84,8 @@
         bind:value={text}
         oninput={changed}
         spellcheck="false"
+        autocorrect="off"
+        autocapitalize="off"
         autocomplete="off"
         placeholder={"# Database\nDATABASE_URL=postgres://…"}
       ></textarea>

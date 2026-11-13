@@ -470,6 +470,18 @@ fn truncate(text: &str, width: usize) -> String {
 /// "password" straight into its value.
 const LABEL: usize = 10;
 
+// The estimate a typed password gets on the entry form, the rekey prompt and the create screen,
+// under the box and in amber below 60 bits.
+fn strength_line(p: &Palette, password: &str) -> Line<'static> {
+    let bits = crate::generator::typed_bits(password);
+    let word = crate::generator::strength(bits);
+    let ink = if bits < 60.0 { p.warn } else { p.cursor };
+    Line::from(vec![
+        p.faint(format!(" {:<LABEL$}", "")),
+        Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
+    ])
+}
+
 /* Only worth the column when the list actually runs off the pane. Drawn into
 the pane's own last column, so the lists hand that column back (see
 `list_width`) rather than letting the thumb land on a name. */
@@ -861,7 +873,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         copy_rows.push((lines.len(), app::CopyRow::Password));
         lines.push(copyable(
             "pass",
-            if app.show_password {
+            if app.password_shown() {
                 truncate(
                     &revealed(app, entry.password()),
                     width.saturating_sub(LABEL + 1),
@@ -957,7 +969,12 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     app.copy_rows = copy_rows
         .into_iter()
         .filter(|(at, _)| *at < lines.len())
-        .map(|(at, what)| (inner.top() + at as u16, what))
+        .map(|(at, what)| {
+            (
+                Rect::new(inner.x, inner.top() + at as u16, inner.width, 1),
+                what,
+            )
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1101,7 +1118,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
         copy_rows.push((lines.len(), app::CopyRow::Password));
         lines.push(copyable(
             "password",
-            if app.show_password {
+            if app.password_shown() {
                 truncate(&revealed(app, entry.password()), value)
             } else {
                 "••••••••".to_string()
@@ -1179,7 +1196,7 @@ fn draw_detail_popup(frame: &mut Frame, app: &mut App) {
     app.copy_rows = copy_rows
         .into_iter()
         .filter(|(row, _)| (*row as u16) < at.height)
-        .map(|(row, what)| (at.top() + row as u16, what))
+        .map(|(row, what)| (Rect::new(at.x, at.top() + row as u16, at.width, 1), what))
         .collect();
 }
 
@@ -1278,6 +1295,11 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             UnlockField::Confirm,
             true,
         ));
+        // The rekey prompt's estimate, for the one password the vault's safety rests on. Said, not
+        // enforced: a weak one is still the user's to choose.
+        if !app.unlock_password.is_empty() {
+            rows.push(strength_line(&p, &app.unlock_password));
+        }
     }
     rows.push(Line::default());
     /* Enter does three different things on this screen, so the hint names the
@@ -2136,13 +2158,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
     the classes actually present times the length. Shown while the box
     holds something, so `^s` and a typed password answer the same way. */
     if !form.password.is_empty() {
-        let bits = crate::generator::typed_bits(&form.password);
-        let word = crate::generator::strength(bits);
-        let ink = if bits < 60.0 { p.warn } else { p.cursor };
-        lines.push(Line::from(vec![
-            p.faint(format!(" {:<LABEL$}", "")),
-            Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
-        ]));
+        lines.push(strength_line(&p, &form.password));
     }
     lines.push(row("url", FormField::Url, &form.url));
     lines.push(row("otp", FormField::Otp, &form.otp));
@@ -2342,10 +2358,11 @@ fn draw_history(frame: &mut Frame, app: &App) {
             .modified
             .map(local)
             .unwrap_or_else(|| "unknown".to_string());
+        // A fixed mask, as the detail pane uses: the length of an old password is a clue to it.
         let secret = if history.reveal {
             row.password.clone()
         } else {
-            "•".repeat(row.password.chars().count().min(24))
+            "••••••••".to_string()
         };
         let head = truncate(&format!("{when}  {}", row.username), inner / 2);
         lines.push(Line::from(vec![
@@ -2410,17 +2427,12 @@ fn draw_fields(frame: &mut Frame, app: &App) {
                 value,
                 secret,
             } => {
-                /* Masked to its own length, and only while it is a secret:
-                the same rule the password row follows, so `*` means one
-                thing everywhere. */
-                let resolved = match secret {
-                    true => revealed(app, value),
-                    false => shown(app, value),
-                };
-                let shown = if *secret && !fields.reveal {
-                    "•".repeat(resolved.chars().count().min(24))
-                } else {
-                    resolved
+                // A fixed mask while it is a secret, as the password row has, so `*` means one thing
+                // everywhere and the length gives nothing away. Masked, it is not resolved at all.
+                let shown = match (*secret, fields.reveal) {
+                    (true, false) => "••••••••".to_string(),
+                    (true, true) => revealed(app, value),
+                    (false, _) => shown(app, value),
                 };
                 (name.clone(), shown, if *secret { p.muted } else { p.text })
             }
@@ -2632,6 +2644,11 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
         Line::from(p.faint(truncate(&format!(" {file}"), 60))),
         Line::default(),
         row(
+            "current",
+            &rekey.current,
+            rekey.field == crate::app::RekeyField::Current,
+        ),
+        row(
             "new",
             &rekey.password,
             rekey.field == crate::app::RekeyField::New,
@@ -2642,16 +2659,15 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
             rekey.field == crate::app::RekeyField::Again,
         ),
     ];
+    if rekey.current.is_empty() && app.session.quick_here() {
+        lines.push(Line::from(
+            p.faint(format!(" {:<LABEL$}empty uses Touch ID", "")),
+        ));
+    }
     /* Strength on the way in, the same estimate the entry form gives: a
     master password is the one worth measuring before it is committed. */
     if !rekey.password.is_empty() {
-        let bits = crate::generator::typed_bits(&rekey.password);
-        let word = crate::generator::strength(bits);
-        let ink = if bits < 60.0 { p.warn } else { p.cursor };
-        lines.push(Line::from(vec![
-            p.faint(format!(" {:<LABEL$}", "")),
-            Span::styled(format!("~{bits:.0} bits · {word}"), Style::new().fg(ink)),
-        ]));
+        lines.push(strength_line(&p, &rekey.password));
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
@@ -2758,6 +2774,23 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn creating_a_vault_shows_how_strong_the_master_password_is() {
+        let mut t = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut app = App::new();
+        app.db_path = Some(std::path::PathBuf::from("/tmp/new-vault.kdbx"));
+        app.unlock_new = true;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(
+            !screen(&t).join("\n").contains("bits"),
+            "a strength for nothing typed"
+        );
+        app.unlock_password = "a".into();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let joined = screen(&t).join("\n");
+        assert!(joined.contains("bits"), "{joined}");
     }
 
     /* The frame's contract in one test: the wordmark, the lock question, and
@@ -3424,7 +3457,7 @@ mod tests {
             app.copy_rows
                 .iter()
                 .find(|(_, w)| *w == what)
-                .map(|(y, _)| *y)
+                .map(|(r, _)| r.y)
         }
         let user_y = at(&app, app::CopyRow::Username).expect("no username row");
         let pass_y = at(&app, app::CopyRow::Password).expect("no password row");
@@ -3488,14 +3521,15 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(110, height)).unwrap();
             t.draw(|f| draw(f, &mut app)).unwrap();
             let rows = screen(&t);
-            for (y, what) in &app.copy_rows {
+            for (rect, what) in &app.copy_rows {
+                let y = rect.y;
                 assert!(
-                    (*y as usize) < rows.len(),
+                    (y as usize) < rows.len(),
                     "{what:?} is clickable at row {y} on a {height}-row screen"
                 );
                 /* And the row it points at is really that field's, not a
                 stamp or the hint line that slid up into its place. */
-                let line = &rows[*y as usize];
+                let line = &rows[y as usize];
                 let wants = match what {
                     app::CopyRow::Username => "octo",
                     app::CopyRow::Password => "••••",
@@ -3583,7 +3617,7 @@ mod tests {
             .copy_rows
             .iter()
             .find(|(_, w)| *w == app::CopyRow::Username)
-            .map(|(y, _)| *y)
+            .map(|(r, _)| r.y)
             .unwrap();
         assert!(
             screen(&t)[user_y as usize].contains("user"),
@@ -3594,7 +3628,7 @@ mod tests {
         in a test environment, so the copy itself may fail — the row lights
         either way, because a row that stayed dark reads as a click the app
         missed. */
-        app.click(app.copy_rows[0].0.max(1), user_y);
+        app.click(app.copy_rows[0].0.x + 1, user_y);
         assert!(app.glowing(app::CopyRow::Username));
         t.draw(|f| draw(f, &mut app)).unwrap();
         let lit = &screen(&t)[user_y as usize];
@@ -3650,6 +3684,12 @@ mod tests {
         assert!(
             !joined.contains("8888-4444"),
             "a protected field drew in the clear"
+        );
+        // Eight bullets whatever the length: the nine-character value does not show as nine.
+        assert!(joined.contains("••••••••"), "{joined}");
+        assert!(
+            !joined.contains("•••••••••"),
+            "the mask gave away the length: {joined}"
         );
         assert!(joined.contains("AC-9"), "{joined}");
         // A file says how big it is, which is the only thing to say about bytes.

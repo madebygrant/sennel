@@ -80,8 +80,32 @@ async fn prefs(desk: Shared<'_>) -> Result<Prefs, String> {
 }
 
 #[tauri::command]
-async fn set_pref(desk: Shared<'_>, key: String, value: PrefValue) -> Result<Note, String> {
-    off_main(&desk, move |d| d.set_pref(&key, value)).await?
+async fn set_pref(
+    app: AppHandle,
+    desk: Shared<'_>,
+    key: String,
+    value: PrefValue,
+) -> Result<Note, String> {
+    // Asked here, natively, not by the page: a script there could answer its own question.
+    off_main(&desk, move |d| {
+        // Locked, set_pref refuses it anyway, so the question would have no point.
+        let question = d
+            .lowers_protection(&key, &value)
+            .filter(|_| d.session().is_open());
+        if let Some(question) = question {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+            let yes = app
+                .dialog()
+                .message(question)
+                .buttons(MessageDialogButtons::OkCancel)
+                .blocking_show();
+            if !yes {
+                return Ok(desk::info("unchanged"));
+            }
+        }
+        d.set_pref(&key, value)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -152,8 +176,13 @@ async fn cycle_sort(desk: Shared<'_>) -> Result<Note, String> {
 
 // The password arrives as a JS string, which cannot be wiped on that side; Rust wipes its copies.
 #[tauri::command]
-async fn rekey(desk: Shared<'_>, password: String, confirm: String) -> Result<Reply, String> {
-    off_main(&desk, move |d| d.rekey(password, confirm)).await
+async fn rekey(
+    desk: Shared<'_>,
+    current: String,
+    password: String,
+    confirm: String,
+) -> Result<Reply, String> {
+    off_main(&desk, move |d| d.rekey(current, password, confirm)).await
 }
 
 #[tauri::command]
@@ -262,6 +291,8 @@ async fn add_field(
     value: String,
     kind: String,
 ) -> Result<Reply, String> {
+    // Wiped once used, as `edit_field`'s is: a new field defaults to the password kind.
+    let value = Zeroizing::new(value);
     off_main(&desk, move |d| d.add_field(&id, &name, &value, &kind)).await?
 }
 
@@ -326,8 +357,25 @@ async fn copy_env(desk: Shared<'_>, id: String) -> Result<Note, String> {
 }
 
 #[tauri::command]
-async fn attach(desk: Shared<'_>, id: String, name: String, path: String) -> Result<Reply, String> {
-    off_main(&desk, move |d| d.attach(&id, &name, &path)).await?
+async fn attach(
+    app: AppHandle,
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+) -> Result<Reply, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // Off the main thread, where a blocking picker is allowed; the lock is checked before asking.
+    off_main(&desk, move |d| {
+        if !d.session().is_open() {
+            return Ok(Reply::notes(vec![]));
+        }
+        let picked = app.dialog().file().blocking_pick_file();
+        match picked.and_then(|p| p.into_path().ok()) {
+            Some(path) => d.attach(&id, &name, &path),
+            None => Ok(Reply::notes(vec![])),
+        }
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -346,8 +394,37 @@ async fn extract(desk: Shared<'_>, id: String, name: String) -> Result<Note, Str
 }
 
 #[tauri::command]
-async fn agent_give(desk: Shared<'_>, id: String, name: String) -> Result<Note, String> {
-    off_main(&desk, move |d| d.agent_give(&id, &name)).await?
+async fn agent_give(
+    app: AppHandle,
+    desk: Shared<'_>,
+    id: String,
+    name: String,
+) -> Result<Note, String> {
+    // It works with the ssh_agent setting off, as `g` does in the terminal app, so the first key of
+    // an unlock is confirmed natively: a script in the page cannot answer a native dialog.
+    off_main(&desk, move |d| {
+        if !d.agent_confirmed() {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+            let asked_under = d.unlock_count();
+            let question = format!(
+                "Give {} to ssh-agent? Until it expires or the vault locks, any program that can reach the agent can sign with it.",
+                sennel_core::vault::printable(&name)
+            );
+            let yes = app
+                .dialog()
+                .message(question)
+                .buttons(MessageDialogButtons::OkCancel)
+                .blocking_show();
+            if !yes {
+                return Ok(desk::info("not given"));
+            }
+            if !d.confirm_agent(asked_under) {
+                return Ok(desk::info("the vault locked meanwhile · not given"));
+            }
+        }
+        d.agent_give(&id, &name)
+    })
+    .await?
 }
 
 // The window asked and the user chose to lose what could not be saved.
@@ -376,6 +453,18 @@ fn route_quit(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+// Only the bundled page, and the dev server in a debug build. The content security policy does not
+// cover top-level navigation, so a script in the page could otherwise leave carrying what it read.
+fn own_page(url: &tauri::Url) -> bool {
+    match (url.scheme(), url.host_str()) {
+        ("tauri", Some("localhost")) => true,
+        ("http" | "https", Some("tauri.localhost")) => true,
+        ("http", Some("localhost")) => cfg!(debug_assertions) && url.port() == Some(5173),
+        ("about", None) => url.as_str() == "about:blank",
+        _ => false,
+    }
 }
 
 // Whether a close or quit has to stop and ask first.
@@ -414,6 +503,11 @@ pub fn run(context: tauri::Context) {
     }));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("stay")
+                .on_navigation(|_, url| own_page(url))
+                .build(),
+        )
         .manage(Arc::clone(&desk))
         .manage(Leaving(AtomicBool::new(false)))
         .setup(move |app| {
@@ -440,7 +534,11 @@ pub fn run(context: tauri::Context) {
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(Duration::from_secs(1));
-                    if let Some(notes) = desk.lock_if_idle(Instant::now()) {
+                    // One panic must not end idle locking for the rest of the run.
+                    let idle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        desk.lock_if_idle(Instant::now())
+                    }));
+                    if let Ok(Some(notes)) = idle {
                         let _ = app.emit("locked", notes);
                     }
                 }

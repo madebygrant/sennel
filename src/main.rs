@@ -2240,8 +2240,11 @@ fn handle_rekey_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Esc => app.close_rekey(),
         KeyCode::Char('r') if ctrl => app.rekey_reveal(),
-        KeyCode::Tab | KeyCode::Down | KeyCode::Up => app.rekey_next_field(),
-        KeyCode::Enter => app.submit_rekey(),
+        KeyCode::Tab | KeyCode::Down => app.rekey_next_field(),
+        KeyCode::BackTab | KeyCode::Up => app.rekey_prev_field(),
+        // Enter moves on until the last box, where it submits, as the unlock screen does.
+        KeyCode::Enter if app.rekey_on_last_field() => app.submit_rekey(),
+        KeyCode::Enter => app.rekey_next_field(),
         KeyCode::Backspace => app.rekey_backspace(),
         KeyCode::Char(c) if !ctrl => app.rekey_insert(c),
         _ => {}
@@ -2952,6 +2955,8 @@ mod tests {
         let (mut app, tmp) = typed_then_locked(true);
         enter(&mut app);
         app.open_rekey();
+        // The current box left empty: Touch ID is sealed for this vault, so it stands in.
+        app.rekey_next_field();
         for c in "battery staple".chars() {
             app.rekey_insert(c);
         }
@@ -3284,13 +3289,13 @@ mod tests {
         app.open_mint();
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let before = app.stage.clone();
-        for (row, _) in &rows {
+        for (rect, _) in &rows {
             handle_mouse(
                 &mut app,
                 event::MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
-                    column: 60,
-                    row: *row,
+                    column: rect.x + 1,
+                    row: rect.y,
                     modifiers: KeyModifiers::NONE,
                 },
             );
@@ -3447,6 +3452,21 @@ mod tests {
     }
 
     #[test]
+    fn the_rekey_prompt_moves_both_ways_and_enter_submits_only_from_the_last_box() {
+        use crate::app::RekeyField;
+        let mut app = open_browser();
+        app.rekey = Some(crate::app::Rekey::default());
+        let field = |app: &App| app.rekey.as_ref().unwrap().field;
+        assert_eq!(field(&app), RekeyField::Current);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(field(&app), RekeyField::New, "enter on current submitted");
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(field(&app), RekeyField::Current, "up moved down");
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(field(&app), RekeyField::Again);
+    }
+
+    #[test]
     fn ctrl_c_asks_first_on_every_vault_screen_with_unsaved_changes() {
         use crate::app::Confirm;
         let screens: [fn(&mut App); 4] = [
@@ -3590,7 +3610,7 @@ mod tests {
         open_menu(&mut app, &mut t, crate::app::MenuId::Entry);
         let row = (0..app.menu_shown)
             .filter_map(|n| app.menu_row(n))
-            .find(|at| app.copy_rows.iter().any(|(y, _)| *y == at.y))
+            .find(|at| app.copy_rows.iter().any(|(r, _)| r.y == at.y))
             .expect("no menu row shares a screen row with a copy row");
         left_click(&mut app, row.x + 1, row.y);
         assert_eq!(app.copied, None, "the click copied through the menu");
@@ -3766,8 +3786,8 @@ mod tests {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         let entries = app.entry_area;
-        // A row holding both an entry and a copy target, which is what `click` would copy from.
-        let row = app.copy_rows[0].0;
+        // A row holding both an entry and a copy target, which is what `click` used to copy from.
+        let row = app.copy_rows[0].0.y;
         assert!(
             entries.y <= row && row < entries.y + 6,
             "no entry row beside a copy row"
@@ -3781,6 +3801,37 @@ mod tests {
         t.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(app.menu_bar.is_empty());
         assert_eq!(app.menu, Some(crate::app::MenuId::Entry));
+    }
+
+    #[test]
+    fn a_left_click_on_a_list_row_beside_the_password_line_selects_and_copies_nothing() {
+        let mut vault = crate::vault::Vault::new();
+        let root = vault.root_id();
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            vault
+                .create_entry(&root, name, "octo", "vault-password", "", "")
+                .unwrap();
+        }
+        let mut app = App::new();
+        app.open_vault(vault);
+        app.switch_pane();
+        app.step_pane(true);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 18)).unwrap();
+        t.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let entries = app.entry_area;
+        let (pass, _) = *app
+            .copy_rows
+            .iter()
+            .find(|(_, w)| *w == crate::app::CopyRow::Password)
+            .unwrap();
+        assert!(
+            entries.y <= pass.y && pass.y < entries.bottom(),
+            "no list row beside the password line"
+        );
+        let before = app.entry_cursor;
+        left_click(&mut app, entries.x + 1, pass.y);
+        assert_eq!(app.copied, None, "a click on the list copied the password");
+        assert_ne!(app.entry_cursor, before, "the click did not select the row");
     }
 
     #[test]

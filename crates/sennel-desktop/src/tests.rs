@@ -352,16 +352,20 @@ fn a_new_master_password_opens_the_file_and_the_old_one_does_not() {
     desk.unlock("old".into(), None, Some("old".into()));
     assert!(desk.status().open);
 
-    let empty = desk.rekey(String::new(), String::new());
+    let empty = desk.rekey("old".into(), String::new(), String::new());
     assert!(!empty.ok, "an empty password was taken");
-    let differ = desk.rekey("new".into(), "neu".into());
+    let differ = desk.rekey("old".into(), "new".into(), "neu".into());
     assert!(
         !differ.ok && differ.notes[0].text.contains("differ"),
         "{:?}",
         differ.notes
     );
 
-    let done = desk.rekey("new".into(), "new".into());
+    // Without the current password, from the page or anyone at the window, nothing changes.
+    let guessed = desk.rekey("guess".into(), "new".into(), "new".into());
+    assert!(!guessed.ok && guessed.notes[0].text.contains("not the current password"));
+
+    let done = desk.rekey("old".into(), "new".into(), "new".into());
     assert!(
         done.ok && done.notes[0].text.contains("master password changed"),
         "{:?}",
@@ -380,6 +384,37 @@ fn a_new_master_password_opens_the_file_and_the_old_one_does_not() {
 }
 
 #[test]
+fn an_open_vault_cannot_be_unlocked_over_or_lose_its_key_file() {
+    let path = std::env::temp_dir().join(format!("sennel-over-{}.kdbx", std::process::id()));
+    let key = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/keyfile4.key"
+    );
+    let _ = std::fs::remove_file(&path);
+    let desk = Desk::new(Settings::default(), None);
+    desk.choose(&path.display().to_string()).unwrap();
+    desk.unlock("old".into(), Some(key.into()), Some("old".into()));
+    assert!(desk.status().open);
+
+    // As a script in the page could call them: none changes what is open or how it is keyed.
+    let again = desk.unlock("x".into(), None, None);
+    assert!(
+        again.notes[0].text.contains("already open"),
+        "{:?}",
+        again.notes
+    );
+    assert!(desk.choose("/tmp/elsewhere.kdbx").is_err());
+    let done = desk.rekey("old".into(), "new".into(), "new".into());
+    assert!(done.notes[0].text.contains("key file"), "{:?}", done.notes);
+    desk.lock();
+    assert_eq!(
+        desk.unlock("new".into(), Some(key.into()), None).notes[0].level,
+        Level::Info
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_new_master_password_keeps_the_key_file_in_the_key() {
     let path = std::env::temp_dir().join(format!("sennel-rekey-kf-{}.kdbx", std::process::id()));
     let key = concat!(
@@ -391,7 +426,7 @@ fn a_new_master_password_keeps_the_key_file_in_the_key() {
     desk.choose(&path.display().to_string()).unwrap();
     desk.unlock("old".into(), Some(key.into()), Some("old".into()));
     assert!(desk.status().open);
-    let done = desk.rekey("new".into(), "new".into());
+    let done = desk.rekey("old".into(), "new".into(), "new".into());
     assert!(done.notes[0].text.contains("key file"), "{:?}", done.notes);
     desk.lock();
     let without = desk.unlock("new".into(), None, None);
@@ -977,6 +1012,7 @@ fn the_lock_timeout_is_written_into_the_config_file() {
         },
         None,
     );
+    desk.session().open(vault());
     let note = desk
         .set_pref("lock_timeout", PrefValue::Number(900))
         .unwrap();
@@ -992,6 +1028,7 @@ fn the_lock_timeout_is_written_into_the_config_file() {
 #[test]
 fn a_lock_timeout_past_a_week_is_refused() {
     let desk = Desk::new(Settings::default(), None);
+    desk.session().open(vault());
     let note = desk
         .set_pref("lock_timeout", PrefValue::Number(8 * 24 * 3600))
         .unwrap();
@@ -1002,6 +1039,7 @@ fn a_lock_timeout_past_a_week_is_refused() {
 #[test]
 fn each_setting_applies_at_once_and_reads_back() {
     let desk = Desk::new(Settings::default(), None);
+    desk.session().open(vault());
     let set = |key: &str, value| desk.set_pref(key, value).unwrap();
     assert!(
         set("clipboard_timeout", PrefValue::Number(90))
@@ -1075,6 +1113,14 @@ fn each_setting_is_written_into_the_config_file() {
         },
         None,
     );
+    // Turning the idle lock off weakens protection, which is refused until a vault is unlocked.
+    assert_eq!(
+        desk.set_pref("lock_timeout", PrefValue::Number(0))
+            .unwrap()
+            .text,
+        "unlock first to change that"
+    );
+    desk.session().open(vault());
     desk.set_pref("clipboard_timeout", PrefValue::Number(45))
         .unwrap();
     desk.set_pref("single_keys", PrefValue::Flag(false))
@@ -1093,6 +1139,7 @@ fn each_setting_is_written_into_the_config_file() {
 #[test]
 fn touch_id_is_a_setting_only_on_a_mac() {
     let desk = Desk::new(Settings::default(), None);
+    desk.session().open(vault());
     let note = desk.set_pref("touch_id", PrefValue::Flag(true)).unwrap();
     if cfg!(target_os = "macos") {
         assert!(note.text.starts_with("Touch ID turns on"), "{note:?}");
@@ -1103,4 +1150,85 @@ fn touch_id_is_a_setting_only_on_a_mac() {
         assert_eq!(note.level, Level::Warn);
         assert_eq!(desk.prefs().touch_id, None);
     }
+}
+
+#[test]
+fn the_window_may_navigate_only_to_its_own_page() {
+    let ok = |u: &str| crate::own_page(&tauri::Url::parse(u).unwrap());
+    assert!(ok("tauri://localhost/index.html"));
+    assert!(ok("http://tauri.localhost/"));
+    assert!(ok("about:blank"));
+    for away in [
+        "https://attacker.example/?d=secret",
+        "http://localhost:8080/",
+        "file:///etc/passwd",
+        "tauri://elsewhere/",
+        "data:text/html,hi",
+        "javascript:alert(1)",
+    ] {
+        assert!(!ok(away), "{away}");
+    }
+}
+
+#[test]
+fn attach_reads_only_while_open_and_names_the_file_after_itself() {
+    let file = std::env::temp_dir().join(format!("sennel-attach-{}.txt", std::process::id()));
+    std::fs::write(&file, b"bytes").unwrap();
+    let desk = Desk::new(Settings::default(), None);
+    let locked = desk
+        .attach("00000000-0000-0000-0000-000000000000", "", &file)
+        .unwrap();
+    assert_eq!(locked.notes[0].text, "locked");
+
+    desk.session().open(vault());
+    let id = desk.entries(None, Some("checking")).unwrap()[0].id.clone();
+    desk.attach(&id, "", &file).unwrap();
+    let name = file.file_name().unwrap().to_str().unwrap();
+    assert!(desk.fields(&id).unwrap().iter().any(|r| r.name == name));
+    std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn an_agent_confirmation_counts_only_for_the_unlock_it_was_asked_under() {
+    let path = std::env::temp_dir().join(format!("sennel-agent-ok-{}.kdbx", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let desk = Desk::new(Settings::default(), None);
+    desk.choose(&path.display().to_string()).unwrap();
+    desk.unlock("pw".into(), None, Some("pw".into()));
+    let asked = desk.unlock_count();
+    // The vault locks and opens again while the dialog is up: the answer belongs to neither.
+    desk.lock();
+    desk.unlock("pw".into(), None, None);
+    assert!(!desk.confirm_agent(asked));
+    assert!(!desk.agent_confirmed());
+    assert!(desk.confirm_agent(desk.unlock_count()));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn any_setting_that_weakens_protection_needs_confirming_and_an_open_vault() {
+    let desk = Desk::new(
+        Settings {
+            backups: 3,
+            ..Settings::default()
+        },
+        None,
+    );
+    let weaker = |key: &str, value: PrefValue| desk.lowers_protection(key, &value).is_some();
+    assert!(
+        weaker("lock_timeout", PrefValue::Number(604_800)),
+        "a week-long lock"
+    );
+    assert!(weaker("lock_timeout", PrefValue::Number(0)));
+    assert!(
+        !weaker("lock_timeout", PrefValue::Number(60)),
+        "a shorter lock is stronger"
+    );
+    assert!(weaker("clipboard_timeout", PrefValue::Number(3600)));
+    assert!(weaker("backups", PrefValue::Number(1)));
+    assert!(!weaker("single_keys", PrefValue::Flag(false)));
+    let refused = desk
+        .set_pref("lock_timeout", PrefValue::Number(604_800))
+        .unwrap();
+    assert_eq!(refused.text, "unlock first to change that");
 }

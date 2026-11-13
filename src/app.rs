@@ -384,6 +384,7 @@ pub struct Audit {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RekeyField {
     #[default]
+    Current,
     New,
     Again,
 }
@@ -393,6 +394,9 @@ and both are zeroized on drop like every other typed secret — this prompt
 holds the only plaintext copy of what is about to become the key to
 everything. */
 pub struct Rekey {
+    // The password the vault is open with: changing it must not be open to whoever finds the
+    // session unlocked. Empty with Touch ID ready means the fingerprint.
+    pub current: String,
     pub password: String,
     pub confirm: String,
     pub field: RekeyField,
@@ -406,6 +410,7 @@ pub struct Rekey {
 impl Default for Rekey {
     fn default() -> Self {
         Rekey {
+            current: secret_box(),
             password: secret_box(),
             confirm: secret_box(),
             field: RekeyField::default(),
@@ -418,6 +423,7 @@ impl Default for Rekey {
 impl Rekey {
     /// What `Drop` does, observable on a live value. See `Form::wipe`.
     pub fn wipe(&mut self) {
+        self.current.zeroize();
         self.password.zeroize();
         self.confirm.zeroize();
     }
@@ -685,6 +691,9 @@ pub struct App {
     from a leak. `*` flips it and says which way, so the key never reads
     as dead. */
     pub show_password: bool,
+    // The entry `*` was pressed on. A reveal is consent for that one entry, so moving the cursor
+    // by any path (keys, a click, a search, a delete) shows the next one masked.
+    revealed_for: Option<EntryId>,
     /* Enter's detail popup: the side pane wants 100 columns, and a terminal
     opens with 80. */
     pub detail: bool,
@@ -702,7 +711,9 @@ pub struct App {
     The layout is the only thing that knows where a row landed — it moves
     with the url, the notes, the code and the expiry all being optional —
     so the draw records it rather than the click recomputing it. */
-    pub copy_rows: Vec<(u16, CopyRow)>,
+    // Where on screen each copyable line is. A rectangle, not a row: list rows share screen rows with
+    // the detail pane, and a click on one must select it, not copy the field beside it.
+    pub copy_rows: Vec<(Rect, CopyRow)>,
     /// Where the header drew each menu label this frame, for `click`.
     pub menu_bar: Vec<(Rect, MenuId)>,
     pub menu: Option<MenuId>,
@@ -830,6 +841,7 @@ impl App {
             entry_scroll: 0,
             viewport: 1,
             show_password: false,
+            revealed_for: None,
             detail: false,
             wide: false,
             heads: false,
@@ -997,10 +1009,16 @@ impl App {
             self.warn("no detail pane this narrow  ·  enter opens the entry");
             return;
         }
-        self.show_password = !self.show_password;
+        self.show_password = !self.password_shown();
+        self.revealed_for = self.entry_cursor;
         if self.show_password {
             self.warn("password shown  ·  * hides it");
         }
+    }
+
+    /// Whether the detail shows the password: only for the entry `*` was pressed on.
+    pub fn password_shown(&self) -> bool {
+        self.show_password && self.revealed_for == self.entry_cursor
     }
 
     /* Enter on the browser. On the groups pane it opens the group — unfold it
@@ -2597,7 +2615,8 @@ impl App {
     pub fn click(&mut self, column: u16, row: u16) {
         /* Before the panes, because a copy row can sit over the detail pane
         and a click there means the field, not a list selection. */
-        if let Some((_, what)) = self.copy_rows.iter().find(|(at, _)| *at == row).copied() {
+        let at = Position { x: column, y: row };
+        if let Some((_, what)) = self.copy_rows.iter().find(|(r, _)| r.contains(at)).copied() {
             self.copy_row(what);
             return;
         }
@@ -3818,14 +3837,30 @@ impl App {
     }
 
     pub fn rekey_next_field(&mut self) {
+        self.rekey_step(true);
+    }
+
+    pub fn rekey_prev_field(&mut self) {
+        self.rekey_step(false);
+    }
+
+    pub fn rekey_on_last_field(&self) -> bool {
+        self.rekey
+            .as_ref()
+            .is_some_and(|r| r.field == RekeyField::Again)
+    }
+
+    fn rekey_step(&mut self, forward: bool) {
         let Some(rekey) = &mut self.rekey else {
             return;
         };
-        rekey.field = match rekey.field {
-            RekeyField::New => RekeyField::Again,
-            RekeyField::Again => RekeyField::New,
+        rekey.field = match (rekey.field, forward) {
+            (RekeyField::Current, true) | (RekeyField::Again, false) => RekeyField::New,
+            (RekeyField::New, true) | (RekeyField::Current, false) => RekeyField::Again,
+            (RekeyField::Again, true) | (RekeyField::New, false) => RekeyField::Current,
         };
         rekey.caret = match rekey.field {
+            RekeyField::Current => rekey.current.chars().count(),
             RekeyField::New => rekey.password.chars().count(),
             RekeyField::Again => rekey.confirm.chars().count(),
         };
@@ -3843,6 +3878,7 @@ impl App {
         };
         let caret = rekey.caret;
         let field = match rekey.field {
+            RekeyField::Current => &mut rekey.current,
             RekeyField::New => &mut rekey.password,
             RekeyField::Again => &mut rekey.confirm,
         };
@@ -3863,6 +3899,7 @@ impl App {
         }
         let caret = rekey.caret;
         let field = match rekey.field {
+            RekeyField::Current => &mut rekey.current,
             RekeyField::New => &mut rekey.password,
             RekeyField::Again => &mut rekey.confirm,
         };
@@ -3916,7 +3953,9 @@ impl App {
                 }
             }
         }
-        let done = self.session.rekey(&rekey.password, key_bytes.as_deref());
+        let done = self
+            .session
+            .rekey(&rekey.current, &rekey.password, key_bytes.as_deref());
         if let Some(b) = key_bytes.as_mut() {
             b.zeroize();
         }
@@ -3937,6 +3976,15 @@ impl App {
                     said.push_str(&format!("  ·  Touch ID off until a typed unlock  ·  {why}"));
                 }
                 self.say(said);
+            }
+            // The prompt stays, with the current box cleared, so a typo there costs one box.
+            Err(crate::vault::VaultError::WrongPassword) => {
+                let mut rekey = rekey;
+                rekey.current.zeroize();
+                rekey.field = RekeyField::Current;
+                rekey.caret = 0;
+                self.rekey = Some(rekey);
+                self.warn("that is not the current password  ·  password unchanged");
             }
             Err(e) => {
                 /* The vault still opens with the old password: `rekey` writes
@@ -4653,8 +4701,7 @@ impl App {
         };
         let note = match self.session.undo_steps().last()? {
             Undo::Edit { before, .. } => format!("undo: edit of {}", before.title()),
-            Undo::Delete { before, .. } => format!("undo: restore {}", before.title()),
-            Undo::Recycle { before, .. } => format!("undo: restore {}", before.title()),
+            Undo::Recycle { title, .. } => format!("undo: restore {title}"),
             Undo::RecycleGroup { title, .. } => format!("undo: restore {title}"),
             Undo::AddEntry { title, .. } => format!("undo: remove {title}"),
             Undo::Rename { before, .. } => format!("undo: name {before}"),
@@ -5508,6 +5555,38 @@ pub mod tests {
         assert!(app.stage.contains("shown"), "{}", app.stage);
         app.toggle_password();
         assert!(!app.show_password);
+    }
+
+    #[test]
+    fn a_reveal_does_not_follow_the_cursor_to_the_next_entry() {
+        let mut app = App::new();
+        let mut vault = Vault::new();
+        let root = vault.root_id();
+        for name in ["first", "second"] {
+            vault.create_entry(&root, name, "u", "pw", "", "").unwrap();
+        }
+        app.open_vault(vault);
+        app.wide = true;
+        app.switch_pane();
+        app.step_entry(true);
+        let first = app.entry_cursor;
+        app.toggle_password();
+        assert!(app.password_shown());
+        // Whichever way leads off this entry.
+        let down = {
+            app.step_entry(true);
+            app.entry_cursor != first
+        };
+        if !down {
+            app.step_entry(false);
+        }
+        assert_ne!(app.entry_cursor, first);
+        assert!(!app.password_shown(), "the next entry's password showed");
+        // Back on the entry it was revealed for, `*` hides rather than shows again.
+        app.step_entry(!down);
+        assert!(app.password_shown());
+        app.toggle_password();
+        assert!(!app.password_shown());
     }
 
     /* Below the detail pane's width there is nowhere for a revealed password
@@ -6618,6 +6697,10 @@ pub mod tests {
             "the prompt did not open: {}",
             app.stage
         );
+        for c in "first-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
         for c in "second-pw".chars() {
             app.rekey_insert(c);
         }
@@ -6660,6 +6743,10 @@ pub mod tests {
         app.try_unlock(&mut typed, None);
 
         app.open_rekey();
+        for c in "first-pw".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
         for c in "second-pw".chars() {
             app.rekey_insert(c);
         }
@@ -6698,6 +6785,32 @@ pub mod tests {
         assert!(app.rekey.is_some(), "an empty password closed the prompt");
         app.expire_now();
         assert!(app.stage.contains("empty"), "{}", app.stage);
+
+        // A wrong current password keeps the prompt, clears that box and changes nothing.
+        for c in "guess".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
+        for c in "taken-over".chars() {
+            app.rekey_insert(c);
+        }
+        app.rekey_next_field();
+        for c in "taken-over".chars() {
+            app.rekey_insert(c);
+        }
+        app.submit_rekey();
+        let rekey = app
+            .rekey
+            .as_ref()
+            .expect("a wrong current password closed the prompt");
+        assert!(rekey.current.is_empty());
+        assert_eq!(rekey.field, crate::app::RekeyField::Current);
+        app.expire_now();
+        assert!(
+            app.stage.contains("not the current password"),
+            "{}",
+            app.stage
+        );
 
         app.close_rekey();
         assert!(app.rekey.is_none());

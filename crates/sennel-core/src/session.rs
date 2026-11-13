@@ -42,22 +42,16 @@ pub enum Undo {
     /// changed the entry's files, since the snapshot's own references may point at nothing.
     Edit {
         id: EntryId,
-        before: Entry,
+        before: Box<Entry>,
         files: Option<Files>,
     },
-    /// An entry destroyed inside the bin, which only a snapshot brings back.
-    Delete {
-        id: EntryId,
-        parent: GroupId,
-        before: Entry,
-        files: Files,
-    },
-    // An entry moved to the bin. It still exists, so undo is a move home and the snapshot rides
-    // along only to name it.
+    // An entry moved to the bin. It still exists, so undo is a move home, and only its title is
+    // kept, to name it. A delete inside the bin has no undo: the docs promise it, and a snapshot
+    // would keep every secret the entry held for 32 more steps.
     Recycle {
         id: EntryId,
         parent: GroupId,
-        before: Entry,
+        title: String,
     },
     /// A group moved to the bin, with everything under it.
     RecycleGroup {
@@ -69,6 +63,17 @@ pub enum Undo {
     AddEntry { id: EntryId, title: String },
     /// A group rename that undo turns back.
     Rename { id: GroupId, before: String },
+}
+
+impl Undo {
+    fn entry(&self) -> Option<EntryId> {
+        match self {
+            Undo::Edit { id, .. } | Undo::Recycle { id, .. } | Undo::AddEntry { id, .. } => {
+                Some(*id)
+            }
+            Undo::RecycleGroup { .. } | Undo::Rename { .. } => None,
+        }
+    }
 }
 
 /// What an undo did, and where the cursor belongs afterwards.
@@ -725,30 +730,21 @@ impl<S: Seal> Session<S> {
     pub fn delete_entry(&mut self, id: EntryId) -> Result<bool, Delete> {
         let vault = self.vault.as_mut().ok_or(Delete::Missing)?;
         let parent = vault.parent_group_of_entry(&id).ok_or(Delete::Missing)?;
-        let before = vault
+        let title = vault
             .get_entry(&id)
-            .map(|e| e.clone())
+            .map(|e| e.title().to_string())
             .ok_or(Delete::Missing)?;
         let forever = vault.is_recycled(&id);
-        let files = if forever {
-            vault.files_of(&id)
-        } else {
-            Vec::new()
-        };
         match forever {
             true => vault.expunge_entry(&id),
             false => vault.recycle_entry(&id),
         }
         .map_err(Delete::Vault)?;
-        self.push_undo(match forever {
-            true => Undo::Delete {
-                id,
-                parent,
-                before,
-                files,
-            },
-            false => Undo::Recycle { id, parent, before },
-        });
+        match forever {
+            // Earlier steps for it would bring back, or claim to bring back, what was just destroyed.
+            true => self.undo.retain(|step| step.entry() != Some(id)),
+            false => self.push_undo(Undo::Recycle { id, parent, title }),
+        }
         Ok(forever)
     }
 
@@ -761,11 +757,18 @@ impl<S: Seal> Session<S> {
             None => (None, String::new()),
         };
         let forever = vault.in_recycle_bin(&id);
+        let destroyed = match forever {
+            true => vault.entries_under(&id),
+            false => Vec::new(),
+        };
         match forever {
             true => vault.delete_group_tree(&id),
             false => vault.recycle_group(&id),
         }
         .map_err(Delete::Vault)?;
+        // As for one entry: steps for what was destroyed would keep its secrets and restore nothing.
+        self.undo
+            .retain(|step| step.entry().is_none_or(|e| !destroyed.contains(&e)));
         // A cut pointing at the deleted group would paste nothing.
         if self.cut == Some(Cut::Group(id)) {
             self.cut = None;
@@ -894,7 +897,7 @@ impl<S: Seal> Session<S> {
                 if let Some(before) = before {
                     self.push_undo(Undo::Edit {
                         id,
-                        before,
+                        before: Box::new(before),
                         files: None,
                     });
                 }
@@ -946,25 +949,10 @@ impl<S: Seal> Session<S> {
                     title: before.title().to_string(),
                 }
             }
-            Undo::Delete {
-                id,
-                parent,
-                before,
-                files,
-            } => {
-                let _ = vault.restore_entry(&before, &parent, &files);
-                Undone::Entry {
-                    id,
-                    title: before.title().to_string(),
-                }
-            }
             // Out of the bin rather than back from the dead, so the entry keeps its id and history.
-            Undo::Recycle { id, parent, before } => {
+            Undo::Recycle { id, parent, title } => {
                 let _ = vault.move_entry(&id, &parent);
-                Undone::Entry {
-                    id,
-                    title: before.title().to_string(),
-                }
+                Undone::Entry { id, title }
             }
             Undo::RecycleGroup { id, parent, title } => {
                 let _ = vault.put_group_back(&id, &parent);
@@ -981,14 +969,29 @@ impl<S: Seal> Session<S> {
         })
     }
 
-    // The file on disk becomes the new password's, so nothing is left dirty. The Touch ID copy held
-    // the old password, so it is sealed again.
+    // `current` must be the open vault's password, or anyone at an unattended session could lock the
+    // owner out; empty with Touch ID sealed, the fingerprint stands in. The Touch ID copy is sealed
+    // again under the new one.
     pub fn rekey(
         &mut self,
+        current: &str,
         password: &str,
         key_file: Option<&[u8]>,
     ) -> Result<Rekeyed, VaultError> {
+        let unsealed = match (current.is_empty(), self.quick_here(), &self.quick) {
+            (true, true, Some((_, sealed))) => Some(sealed.open().map_err(|_| {
+                VaultError::Io("Touch ID did not confirm it · type the current password".into())
+            })?),
+            _ => None,
+        };
+        let current = match &unsealed {
+            Some(bytes) => std::str::from_utf8(bytes).map_err(|_| VaultError::WrongPassword)?,
+            None => current,
+        };
         let vault = self.vault.as_mut().ok_or(VaultError::Unsaved)?;
+        if !vault.holds_key(current, key_file)? {
+            return Err(VaultError::WrongPassword);
+        }
         let removed = vault.rekey(password, key_file)?;
         self.moved();
         self.dirty = false;
@@ -1020,7 +1023,11 @@ impl<S: Seal> Session<S> {
         let files = touches_files.then(|| vault.files_of(&id));
         let changed = change(vault)?;
         if let (true, Some(before)) = (changed, before) {
-            self.push_undo(Undo::Edit { id, before, files });
+            self.push_undo(Undo::Edit {
+                id,
+                before: Box::new(before),
+                files,
+            });
         }
         Ok(changed)
     }
@@ -1557,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_goes_to_the_bin_then_for_good_and_undo_brings_it_back() {
+    fn delete_goes_to_the_bin_then_for_good_and_only_the_first_has_an_undo() {
         let (mut s, banks, entry) = open();
         assert!(
             !s.delete_entry(entry).unwrap(),
@@ -1576,8 +1583,10 @@ mod tests {
             "a delete inside the bin was not for good"
         );
         assert!(s.vault.as_ref().unwrap().get_entry(&entry).is_none());
-        assert!(matches!(s.undo(), Some(Undone::Entry { title, .. }) if title == "checking"));
-        assert!(s.vault.as_ref().unwrap().get_entry(&entry).is_some());
+        // Gone for good, as the confirm said: no step brings it back, nor claims to.
+        assert!(s.undo.iter().all(|step| step.entry() != Some(entry)));
+        assert!(s.undo().is_none());
+        assert!(s.vault.as_ref().unwrap().get_entry(&entry).is_none());
     }
 
     #[test]
@@ -1879,32 +1888,22 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_restored_from_the_bin_gets_its_own_file_not_a_newer_ones() {
-        let file = Temp::new("undo-delete");
-        let mut s = session();
-        create(&mut s, &file, "pw").unwrap();
-        let root = s.vault.as_ref().unwrap().root_id();
-        let v = s.vault.as_mut().unwrap();
-        let doomed = v.create_entry(&root, "doomed", "u", "p", "", "").unwrap();
-        let other = v.create_entry(&root, "other", "u", "p", "", "").unwrap();
-        s.attach(doomed, "mine.txt", b"mine".to_vec()).unwrap();
-        s.persist(true);
+    fn a_group_deleted_for_good_takes_its_entries_undo_steps_with_it() {
+        let (mut s, banks, entry) = open();
+        s.add_field(entry, "pin", "1234").unwrap();
+        assert!(!s.delete_group(banks).unwrap());
+        assert!(s.delete_group(banks).unwrap());
+        assert!(s.undo.iter().all(|step| step.entry() != Some(entry)));
+    }
 
-        let mut s = reopen(&file);
-        assert!(!s.delete_entry(doomed).unwrap());
-        assert!(s.delete_entry(doomed).unwrap());
-        // The freed id is the next one handed out. Straight to the vault, so it is not an undo step.
-        let v = s.vault.as_mut().unwrap();
-        v.add_attachment(&other, "theirs.txt", b"theirs".to_vec())
-            .unwrap();
-        s.undo().unwrap();
-        assert_eq!(bytes_of(&s, doomed, "mine.txt"), Some(b"mine".to_vec()));
-        assert_eq!(bytes_of(&s, other, "theirs.txt"), Some(b"theirs".to_vec()));
-        s.persist(true);
-
-        let s = reopen(&file);
-        assert_eq!(bytes_of(&s, doomed, "mine.txt"), Some(b"mine".to_vec()));
-        assert_eq!(bytes_of(&s, other, "theirs.txt"), Some(b"theirs".to_vec()));
+    #[test]
+    fn a_real_delete_takes_its_earlier_undo_steps_and_their_secrets_with_it() {
+        let (mut s, _, entry) = open();
+        s.add_field(entry, "pin", "1234").unwrap();
+        s.attach(entry, "key.pem", b"secret".to_vec()).unwrap();
+        assert!(!s.delete_entry(entry).unwrap());
+        assert!(s.delete_entry(entry).unwrap());
+        assert!(s.undo.iter().all(|step| step.entry() != Some(entry)));
     }
 
     #[test]
@@ -2016,12 +2015,43 @@ mod tests {
     }
 
     #[test]
+    fn a_rekey_needs_the_current_password_or_a_fingerprint() {
+        let file = Temp::new("rekey-current");
+        let mut s = session();
+        create(&mut s, &file, "old").unwrap();
+        assert!(matches!(
+            s.rekey("wrong", "new", None),
+            Err(VaultError::WrongPassword)
+        ));
+        assert!(matches!(
+            s.rekey("", "new", None),
+            Err(VaultError::WrongPassword)
+        ));
+        assert!(
+            Vault::open(&file.0, "old", None).is_ok(),
+            "a refused rekey changed the file"
+        );
+
+        // With Touch ID sealed, an empty box asks the fingerprint, which stands in for the password.
+        let file = Temp::new("rekey-touch");
+        let mut s = session();
+        s.touch_id = true;
+        create(&mut s, &file, "old").unwrap();
+        s.rekey("", "new", None).unwrap();
+        assert!(Vault::open(&file.0, "new", None).is_ok());
+        REFUSE.set(Some(Refused::Again("cancelled".into())));
+        assert!(s.rekey("", "newer", None).is_err());
+        REFUSE.set(None);
+        assert!(Vault::open(&file.0, "new", None).is_ok());
+    }
+
+    #[test]
     fn the_copy_belongs_to_one_vault_and_follows_a_password_change() {
         let file = Temp::new("aim");
         let mut s = session();
         s.touch_id = true;
         create(&mut s, &file, "old").unwrap();
-        s.rekey("new", None).unwrap();
+        s.rekey("old", "new", None).unwrap();
         s.lock();
         s.aim(Some(Path::new("/elsewhere/other.kdbx")));
         assert!(
