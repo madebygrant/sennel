@@ -87,15 +87,19 @@ run has to say goes to stderr instead, and printing into a terminal is refused u
 
 ## What it makes
 
-Every class you ask for appears at least once. The rest is drawn from the combined pool, then the
-whole thing is shuffled so the forced characters are not sitting at the front in class order.
-Indices are rejection-sampled rather than taken modulo, so no character is likelier than another.
+Every class you ask for appears at least once. Every character is drawn from the combined pool, and
+a password missing a class is thrown away and drawn again, so every password that holds all the
+classes is equally likely. Indices are rejection-sampled rather than taken modulo, so no character is
+likelier than another.
 
 A passphrase is words off an embedded list (the EFF large wordlist, minus four hyphenated entries
 that would read as separators), joined with dashes: six words hold ~78 bits and read as words, not
 noise. A PIN is digits only — six hold ~20 bits, which is fine for a screen that locks after three
 tries and nothing more.
 
-The bit count is `length × log2(alphabet)`, priced against the pool actually drawn from. Excluding
+The bit count is exact: log2 of how many passwords the generator can return, which is every string
+of that length over the pool that holds each class. For long passwords that is within a fraction of
+a bit of `length × log2(alphabet)`. For short ones it is lower, nearly 4 bits lower at four
+characters and four classes. It is priced against the pool actually drawn from. Excluding
 the lookalikes shrinks the alphabet, and quoting the wider one would overstate the secret in the one
 direction that matters. Under 40 bits reads as `weak`, 60 `fair`, 80 `good`, above that `strong`.

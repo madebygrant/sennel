@@ -5,7 +5,7 @@ mod theme;
 mod touchid;
 mod ui;
 
-use sennel_core::harden::{core_dumps_off, harden};
+use sennel_core::harden::{attachable, core_dumps_off, harden};
 #[cfg(not(test))]
 use sennel_core::touchid;
 use sennel_core::{
@@ -55,7 +55,9 @@ fn main() -> Result<()> {
     reach that state with core dumps still enabled and, on Linux, still
     attachable. It sat further down, on the TUI path only, so a subcommand
     was one `return` away from missing it; up here a new one inherits it. */
-    harden();
+    for refused in harden() {
+        eprintln!("sennel: this system refused {refused} · run `sennel --check`");
+    }
     // A panic must not leave a password on the clipboard or a key in the agent. Only the main
     // thread's: a parser panic caught by `quietly` never reaches here, and other threads' are not
     // the end of the process. The terminal app chains its own hook in front of this one.
@@ -410,6 +412,13 @@ fn check(cfg: &Config) -> Result<()> {
             false => "core dumps STILL ON · this machine refused the limit",
         }
     );
+    match attachable() {
+        Some(false) => say!("          ptrace attach off"),
+        Some(true) => say!("          ptrace attach STILL ON · the system refused to turn it off"),
+        None => say!(
+            "          ptrace attach not blocked in this build · core dumps are the only guard"
+        ),
+    }
     say!("theme     {}", cfg.theme.name());
     for note in &cfg.theme_warnings {
         say!("          ! {note}");
@@ -2708,8 +2717,9 @@ mod tests {
     to be out of process to see a real `main`. */
     #[test]
     fn hardening_forbids_core_dumps() {
-        harden();
+        assert!(harden().is_empty(), "a hardening call was refused");
         assert!(core_dumps_off(), "core dumps are still allowed");
+        assert_ne!(attachable(), Some(true), "still attachable");
     }
 
     /* Esc on the lock screen unwinds nothing and ends nothing: it says what

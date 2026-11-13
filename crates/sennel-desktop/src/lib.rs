@@ -472,7 +472,9 @@ fn must_ask(app: &AppHandle) -> bool {
     !app.state::<Leaving>().0.load(Ordering::SeqCst) && app.state::<Arc<Desk>>().unsaved_or_busy()
 }
 
-pub fn run(context: tauri::Context) {
+// `refused` is what `harden` could not do. Launched from Finder or a desktop file nobody reads
+// stderr, so it is said in a dialog.
+pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
     // A panic on the main thread ends the app without its normal exit. A command's panic is caught
     // on its own thread and the vault stays open, so that one must not empty the agent.
     let previous = std::panic::take_hook();
@@ -512,6 +514,17 @@ pub fn run(context: tauri::Context) {
         .manage(Leaving(AtomicBool::new(false)))
         .setup(move |app| {
             let _ = handle.set(app.handle().clone());
+            if !refused.is_empty() {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                app.dialog()
+                    .message(format!(
+                        "This system refused {}. A crash or another program could read your \
+                         passwords out of Sennel's memory.",
+                        refused.join(" and ")
+                    ))
+                    .kind(MessageDialogKind::Warning)
+                    .show(|_| {});
+            }
             #[cfg(target_os = "macos")]
             route_quit(app.handle())?;
             // A `kill` or a logout goes through the normal exit, which wipes the clipboard and

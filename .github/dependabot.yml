@@ -5,3 +5,25 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Vendored with Sennel's patches in vendor/keepass; an upgrade carries them by hand.
+      - dependency-name: keepass
+      # Pinned because 0.5.39 and later do not build on macOS. Check new releases by hand.
+      - dependency-name: challenge_response
+      # Must match the major version keepass uses, so it moves with keepass.
+      - dependency-name: rust-argon2
+        update-types: ["version-update:semver-major"]
+      # The tauri crates and the @tauri-apps packages must match, so they are bumped together by hand.
+      - dependency-name: "tauri*"
+
+  - package-ecosystem: npm
+    directory: /crates/sennel-desktop/ui
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "@tauri-apps/*"

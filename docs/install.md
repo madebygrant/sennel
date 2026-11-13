@@ -39,6 +39,20 @@ install -m 755 "sennel-$v-$t/sennel" ~/.local/bin/
 On Linux, use `sha256sum -c` in place of `shasum -a 256 -c`. Any folder on your `PATH` works in
 place of `~/.local/bin`.
 
+### Checking where a file came from
+
+`SHA256SUMS` sits in the same release as the files, so it shows a download was not damaged, not who
+made it. Each release file also carries a GitHub build attestation: a signed statement of the
+repository, workflow and commit that built it. With the [GitHub CLI](https://cli.github.com) and any
+downloaded file:
+
+```sh
+gh attestation verify "sennel-$v-$t.tar.gz" --repo madebygrant/sennel
+```
+
+It fails for a file the release workflow did not build. Releases made before attestations were added
+have none.
+
 ### The desktop app
 
 - **Mac:** open the `.dmg` and drag Sennel to Applications. The builds have no Apple developer

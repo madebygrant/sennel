@@ -28,14 +28,18 @@ The form fills in the code box and shows which account the QR names, such as
 `for GitHub:ada@example.com`, with a live countdown. Then save as usual.
 
 - Rust reads the image. The page never sees it.
-- Sennel then clears the clipboard, because a picture of the QR code is the secret itself. A
-  screenshot of some other kind of QR code stays where it was.
+- Sennel then clears the clipboard, because a picture of the QR code is the secret itself. That
+  includes a one-time code it then refuses, such as a counter-based one. A screenshot of some other
+  kind of QR code stays where it was.
 - A setup page often shows more than one code, such as an app store link. Sennel picks the
   one-time code.
 - Codes drawn light on dark read as well as dark on light.
 - Sennel takes time-based codes only. It refuses a counter-based (HOTP) code or a web link, and
   says why.
-- It refuses images over 8192 pixels a side. Crop to the code.
+- It refuses images over 8192 pixels a side, whether dropped as a file or pasted from the
+  clipboard. Crop to the code.
+- A code's period must be between 1 second and a day, and its digits between 6 and 10. Anything
+  outside that is refused when you add it, and a stored one shows no code.
 
 ## Using a code
 

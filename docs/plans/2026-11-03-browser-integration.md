@@ -127,3 +127,17 @@ Two constraints shape the design:
 
 ## What can slip
 Waves 1 and 2 are the core of the first release: they get KeePassXC-Browser filling from Sennel with no extension of our own. Waves 3 and 4 build the Sennel extension from scratch, which is the slow part, and nothing before them depends on them, so they can take the time the rules need. Saving and passkeys wait until after the first release, and passkeys also wait until the KeePassXC passkey format has been checked against real vaults.
+
+## Security notes from the 2026-11-13 review
+This work has not started, so these are requirements for it rather than fixes to it.
+
+1. Pairing and per-site approval are native dialogs raised from Rust, never page modals a script in the webview could approve.
+2. Authenticate the socket peer: `LOCAL_PEERPID` plus a code-signature check on macOS, `SO_PEERCRED` on Linux. A `0700` socket still admits any process of the same user.
+3. Keep "always allow" inside the vault, not in the plain config file.
+4. The origin is whatever the extension reports, so the first-use prompt is the only check, and "always" removes it. Say so where the user chooses it.
+5. Only paired clients may bring the unlock screen forward, and the requests that do are rate-limited.
+6. Browser requests do not count as activity for the idle lock, and a prompt never holds the session mutex while it waits.
+7. Pin `allowed_origins` and `allowed_extensions` to verified store ids, and make sure the native-messaging manifest's binary path is not writable by the user.
+8. `get-totp` gets its own approval, since it puts the second factor behind the same pairing as the password.
+9. `get-databasehash` before pairing gives an unpaired client a stable identifier for the vault. Answer it only to paired clients.
+10. Create the socket's folder `0700` atomically, refuse an existing path the user does not own, and do not use shared `/tmp`.
