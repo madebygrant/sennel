@@ -2,6 +2,7 @@
 // terminal app and, later, the desktop one.
 
 pub mod agent;
+pub mod capped;
 pub mod clipboard;
 pub mod config;
 pub mod envfile;
@@ -9,9 +10,11 @@ pub mod export;
 pub mod generator;
 pub mod harden;
 pub mod import;
+pub mod kdfcap;
 pub mod migration;
 pub mod pwned;
 pub mod qr;
+pub mod quiet;
 pub mod search;
 pub mod session;
 pub mod sort;

@@ -54,6 +54,17 @@ removed, or one whose id was handed to another entry's file.
   that are gone and removes blobs nothing uses. Sennel also calls it after clearing an entry's
   history, so a file only the old versions used does not stay in the vault.
 
+## Reading a header's key derivation without running it
+
+`src/db/open.rs`, `Database::kdf_config_of`, with a `kdf_config_of` beside each format's parser in
+`src/format/kdb.rs`, `src/format/kdbx3.rs` and `src/format/kdbx4/parse.rs`.
+
+The crate runs the key derivation a header asks for before it checks the header's HMAC, so anyone
+who can write the file chooses how much work and memory an unlock takes. This returns the settings
+from the crate's own header parser without deriving anything, and Sennel refuses unreasonable ones
+first (`crates/sennel-core/src/kdfcap.rs`). Using the crate's parser, not a second one, means the
+settings checked are the ones that would run.
+
 ## The `aes` range is narrowed
 
 `Cargo.toml`, `[dependencies.aes]`: `"<0.9.3"` became `">=0.9, <0.9.3"`. As a path dependency the

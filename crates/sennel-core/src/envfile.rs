@@ -112,8 +112,10 @@ fn value(
     };
     let mut text = Zeroizing::new(start[1..].to_string());
     let mut used = 0;
+    // Where the last scan stopped, so each added line is scanned once, not the whole text again.
+    let mut scan = Scan::default();
     loop {
-        if let Some(end) = closing(&text, quote) {
+        if let Some(end) = scan.closing(&text, quote) {
             let after = text[end + 1..].trim();
             let comment = match after.strip_prefix('#') {
                 Some(c) => c.trim().to_string(),
@@ -151,16 +153,24 @@ fn unquoted(rest: &str) -> (Zeroizing<String>, String, usize) {
     (Zeroizing::new(rest.trim().to_string()), String::new(), 0)
 }
 
-fn closing(text: &str, quote: char) -> Option<usize> {
-    let mut escaped = false;
-    for (at, c) in text.char_indices() {
-        match c {
-            '\\' if quote == '"' && !escaped => escaped = true,
-            c if c == quote && !escaped => return Some(at),
-            _ => escaped = false,
+#[derive(Default)]
+struct Scan {
+    from: usize,
+    escaped: bool,
+}
+
+impl Scan {
+    fn closing(&mut self, text: &str, quote: char) -> Option<usize> {
+        for (at, c) in text[self.from..].char_indices() {
+            match c {
+                '\\' if quote == '"' && !self.escaped => self.escaped = true,
+                c if c == quote && !self.escaped => return Some(self.from + at),
+                _ => self.escaped = false,
+            }
         }
+        self.from = text.len();
+        None
     }
-    None
 }
 
 fn unescape(inner: &str) -> Zeroizing<String> {
@@ -878,6 +888,23 @@ export TOKEN='a b#c'
         assert_eq!(line.as_str(), "# K=\"a\\nb\"");
         let parsed = parse(&line);
         assert_eq!(names(&parsed), vec![("K", "K", "a\nb", true)]);
+    }
+
+    #[test]
+    fn a_quote_never_closed_across_a_full_size_paste_is_quick_to_refuse() {
+        let mut text = String::from("K=\"start\n");
+        while text.len() < MAX_BYTES - 16 {
+            text.push_str("more text on a line\n");
+        }
+        let start = std::time::Instant::now();
+        let parsed = parse(&text);
+        assert!(!parsed.refused.is_empty());
+        // Rescanning the whole value per added line took seconds here.
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

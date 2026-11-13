@@ -26,6 +26,11 @@ use crate::{
 use super::KDBX4InnerHeader;
 
 /// Open, decrypt and parse a KeePass database from a source and key elements
+/// SENNEL PATCH: the key derivation the header asks for, read without doing any of it.
+pub(crate) fn kdf_config_of(data: &[u8]) -> Option<KdfConfig> {
+    parse_outer_header(data).ok().map(|(header, _)| header.kdf_config)
+}
+
 pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
     let (config, header_attachments, mut inner_decryptor, xml) = decrypt_kdbx4(data, db_key)?;
 

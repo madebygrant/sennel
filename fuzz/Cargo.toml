@@ -64,3 +64,10 @@ path = "fuzz_targets/kdbx_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "kdf_cap"
+path = "fuzz_targets/kdf_cap.rs"
+test = false
+doc = false
+bench = false

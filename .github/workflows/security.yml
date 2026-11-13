@@ -45,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [import_csv, envfile, keeagent_settings, otp_seed, qr_decode, kdbx_open]
+        target: [import_csv, envfile, keeagent_settings, otp_seed, qr_decode, kdbx_open, kdf_cap]
     env:
       # Dated like rust-toolchain.toml, so a new nightly cannot fail the job without a commit.
       NIGHTLY: nightly-2026-10-01

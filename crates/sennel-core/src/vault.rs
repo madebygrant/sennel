@@ -116,10 +116,13 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
             return Err("only time-based codes (totp) are supported".into());
         }
         let url = with_digits(input);
-        return url
+        let totp = url
             .parse::<keepass::db::TOTP>()
-            .map(|_| url)
-            .map_err(|e| format!("{e}"));
+            .map_err(|e| format!("{e}"))?;
+        if !sane(&totp) {
+            return Err("that code's period or digit count is out of range".into());
+        }
+        return Ok(url);
     }
     /* Groupings and hyphens are how the secret is printed, never part of it,
     and base32 is case-insensitive. */
@@ -166,10 +169,37 @@ a url written by a site that left `digits` out would produce codes that are
 the right secret and the wrong length. Spelled out on the way in and on the
 way to the screen, and never by rewriting what is stored. */
 fn with_digits(url: &str) -> String {
-    if url.contains("digits=") || !url.contains('?') {
+    let Some((_, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    // Exactly `digits`: keepass reads no other spelling, and falls back to 8 for `DIGITS=`.
+    let named = query
+        .split('&')
+        .any(|pair| pair.split('=').next() == Some("digits"));
+    if named {
         return url.to_string();
     }
     format!("{url}&digits=6")
+}
+
+// keepass takes any period and digit count. A period of 0 divides by zero and a large digit count
+// overflows or allocates gigabytes, both inside the crate, so anything outside what an
+// authenticator app would ever show is treated as no code at all.
+fn sane(totp: &keepass::db::TOTP) -> bool {
+    (1..=86_400).contains(&totp.period) && (6..=10).contains(&totp.digits)
+}
+
+fn parsed(url: &str) -> Option<keepass::db::TOTP> {
+    with_digits(url)
+        .parse::<keepass::db::TOTP>()
+        .ok()
+        .filter(sane)
+}
+
+/// The code a URL not yet saved on an entry gives right now, and the seconds it has left.
+pub fn totp_code_of(url: &str) -> Option<(String, u64)> {
+    let code = parsed(url)?.value_now().ok()?;
+    Some((code.code, code.valid_for.as_secs()))
 }
 
 /// Percent-encodes what a label may hold. Small by hand: the only characters
@@ -191,10 +221,7 @@ pub(crate) fn urlish(text: &str) -> String {
 /// `otp` as a field; without this an entry that has one looks like an entry
 /// that does not, and the user goes back to their phone.
 pub fn totp_now(entry: &EntryRef<'_>) -> Option<(String, u64)> {
-    let raw = entry.get_raw_otp_value()?;
-    let totp: keepass::db::TOTP = with_digits(raw).parse().ok()?;
-    let code = totp.value_now().ok()?;
-    Some((code.code, code.valid_for.as_secs()))
+    totp_code_of(entry.get_raw_otp_value()?)
 }
 
 /// Seconds each code lasts, and its digits. Codes roll over on multiples of the period since the
@@ -205,13 +232,13 @@ pub fn totp_shape(entry: &EntryRef<'_>) -> Option<(u64, u32)> {
 
 /// The same, for a URL not yet saved on an entry.
 pub fn totp_shape_of(url: &str) -> Option<(u64, u32)> {
-    let totp: keepass::db::TOTP = with_digits(url).parse().ok()?;
+    let totp = parsed(url)?;
     Some((totp.period, totp.digits))
 }
 
 /// Who a code is for, as the URL names it: usually `Issuer:account`.
 pub fn totp_label_of(url: &str) -> Option<String> {
-    let totp: keepass::db::TOTP = with_digits(url).parse().ok()?;
+    let totp = parsed(url)?;
     Some(totp.label.clone()).filter(|l| !l.is_empty())
 }
 
@@ -725,8 +752,14 @@ fn backup_path(dir: &Path, path: &Path, n: usize) -> PathBuf {
     for byte in whole.as_os_str().as_encoded_bytes() {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
+    // Cut only past what no longer fits a 255-byte file name beside the hash and `.kdbx.NN`, so
+    // every name that worked before stays the same. The hash keeps it unique.
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    dir.join(format!("{stem}-{hash:016x}.kdbx.{n}"))
+    let mut cut = stem.len().min(230);
+    while !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    dir.join(format!("{}-{hash:016x}.kdbx.{n}", &stem[..cut]))
 }
 
 /// The backups of `path` held in `dir`, newest first.
@@ -857,6 +890,8 @@ pub enum VaultError {
     ChangedOnDisk,
     /// A group would sit deeper than `MAX_GROUP_DEPTH`.
     TooDeep,
+    /// The header asks for more key-derivation work than `kdfcap` allows.
+    TooMuchWork(String),
     Io(String),
     Db(String),
 }
@@ -879,6 +914,10 @@ impl std::fmt::Display for VaultError {
             VaultError::WrongPassword => write!(f, "wrong password or key file"),
             VaultError::Unsaved => write!(f, "nothing to save to yet"),
             VaultError::ChangedOnDisk => write!(f, "the file changed on disk"),
+            VaultError::TooMuchWork(why) => write!(
+                f,
+                "this file asks for more key-derivation work than Sennel will do ({why}) · lower it in KeePassXC"
+            ),
             VaultError::TooDeep => write!(f, "groups can be nested {MAX_GROUP_DEPTH} deep at most"),
             VaultError::Io(e) => write!(f, "file error: {e}"),
             VaultError::Db(e) => write!(f, "database error: {e}"),
@@ -941,33 +980,23 @@ fn challenge_failure(why: &ChallengeResponseKeyError) -> VaultError {
     })
 }
 
-thread_local! {
-    static READING_DATABASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/* keepass 0.14 slices a malformed header without checking its length and panics, so a damaged
-file would take the whole app down. Installing the filter at the first read keeps it outermost:
-the TUI's hook, which restores the terminal, is already set by then and must not run for this. */
+// keepass 0.14 slices a malformed header without checking its length and panics, so a damaged
+// file would take the whole app down. Its key derivation runs before anything is authenticated, so
+// the work a header asks for is checked first.
 pub fn read_database(
     source: &mut dyn std::io::Read,
     key: DatabaseKey,
 ) -> Result<Database, VaultError> {
-    static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
-    QUIET_HOOK.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if !READING_DATABASE.get() {
-                previous(info);
-            }
-        }));
-    });
-    READING_DATABASE.set(true);
-    let read =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Database::open(source, key)));
-    READING_DATABASE.set(false);
-    match read {
-        Ok(opened) => opened.map_err(Vault::map_db_error),
-        Err(_) => Err(VaultError::Db("the file is damaged or not a vault".into())),
+    let mut file = Vec::new();
+    source
+        .read_to_end(&mut file)
+        .map_err(|e| VaultError::Io(e.to_string()))?;
+    if let Some(why) = crate::kdfcap::refusal(&file) {
+        return Err(VaultError::TooMuchWork(why));
+    }
+    match crate::quiet::quietly(|| Database::parse(&file, key)) {
+        Some(opened) => opened.map_err(Vault::map_db_error),
+        None => Err(VaultError::Db("the file is damaged or not a vault".into())),
     }
 }
 
@@ -1801,10 +1830,10 @@ impl Vault {
     "unlocked N entries" or search hit must not include deleted things. */
     pub fn recycled(&self) -> HashSet<EntryId> {
         let mut out = HashSet::new();
-        let Some(bin) = self.db.recycle_bin() else {
+        let Some(bin) = self.recycle_bin_id() else {
             return out;
         };
-        let mut stack = vec![bin.id()];
+        let mut stack = vec![bin];
         while let Some(id) = stack.pop() {
             let Some(group) = self.db.group(id) else {
                 continue;
@@ -2171,7 +2200,11 @@ impl Vault {
     /// The bin, if the file names one that still exists. A uuid pointing at a
     /// group somebody deleted is stale metadata, not a bin.
     pub fn recycle_bin_id(&self) -> Option<GroupId> {
-        self.db.recycle_bin().map(|g| g.id())
+        // A file that names the root as its bin would hide every entry and make every delete final.
+        self.db
+            .recycle_bin()
+            .map(|g| g.id())
+            .filter(|id| *id != self.root_id())
     }
 
     /// Whether this group is the bin or lives inside it. What the pane asks
@@ -5258,6 +5291,89 @@ mod tests {
             .attachment_by_name("id_rsa")
             .map(|a| a.data.get().clone());
         assert_eq!(bytes, Some(b"key".to_vec()));
+    }
+
+    #[test]
+    fn a_code_url_out_of_range_gives_no_code_and_no_panic() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "e", "u", "p", "", "").unwrap();
+        for bad in [
+            "period=0",
+            "period=86401",
+            "digits=0",
+            "digits=5",
+            "digits=64",
+            "digits=4000000000",
+        ] {
+            let url = format!("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&{bad}");
+            assert!(totp_url(&url, "t", "u").is_err(), "{bad} was accepted");
+            assert_eq!(totp_code_of(&url), None, "{bad}");
+            assert_eq!(totp_shape_of(&url), None, "{bad}");
+            // As a file from elsewhere would hold it, past the checks a typed seed gets.
+            v.set_otp(&id, Some(&url)).unwrap();
+            assert_eq!(totp_now(&v.get_entry(&id).unwrap()), None, "{bad}");
+        }
+        let fine = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=86400&digits=10";
+        assert_eq!(totp_shape_of(fine), Some((86_400, 10)));
+    }
+
+    #[test]
+    fn digits_named_outside_the_query_do_not_count() {
+        let url = "otpauth://totp/digits=8?secret=JBSWY3DPEHPK3PXP&issuer=digits%3D8";
+        assert_eq!(totp_shape_of(url), Some((30, 6)));
+        let said = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=8";
+        assert_eq!(totp_shape_of(said), Some((30, 8)));
+        // keepass ignores the upper-case spelling, so the default still has to be added.
+        let shouted = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&DIGITS=8";
+        assert_eq!(totp_shape_of(shouted), Some((30, 6)));
+    }
+
+    #[test]
+    fn a_file_that_names_the_root_as_its_bin_has_no_bin() {
+        let mut v = vault();
+        let root = v.root_id();
+        let id = v.create_entry(&root, "kept", "u", "p", "", "").unwrap();
+        v.db.meta.recyclebin_uuid = Some(root.uuid());
+        assert_eq!(v.recycle_bin_id(), None);
+        assert!(!v.is_recycled(&id));
+        assert_eq!(v.entry_count(), 1);
+        // A delete goes to a real bin, made fresh, and is not final.
+        v.recycle_entry(&id).unwrap();
+        let bin = v.recycle_bin_id().expect("a new bin");
+        assert_ne!(bin, root);
+        assert!(v.is_recycled(&id));
+    }
+
+    #[test]
+    fn a_long_vault_name_still_gets_backups() {
+        let dir = std::env::temp_dir().join(format!("sennel-longname-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.kdbx", "é".repeat(120)));
+        vault().save_as(&path, "pw", None).unwrap();
+        let mut v = Vault::open(&path, "pw", None).unwrap();
+        v.set_backups(2, &dir.join("backups"));
+        v.create_entry(&v.root_id(), "e", "u", "p", "", "").unwrap();
+        v.save().unwrap();
+        assert_eq!(backups_of(&dir.join("backups"), &path).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_header_asking_for_too_much_work_is_refused_before_any_is_done() {
+        // A real KeePassXC file with its AES round count raised past the limit. The header hash no
+        // longer matches, but nothing reads that far.
+        let mut file = std::fs::read(fixture("keepassxc3.kdbx")).unwrap();
+        let mut at = 12;
+        while file[at] != 6 {
+            at += 3 + usize::from(u16::from_le_bytes([file[at + 1], file[at + 2]]));
+        }
+        file[at + 3..at + 11].copy_from_slice(&u64::MAX.to_le_bytes());
+        let key = DatabaseKey::new().with_password("sennel-fixture");
+        let started = std::time::Instant::now();
+        let err = read_database(&mut std::io::Cursor::new(file), key).unwrap_err();
+        assert!(matches!(err, VaultError::TooMuchWork(_)), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

@@ -30,7 +30,12 @@ pub fn decode(width: usize, height: usize, rgba: &[u8]) -> Result<String, String
         .ok_or_else(|| NONE_FOUND.into())
 }
 
+// rqrr 0.11 asserts on some crafted images, so a decode that panics found nothing.
 fn texts(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<String> {
+    crate::quiet::quietly(|| decode_grids(width, height, rgba, invert)).unwrap_or_default()
+}
+
+fn decode_grids(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<String> {
     let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
         let at = (y * width + x) * 4;
         let [r, g, b, a] = [0, 1, 2, 3].map(|i| u32::from(rgba[at + i]));
@@ -63,7 +68,20 @@ pub fn from_clipboard() -> Result<String, String> {
         .map_err(|_| {
             "no image on the clipboard · copy a screenshot of the QR code first".to_string()
         })?;
+    fits(image.width, image.height)?;
     decode(image.width, image.height, &image.bytes)
+}
+
+// The file path's limit, for whatever another program put on the clipboard. arboard has already
+// decoded the image by now, so this bounds the QR search, not the memory that decode took.
+fn fits(width: usize, height: usize) -> Result<(), String> {
+    let side = MAX_SIDE as usize;
+    if width > side || height > side {
+        return Err(format!(
+            "that image is over {MAX_SIDE} pixels a side · crop closer to the code"
+        ));
+    }
+    Ok(())
 }
 
 pub fn clear_clipboard() {
@@ -101,6 +119,38 @@ pub fn from_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The fuzz target's encoding: width, height, then one bit per pixel.
+    fn from_bits(data: &[u8]) -> (usize, usize, Vec<u8>) {
+        let (width, height) = (usize::from(data[0]), usize::from(data[1]));
+        let rgba = (0..width * height)
+            .flat_map(|at| {
+                let dark = data[2..]
+                    .get(at / 8)
+                    .is_some_and(|b| b >> (at % 8) & 1 == 1);
+                let shade = if dark { 0 } else { 255 };
+                [shade, shade, shade, 255]
+            })
+            .collect();
+        (width, height, rgba)
+    }
+
+    #[test]
+    fn an_image_that_trips_rqrrs_assert_is_no_code_not_a_crash() {
+        let crash = include_bytes!("../../../fuzz/seeds/qr_decode/rqrr-geometry-assert.bin");
+        let (width, height, rgba) = from_bits(crash);
+        // Still a panic underneath, or this test proves nothing.
+        assert!(crate::quiet::quietly(|| decode_grids(width, height, &rgba, false)).is_none());
+        assert!(decode(width, height, &rgba).is_err());
+    }
+
+    #[test]
+    fn a_clipboard_image_is_held_to_the_same_size_limit_as_a_file() {
+        let side = MAX_SIDE as usize;
+        assert!(fits(side, side).is_ok());
+        assert!(fits(side + 1, 1).is_err());
+        assert!(fits(1, side + 1).is_err());
+    }
 
     #[test]
     fn a_blank_image_has_no_code() {

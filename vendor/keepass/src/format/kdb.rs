@@ -391,6 +391,14 @@ fn parse_entries(
     Ok(())
 }
 
+/// SENNEL PATCH: the key derivation the header asks for, read without doing any of it.
+pub(crate) fn kdf_config_of(data: &[u8]) -> Option<KdfConfig> {
+    let header = KDBHeader::try_from(data).ok()?;
+    Some(KdfConfig::Aes {
+        rounds: u64::from(header.transform_rounds),
+    })
+}
+
 pub(crate) fn parse_kdb(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
     let header = KDBHeader::try_from(data)?;
     let version = DatabaseVersion::KDB(header.subversion as u16);

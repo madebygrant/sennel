@@ -2129,15 +2129,8 @@ fn draw_form(frame: &mut Frame, app: &App) {
     confirm the setup — so the box answers with one before it is saved. */
     if form.otp_touched && !form.otp.trim().is_empty() {
         let note = match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
-            Ok(url) => match url
-                .parse::<keepass::db::TOTP>()
-                .ok()
-                .and_then(|t| t.value_now().ok())
-            {
-                Some(code) => (
-                    format!("{} · {}s", code.code, code.valid_for.as_secs()),
-                    p.cursor,
-                ),
+            Ok(url) => match crate::vault::totp_code_of(&url) {
+                Some((code, left)) => (format!("{code} · {left}s"), p.cursor),
                 None => ("cannot read the clock".to_string(), p.warn),
             },
             Err(why) => (why, p.warn),

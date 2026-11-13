@@ -3838,11 +3838,14 @@ impl App {
         let key_path = self.unlock_keyfile.trim().to_string();
         let mut key_bytes: Option<Vec<u8>> = None;
         if !key_path.is_empty() {
-            match std::fs::read(&key_path) {
+            match sennel_core::capped::read_capped_file(
+                Path::new(&key_path),
+                sennel_core::capped::KEY_FILE_MAX,
+            ) {
                 Ok(bytes) => key_bytes = Some(bytes),
-                Err(_) => {
+                Err(e) => {
                     self.error(format!(
-                        "cannot read key file {key_path}  ·  password unchanged"
+                        "cannot read key file {key_path} · {e}  ·  password unchanged"
                     ));
                     return;
                 }
@@ -4101,7 +4104,8 @@ impl App {
         }
         let done = if add.from_file {
             let path = crate::config::expand(add.value.trim());
-            match std::fs::read(&path) {
+            match sennel_core::capped::read_capped_file(&path, sennel_core::capped::ATTACHMENT_MAX)
+            {
                 Ok(bytes) => self.session.attach(id, add.name.trim(), bytes),
                 Err(e) => {
                     self.error(format!("cannot read {} · {e}", path.display()));

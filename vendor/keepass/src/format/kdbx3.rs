@@ -183,6 +183,11 @@ pub enum Kdbx3OuterHeaderError {
 }
 
 /// Open, decrypt and parse a KeePass database from a source and a password
+/// SENNEL PATCH: the key derivation the header asks for, read without doing any of it.
+pub(crate) fn kdf_config_of(data: &[u8]) -> Option<KdfConfig> {
+    parse_outer_header(data).ok().map(|header| header.kdf_config)
+}
+
 pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
     let (config, mut inner_decryptor, xml) = decrypt_kdbx3(data, db_key)?;
 

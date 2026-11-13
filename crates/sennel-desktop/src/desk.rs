@@ -6,6 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use keepass::db::{EntryId, GroupId};
+use sennel_core::capped;
 use sennel_core::clipboard::Board;
 use sennel_core::config;
 use sennel_core::envfile;
@@ -680,7 +681,7 @@ impl Desk {
     fn read_key(&self, key_file: Option<&str>) -> Result<Option<Zeroizing<Vec<u8>>>, Note> {
         match key_file.map(str::trim).filter(|k| !k.is_empty()) {
             None => Ok(None),
-            Some(path) => std::fs::read(config::expand(path))
+            Some(path) => capped::read_capped_file(&config::expand(path), capped::KEY_FILE_MAX)
                 .map(|bytes| Some(Zeroizing::new(bytes)))
                 .map_err(|e| error(format!("cannot read key file {path} · {e}"))),
         }
@@ -1613,7 +1614,7 @@ impl Desk {
         }
         let id = entry_id(id)?;
         let path = config::expand(path.trim());
-        let bytes = match std::fs::read(&path) {
+        let bytes = match capped::read_capped_file(&path, capped::ATTACHMENT_MAX) {
             Ok(bytes) => bytes,
             Err(e) => {
                 return Ok(Reply::one(error(format!(

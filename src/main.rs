@@ -8,7 +8,9 @@ mod ui;
 use sennel_core::harden::{core_dumps_off, harden};
 #[cfg(not(test))]
 use sennel_core::touchid;
-use sennel_core::{agent, clipboard, envfile, export, generator, import, pwned, search, vault};
+use sennel_core::{
+    agent, capped, clipboard, envfile, export, generator, import, pwned, search, vault,
+};
 
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -686,8 +688,8 @@ fn import_csv(cfg: &Config, file: &str, group: Option<&str>, dry_run: bool) -> R
     let Some(path) = &cfg.db else {
         anyhow::bail!("no database given · pass --db <file>");
     };
-    let mut text =
-        std::fs::read_to_string(config::expand(file)).with_context(|| format!("reading {file}"))?;
+    let mut text = capped::read_capped_text(&config::expand(file), capped::CSV_MAX)
+        .with_context(|| format!("reading {file}"))?;
     let found = import::read_csv(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"));
     /* The whole export, every password in it, in one buffer. Wiped as soon as
     it has been parsed rather than left for the allocator — the rows that
@@ -766,9 +768,10 @@ fn unlock_with(cfg: &Config, tty_only: bool) -> Result<Vault> {
         anyhow::bail!("no database given · pass --db <file>");
     };
     let mut key_bytes = match &cfg.key_file {
-        Some(at) => {
-            Some(std::fs::read(at).with_context(|| format!("reading key file {}", at.display()))?)
-        }
+        Some(at) => Some(
+            capped::read_capped(at, capped::KEY_FILE_MAX)
+                .with_context(|| format!("reading key file {}", at.display()))?,
+        ),
         None => None,
     };
     let mut password = match tty_only {
@@ -1064,8 +1067,8 @@ fn gather_refs(env: &[String], files: &[std::path::PathBuf]) -> Result<Vec<EnvRe
     let same = same_var;
     let mut refs: Vec<EnvRef> = Vec::new();
     for file in files {
-        let text =
-            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let text = capped::read_capped_text(file, envfile::MAX_BYTES as u64)
+            .with_context(|| format!("reading {}", file.display()))?;
         // Some Windows editors start a file with a byte-order mark, which would glue onto the first name.
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         for (n, line) in text.lines().enumerate() {
@@ -1257,7 +1260,13 @@ fn env_import(
             .read_to_end(&mut bytes)
             .context("reading stdin")?;
     } else {
-        *bytes = std::fs::read(file).with_context(|| format!("reading {shown}"))?;
+        // Read the way stdin is, one byte past the limit, so the check below covers both.
+        std::fs::File::open(file)
+            .and_then(|f| {
+                f.take(envfile::MAX_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .with_context(|| format!("reading {shown}"))?;
     }
     // Before the UTF-8 check, which would otherwise fail on a character the size limit cut in two.
     if bytes.len() > envfile::MAX_BYTES {
@@ -2245,13 +2254,11 @@ fn unlock_now(app: &mut App) {
     let key_path = app.unlock_keyfile.trim().to_string();
     let mut key_bytes: Option<Vec<u8>> = match key_path.as_str() {
         "" => None,
-        path => match std::fs::read(path) {
+        path => match capped::read_capped_file(std::path::Path::new(path), capped::KEY_FILE_MAX) {
             Ok(b) => Some(b),
-            /* Named, not probed further: the next step is a path the user can
-            check, and the content is key material that never reaches the
-            screen. */
-            Err(_) => {
-                app.error(format!("cannot read key file {path}"));
+            // The reason names the path's trouble, never the content, which is key material.
+            Err(e) => {
+                app.error(format!("cannot read key file {path} · {e}"));
                 password.zeroize();
                 return;
             }

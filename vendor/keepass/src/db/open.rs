@@ -50,6 +50,18 @@ impl Database {
         Ok(data)
     }
 
+    /// SENNEL PATCH: the key derivation a file's header asks for, parsed exactly as `parse` would
+    /// parse it but without running it, so a caller can refuse an unreasonable one first. `None`
+    /// when the header does not parse. Malformed input can still panic, as `parse` can.
+    pub fn kdf_config_of(data: &[u8]) -> Option<crate::config::KdfConfig> {
+        match DatabaseVersion::parse(data).ok()? {
+            DatabaseVersion::KDB(_) => crate::format::kdb::kdf_config_of(data),
+            DatabaseVersion::KDB2(_) => None,
+            DatabaseVersion::KDB3(_) => crate::format::kdbx3::kdf_config_of(data),
+            DatabaseVersion::KDB4(_) => crate::format::kdbx4::kdf_config_of(data),
+        }
+    }
+
     /// Get the version of a database without decrypting it
     pub fn get_version(source: &mut dyn std::io::Read) -> Result<DatabaseVersion, DatabaseOpenError> {
         let mut data = vec![0; DatabaseVersion::get_version_header_size()];
