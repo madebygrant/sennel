@@ -283,6 +283,8 @@ pub struct Session<S> {
     pub last_activity: Instant,
     // `Instant` stops during suspend on macOS and Linux, so idleness reads both clocks.
     pub last_activity_wall: SystemTime,
+    // The same moment on a clock that keeps counting through a suspend and cannot be set back.
+    last_activity_awake: Option<Duration>,
 }
 
 impl<S: Seal> Default for Session<S> {
@@ -312,6 +314,7 @@ impl<S: Seal> Session<S> {
             lock_after: None,
             last_activity: Instant::now(),
             last_activity_wall: SystemTime::now(),
+            last_activity_awake: since_boot(),
         }
     }
 
@@ -548,6 +551,7 @@ impl<S: Seal> Session<S> {
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
         self.last_activity_wall = SystemTime::now();
+        self.last_activity_awake = since_boot();
     }
 
     // Whether the open vault has sat untouched past the deadline. Takes the clock so tests drive it
@@ -563,15 +567,37 @@ impl<S: Seal> Session<S> {
         let idle = now
             .duration_since(self.last_activity)
             // A backwards jump reads as no time passed, not as negative time.
-            .max(self.last_activity_wall.elapsed().unwrap_or_default());
+            .max(self.last_activity_wall.elapsed().unwrap_or_default())
+            .max(
+                since_boot()
+                    .zip(self.last_activity_awake)
+                    .map_or(Duration::ZERO, |(now, then)| now.saturating_sub(then)),
+            );
         Some(after.saturating_sub(idle))
     }
 
+    /// One save attempt before a lock. `Some` names why the session's unsaved changes cannot be
+    /// written and a lock would lose them. Without `may_block`, a save that needs a hardware key
+    /// is left pending, for a caller with somebody there to touch it.
+    pub fn unsaved_before_lock(&mut self, may_block: bool) -> Option<String> {
+        if !self.dirty || self.vault.is_none() {
+            return None;
+        }
+        match self.persist(may_block) {
+            Saved::Written | Saved::Locked => None,
+            Saved::NoFile => Some("the vault has no file yet".into()),
+            Saved::Deferred(_) => Some("saving waits on a touch of the hardware key".into()),
+            Saved::Conflict => Some("the file changed on disk".into()),
+            Saved::Failed(why) => Some(why),
+        }
+    }
+
     // Drops the vault. Dropping is the wipe: secrets live in `ProtectedString` and the retained key,
-    // which zeroize on drop. Returns how many keys the agent would not give back.
+    // which zeroize on drop. The vault goes before the agent, which can wait on another process.
+    // Returns how many keys the agent would not give back.
     pub fn lock(&mut self) -> usize {
-        let failed = self.agent_release();
         self.vault = None;
+        let failed = self.agent_release();
         self.moved();
         self.dirty = false;
         self.conflict = false;
@@ -1137,6 +1163,7 @@ impl<S: Seal> Session<S> {
                 self.agent_keys.push(key);
             }
         }
+        self.track_agent_keys();
         report
     }
 
@@ -1146,14 +1173,19 @@ impl<S: Seal> Session<S> {
         let (remove, _kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.agent_keys)
             .into_iter()
             .partition(|k| k.remove_at_close);
+        crate::agent::track(Vec::new());
         if remove.is_empty() {
             return 0;
         }
+        // One deadline for the lot: this runs on the thread the idle lock and the UI need.
         match crate::agent::Agent::connect() {
-            Ok(mut agent) => remove
-                .iter()
-                .filter(|k| agent.remove(&k.blob).is_err())
-                .count(),
+            Ok(agent) => {
+                let mut agent = agent.within(Duration::from_secs(5));
+                remove
+                    .iter()
+                    .filter(|k| agent.remove(&k.blob).is_err())
+                    .count()
+            }
             Err(_) => remove.len(),
         }
     }
@@ -1176,8 +1208,36 @@ impl<S: Seal> Session<S> {
         if !self.agent_keys.iter().any(|k| k.blob == key.blob) {
             self.agent_keys.push(key);
         }
+        self.track_agent_keys();
         Ok(Some(lifetime))
     }
+
+    fn track_agent_keys(&self) {
+        let blobs = self.agent_keys.iter().filter(|k| k.remove_at_close);
+        crate::agent::track(blobs.map(|k| k.blob.clone()).collect());
+    }
+}
+
+// Time on a clock that counts a suspend and that nothing can set: `Instant` stops while the machine
+// sleeps, and the wall clock can be set back across one. macOS's CLOCK_MONOTONIC keeps counting
+// asleep, per its clock_gettime(3); Linux needs CLOCK_BOOTTIME for that.
+fn since_boot() -> Option<Duration> {
+    #[cfg(target_os = "linux")]
+    let clock = libc::CLOCK_BOOTTIME;
+    #[cfg(not(target_os = "linux"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the call to fill, and nothing else holds it.
+    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(now.tv_sec).ok()?,
+        u32::try_from(now.tv_nsec).ok()?,
+    ))
 }
 
 /// Where the entry form writes.
@@ -1314,6 +1374,38 @@ mod tests {
         assert!(matches!(result, Err(UnlockError::Mismatch)));
         assert!(!file.0.exists() && !s.is_open());
         assert!(matches!(unlock(&mut s, &file, ""), Err(UnlockError::Empty)));
+    }
+
+    #[test]
+    fn the_suspend_counting_clock_reads_and_moves_forward() {
+        let first = since_boot().expect("no clock");
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(since_boot().unwrap() > first);
+    }
+
+    #[test]
+    fn a_lock_first_saves_and_says_what_it_could_not() {
+        let file = Temp::new("lock-save");
+        let mut s = session();
+        create(&mut s, &file, "pw").unwrap();
+        assert_eq!(s.unsaved_before_lock(false), None, "nothing to save");
+
+        let root = s.vault.as_ref().map(Vault::root_id);
+        s.add_group(root, "kept").unwrap();
+        s.mark_dirty();
+        assert_eq!(s.unsaved_before_lock(false), None);
+        assert!(!s.is_dirty(), "the save before the lock did not land");
+
+        let mut other = Vault::open_with(&file.0, "pw", None, None).unwrap();
+        let other_root = other.root_id();
+        other.create_group(&other_root, "theirs").unwrap();
+        other.save().unwrap();
+        s.add_group(root, "lost").unwrap();
+        s.mark_dirty();
+        assert_eq!(
+            s.unsaved_before_lock(false).as_deref(),
+            Some("the file changed on disk")
+        );
     }
 
     #[test]

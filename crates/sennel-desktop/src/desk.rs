@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use keepass::db::{EntryId, GroupId};
 use sennel_core::capped;
@@ -383,6 +383,8 @@ pub struct Desk {
     rows: Mutex<(Option<RowsKey>, Vec<EntryId>, Searcher)>,
     // Says "touch your key" before a write that blocks on one, since nothing else would.
     prompt: Option<Box<dyn Fn(Note) + Send + Sync>>,
+    // When Lock last said it would lose unsaved changes.
+    lock_asked: Mutex<Option<Instant>>,
 }
 
 pub fn entry_id(text: &str) -> Result<EntryId, String> {
@@ -455,6 +457,7 @@ impl Desk {
             settings,
             rows: Mutex::new((None, Vec::new(), Searcher::new())),
             prompt: None,
+            lock_asked: Mutex::new(None),
         }
     }
 
@@ -482,6 +485,25 @@ impl Desk {
     pub fn unsaved(&self) -> bool {
         let s = self.session();
         s.is_dirty() || s.in_conflict()
+    }
+
+    // For the close handler, on the main thread, which must not wait on a save held up by a
+    // hardware key. A command or the idle timer holds the lock for moments, so it is tried for a
+    // fifth of a second before a session still busy counts as something to ask about.
+    pub fn unsaved_or_busy(&self) -> bool {
+        for _ in 0..20 {
+            match self.session.try_lock() {
+                Ok(s) => return s.is_dirty() || s.in_conflict(),
+                Err(std::sync::TryLockError::Poisoned(e)) => {
+                    let s = e.into_inner();
+                    return s.is_dirty() || s.in_conflict();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        true
     }
 
     // A poisoned lock means a command panicked mid-way; the session is still the best state there is.
@@ -762,9 +784,34 @@ impl Desk {
         }
     }
 
+    // Somebody pressed Lock, so a save may wait on their touch. If it still cannot land, the
+    // first press says what would be lost and a second within ten seconds locks anyway.
     pub fn lock(&self) -> Reply {
-        let failed = self.session().lock();
+        let mut s = self.session();
+        if s.is_dirty() {
+            self.ask_for_key(&s, "to save before locking");
+        }
+        let lost = s.unsaved_before_lock(true);
+        if let Some(why) = &lost {
+            let mut asked = self.lock_asked.lock().unwrap_or_else(|e| e.into_inner());
+            if !asked.is_some_and(|at| at.elapsed() < Duration::from_secs(10)) {
+                *asked = Some(Instant::now());
+                return Reply {
+                    notes: vec![warn(format!(
+                        "unsaved changes would be lost: {why} · press Lock again to lock anyway"
+                    ))],
+                    select: None,
+                    ok: false,
+                };
+            }
+            *asked = None;
+        }
+        let failed = s.lock();
+        drop(s);
         let mut notes = vec![info("locked")];
+        if let Some(why) = lost {
+            notes.push(error(format!("unsaved changes were lost: {why}")));
+        }
         if failed > 0 {
             notes.push(warn(format!(
                 "ssh agent: {failed} key(s) not removed · they expire on their own"
@@ -892,10 +939,14 @@ impl Desk {
         if !s.idle_expired(now) {
             return None;
         }
+        let lost = s.unsaved_before_lock(false);
         let failed = s.lock();
         let mut notes = vec![warn(format!(
-            "locked after {} idle",
-            spell_secs(self.lock_timeout())
+            "locked after {} idle{}",
+            spell_secs(self.lock_timeout()),
+            lost.map_or(String::new(), |why| format!(
+                " · unsaved changes were lost: {why}"
+            ))
         ))];
         if failed > 0 {
             notes.push(warn(format!(

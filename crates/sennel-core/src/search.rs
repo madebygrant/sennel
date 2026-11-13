@@ -86,6 +86,15 @@ impl Searcher {
         }
     }
 
+    /// Wipes the last haystack scored, which held a title, username, url and group path. The
+    /// matcher keeps scratch of its own that it gives no way to wipe, so it is dropped and replaced:
+    /// freed, not overwritten.
+    pub fn clear(&mut self) {
+        use zeroize::Zeroize;
+        self.hay_chars.zeroize();
+        self.matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+    }
+
     /// One haystack against a needle parsed by `pattern`. Pattern scores u32
     /// and never returns Some(0) for a real hit below 1, so the cast stays
     /// lossless in practice; clamp keeps the u16 ceiling honest.

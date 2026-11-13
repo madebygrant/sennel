@@ -4568,6 +4568,7 @@ dependencies = [
  "keepass",
  "sennel-core",
  "serde",
+ "signal-hook",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4589,6 +4590,7 @@ dependencies = [
  "ratatui",
  "rpassword",
  "sennel-core",
+ "signal-hook",
  "unicode-width",
  "zeroize",
 ]

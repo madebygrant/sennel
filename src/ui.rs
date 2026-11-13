@@ -1943,6 +1943,12 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: &Confirm) {
             Span::styled(" q  quit", Style::new().fg(p.accent)),
             "",
         ),
+        Confirm::Lock(why) => (
+            "lock?",
+            truncate(&format!(" unsaved changes would be lost: {why}"), room),
+            Span::styled(" y  lock", Style::new().fg(p.error)),
+            "",
+        ),
         /* The title travels in the confirm so the answer is about a row the
         user can see. A name is user-chosen text, never a secret.
 

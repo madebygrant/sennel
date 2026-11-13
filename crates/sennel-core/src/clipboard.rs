@@ -1,8 +1,12 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use arboard::Clipboard;
+
+// Set while a copy is waiting for its wipe, for `emergency_clear` to find from a panic hook or a
+// signal, where no `Board` is to hand.
+static OUTSTANDING: AtomicBool = AtomicBool::new(false);
 
 /// The OS clipboard with an auto-clear timer.
 ///
@@ -11,27 +15,57 @@ use arboard::Clipboard;
 /// for no timer with `clipboard_timeout = 0`, which means "leave it there".
 #[derive(Clone)]
 pub struct Board {
-    /* Each copy bumps this; the clearer thread only wipes when its own
-    generation is still current. A second copy re-arms the timer instead of
-    being wiped early by the first one's thread. */
-    epoch: Arc<Mutex<u64>>,
+    // One lock for the copy, the clearer's check and its wipe, so a copy landing as an older timer
+    // fires can never be wiped by it or left on the clipboard with the quit-wipe disarmed.
+    state: Arc<Mutex<State>>,
     // Seconds, 0 for no clear. Shared by clones, so a settings change reaches every holder.
     timeout: Arc<AtomicU64>,
-    /* When the secret on the clipboard stops being there; the status bar
-    counts it down. On the wall clock because a sleeping thread does not
-    run during a system suspend, so a monotonic wipe outlasts a closed lid. */
-    until: Arc<Mutex<Option<SystemTime>>>,
+}
+
+#[derive(Default)]
+struct State {
+    // Each copy bumps this; a clearer thread only wipes while its own generation is current.
+    epoch: u64,
+    // When the copy is wiped, on the wall clock: a sleeping thread does not run during a suspend.
+    until: Option<SystemTime>,
+    // Kept for the life of the board. On X11, dropping the last one hands the copy to the clipboard
+    // manager and gives up the selection, so a later wipe would clear nothing of ours.
+    clipboard: Option<Clipboard>,
+}
+
+impl State {
+    fn clipboard(&mut self) -> Result<&mut Clipboard, arboard::Error> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(Clipboard::new()?);
+        }
+        Ok(self.clipboard.as_mut().expect("just set"))
+    }
+
+    // Whatever is on the clipboard now: it cannot tell a later copy from another app from ours.
+    fn wipe(&mut self) {
+        if let Ok(board) = self.clipboard() {
+            let _ = board.clear();
+        }
+        self.until = None;
+        self.epoch += 1;
+        OUTSTANDING.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Board {
     pub fn new(timeout_secs: u64) -> Self {
         Board {
-            epoch: Arc::new(Mutex::new(0)),
-            until: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(State::default())),
             // Zero is "leave it there", matching lock_timeout's reading of 0
             // as off rather than as immediate.
             timeout: Arc::new(AtomicU64::new(timeout_secs)),
         }
+    }
+
+    // A poisoned lock would take the app down on the next copy, and nothing behind it can be left
+    // half-written, so keep going with what survived.
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// From the next copy on; a countdown already running keeps its deadline.
@@ -44,20 +78,6 @@ impl Board {
         (secs > 0).then(|| Duration::from_secs(secs))
     }
 
-    /// Next copy generation. Bumped once per copy, read back by the clearer.
-    fn claim(&self) -> u64 {
-        /* A poisoned mutex would otherwise take the whole TUI down on the
-        next copy; the counter is the only thing behind it, so keep going
-        with whatever value survived. */
-        let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
-        *epoch += 1;
-        *epoch
-    }
-
-    fn stale(&self, generation: u64) -> bool {
-        *self.epoch.lock().unwrap_or_else(|e| e.into_inner()) != generation
-    }
-
     /// Seconds before a copy clears, for the confirmation message.
     pub fn timeout_secs(&self) -> Option<u64> {
         self.timeout().map(|d| d.as_secs())
@@ -66,75 +86,78 @@ impl Board {
     /// Whole seconds left before the clipboard is wiped, or `None` when
     /// nothing of ours is on it (or the wipe is switched off).
     pub fn clears_in(&self) -> Option<u64> {
-        let until = (*self.until.lock().unwrap_or_else(|e| e.into_inner()))?;
+        let until = self.state().until?;
         let left = until.duration_since(SystemTime::now()).ok()?;
         // Round up, so the last fraction of a second is not shown as zero.
         Some(left.as_secs() + u64::from(left.subsec_millis() > 0))
     }
 
-    /* Wipe now, if what is on the clipboard is still ours. The timer is a
-    thread inside this process, so quitting used to abandon a password on
-    the pasteboard — on macOS it is system-owned and sits there until
-    something else copies. A cleared deadline means either nothing of ours
-    is there or the user asked for no wipe at all (`clipboard_timeout =
-    0`), and both are left alone. */
+    /// Wipes now if a copy is waiting for its wipe. Quitting must do this: the timer is a thread
+    /// inside this process. Nothing waiting, or `clipboard_timeout = 0`, leaves the clipboard alone.
     pub fn clear_now(&self) {
-        let mut until = self.until.lock().unwrap_or_else(|e| e.into_inner());
-        if until.is_none() {
-            return;
+        let mut state = self.state();
+        if state.until.is_some() {
+            state.wipe();
         }
-        *until = None;
-        drop(until);
-        // Bumped so the sleeping clearer does not wipe a later copy of theirs.
-        self.claim();
-        let _ = Clipboard::new().and_then(|mut c| c.clear());
     }
 
     /// Copies text and re-arms the auto-clear. The failure message names the
     /// fix and never echoes the text back: it is usually a password.
     pub fn copy(&self, text: &str) -> Result<(), String> {
-        let mut board = Clipboard::new().map_err(|e| {
+        let mut state = self.state();
+        let board = state.clipboard().map_err(|e| {
             format!("no clipboard to copy to · {e} · needs wl-clipboard on Wayland, xclip on X11")
         })?;
+        // Borrowed, so arboard makes the only copy rather than one more nobody wipes.
         concealed(board.set())
-            .text(text.to_owned())
+            .text(text)
             .map_err(|e| format!("clipboard refused the copy · {e}"))?;
-        let generation = self.claim();
-        if let Some(wait) = self.timeout() {
-            let deadline = SystemTime::now() + wait;
-            *self.until.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
-            let board = self.clone();
-            std::thread::spawn(move || {
-                // Sliced: a thread asleep through a suspend wakes owing the rest of its nap.
-                // Each slice re-reads the wall clock, so waking ends the wait.
-                let monotonic = std::time::Instant::now() + wait;
-                loop {
-                    // Whichever clock runs out first ends the wait: wall catches suspend,
-                    // monotonic catches a clock set backwards.
-                    let left = deadline
-                        .duration_since(SystemTime::now())
-                        .unwrap_or_default()
-                        .min(monotonic.saturating_duration_since(std::time::Instant::now()));
-                    if left.is_zero() {
-                        break;
-                    }
-                    std::thread::sleep(left.min(Duration::from_secs(1)));
-                    /* A newer copy has a thread of its own; this one is done
-                    and must not wipe what that one put there. */
-                    if board.stale(generation) {
-                        return;
-                    }
+        state.epoch += 1;
+        let generation = state.epoch;
+        let Some(wait) = self.timeout() else {
+            state.until = None;
+            OUTSTANDING.store(false, Ordering::SeqCst);
+            return Ok(());
+        };
+        let deadline = SystemTime::now() + wait;
+        state.until = Some(deadline);
+        OUTSTANDING.store(true, Ordering::SeqCst);
+        drop(state);
+        let board = self.clone();
+        std::thread::spawn(move || {
+            // Sliced: a thread asleep through a suspend wakes owing the rest of its nap.
+            // Each slice re-reads the wall clock, so waking ends the wait.
+            let monotonic = std::time::Instant::now() + wait;
+            loop {
+                // Whichever clock runs out first ends the wait: wall catches suspend,
+                // monotonic catches a clock set backwards.
+                let left = deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .min(monotonic.saturating_duration_since(std::time::Instant::now()));
+                if left.is_zero() {
+                    break;
                 }
-                /* Best effort and generation-checked: by now the user may have
-                copied something else themselves, and wiping that would
-                destroy their data to protect ours. */
-                if !board.stale(generation) {
-                    let _ = Clipboard::new().and_then(|mut c| c.clear());
-                    *board.until.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                std::thread::sleep(left.min(Duration::from_secs(1)));
+                // A newer copy has a thread of its own, and this one must not wipe it.
+                if board.state().epoch != generation {
+                    return;
                 }
-            });
-        }
+            }
+            let mut state = board.state();
+            if state.epoch == generation {
+                state.wipe();
+            }
+        });
         Ok(())
+    }
+}
+
+/// From a panic hook or a signal: wipes the clipboard if a timed copy is still waiting for its
+/// wipe. Opens a clipboard of its own, since the board may be behind a lock nobody will release.
+pub fn emergency_clear() {
+    if OUTSTANDING.swap(false, Ordering::SeqCst) {
+        let _ = Clipboard::new().and_then(|mut c| c.clear());
     }
 }
 
@@ -178,23 +201,12 @@ fn concealed(set: arboard::Set<'_>) -> arboard::Set<'_> {
 mod tests {
     use super::*;
 
-    /* The whole auto-clear contract without touching a real clipboard: the
-    generation is what the clearer thread decides on. */
-    #[test]
-    fn copies_bump_the_generation() {
-        let board = Board::new(15);
-        assert_eq!(board.claim(), 1);
-        assert_eq!(board.claim(), 2);
-    }
-
-    #[test]
-    fn a_newer_copy_marks_the_older_stale() {
-        let board = Board::new(15);
-        let first = board.claim();
-        assert!(!board.stale(first));
-        let second = board.claim();
-        assert!(board.stale(first), "the first copy still reads as current");
-        assert!(!board.stale(second));
+    // What a copy does to the generation and the deadline, without touching a real clipboard.
+    fn armed(board: &Board, secs: u64) -> u64 {
+        let mut state = board.state();
+        state.epoch += 1;
+        state.until = Some(SystemTime::now() + Duration::from_secs(secs));
+        state.epoch
     }
 
     /* The countdown the status bar reads: armed by a copy, and never a stale
@@ -203,9 +215,9 @@ mod tests {
     fn the_countdown_is_armed_and_runs_out() {
         let board = Board::new(15);
         assert_eq!(board.clears_in(), None, "nothing copied yet");
-        *board.until.lock().unwrap() = Some(SystemTime::now() + Duration::from_secs(9));
+        armed(&board, 9);
         assert_eq!(board.clears_in(), Some(9));
-        *board.until.lock().unwrap() = Some(SystemTime::now() - Duration::from_secs(1));
+        board.state().until = Some(SystemTime::now() - Duration::from_secs(1));
         assert_eq!(board.clears_in(), None, "a past deadline still counted");
     }
 
@@ -215,18 +227,25 @@ mod tests {
     #[test]
     fn clearing_on_exit_disarms_the_pending_wipe() {
         let board = Board::new(15);
-        *board.until.lock().unwrap() = Some(SystemTime::now() + Duration::from_secs(9));
-        let generation = *board.epoch.lock().unwrap();
+        let generation = armed(&board, 9);
         board.clear_now();
         assert_eq!(board.clears_in(), None, "the deadline survived");
-        assert!(
-            board.stale(generation),
+        assert_ne!(
+            board.state().epoch,
+            generation,
             "the sleeping clearer stayed current"
         );
         // Nothing of ours on the board: no clipboard call, no surprise wipe.
         let quiet = Board::new(15);
         quiet.clear_now();
-        assert_eq!(quiet.clears_in(), None);
+        assert_eq!(quiet.state().epoch, 0);
+    }
+
+    #[test]
+    fn an_emergency_clear_with_nothing_waiting_does_nothing() {
+        OUTSTANDING.store(false, Ordering::SeqCst);
+        emergency_clear();
+        assert!(!OUTSTANDING.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -245,9 +264,16 @@ mod tests {
     with `cargo test -- --ignored` on a machine with a clipboard. */
     #[test]
     #[ignore]
-    fn copy_reaches_the_clipboard() {
-        Board::new(0).copy("sennel-probe").unwrap();
-        let back = Clipboard::new().unwrap().get_text().unwrap();
-        assert_eq!(back, "sennel-probe");
+    fn copy_reaches_the_clipboard_and_the_wipe_clears_it() {
+        let board = Board::new(1);
+        board.copy("sennel-probe").unwrap();
+        assert_eq!(
+            Clipboard::new().unwrap().get_text().unwrap(),
+            "sennel-probe"
+        );
+        assert!(OUTSTANDING.load(Ordering::SeqCst));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(Clipboard::new().unwrap().get_text().is_err(), "not wiped");
+        assert!(!OUTSTANDING.load(Ordering::SeqCst));
     }
 }

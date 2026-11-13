@@ -56,6 +56,17 @@ fn main() -> Result<()> {
     attachable. It sat further down, on the TUI path only, so a subcommand
     was one `return` away from missing it; up here a new one inherits it. */
     harden();
+    // A panic must not leave a password on the clipboard or a key in the agent. Only the main
+    // thread's: a parser panic caught by `quietly` never reaches here, and other threads' are not
+    // the end of the process. The terminal app chains its own hook in front of this one.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if std::thread::current().name() == Some("main") {
+            sennel_core::clipboard::emergency_clear();
+            sennel_core::agent::emergency_release();
+        }
+    }));
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?)?;
     if cfg.check {
@@ -312,7 +323,16 @@ fn main() -> Result<()> {
     /* The clipboard with its auto-clear timer, armed once like the lock:
     copies before this point cannot happen, since nothing is unlocked. */
     app.set_board(Board::new(cfg.clipboard_timeout));
-    let result = run(&mut terminal, &mut app);
+    // A closed terminal or a `kill` ends the loop, so the cleanup below still runs.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGHUP,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&stop))?;
+    }
+    let result = run(&mut terminal, &mut app, &stop);
     /* Before anything else on the way out: the auto-clear lives in a thread
     that dies with this process, so quitting three seconds after a copy
     used to leave the password sitting on the clipboard. */
@@ -322,6 +342,9 @@ fn main() -> Result<()> {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    // Where there is no real alternate screen (tmux with it off), the last frame would stay in
+    // scrollback, a revealed password with it.
+    let _ = terminal.clear();
     ratatui::restore();
     // The vault's name must not outlive the session in the window title.
     let _ = execute!(std::io::stdout(), SetTitle(""));
@@ -847,6 +870,25 @@ fn read_first_line() -> Result<String> {
     })
 }
 
+// `get` and `gen` wait in a cooked terminal, where ^C, a closed window or a `kill` would end the
+// process with the copy still on the clipboard. Any of them now ends the wait early, wiped.
+fn wait_out_the_wipe(board: &Board, secs: u64) -> Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&stop))?;
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < until && !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    board.clear_now();
+    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("interrupted · the clipboard was cleared");
+    }
+    Ok(())
+}
+
 /* `sennel get`, the whole non-interactive path. Unlocks, resolves one entry,
 and either copies (staying alive for the wipe) or prints.
 
@@ -889,12 +931,31 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
         anyhow::bail!("{title} has no {}", field.name());
     }
     if to_stdout {
-        say!("{}", *value);
-        return Ok(());
+        // A script reading `$(sennel get …)` must not get an empty password and a success code.
+        // Through a duplicate of fd 1, since Rust's own stdout reports a closed one as success.
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        let written = std::io::stdout()
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|mut out| {
+                out.write_all(value.as_bytes())?;
+                out.write_all(b"\n")
+            });
+        return match written {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+                Err(anyhow::anyhow!("could not write to stdout · {e}"))
+            }
+            _ => Ok(()),
+        };
     }
 
     let board = Board::new(cfg.clipboard_timeout);
     board.copy(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Nothing below needs a secret, and the wait can be long.
+    drop(value);
+    drop(vault);
     match board.timeout_secs() {
         /* The wipe is a thread inside this process, so exiting now would
         abandon the secret on the clipboard. Wait it out, say so, and wipe
@@ -905,8 +966,7 @@ fn get(cfg: &Config, needle: &str, field: Field, to_stdout: bool, force: bool) -
                 "copied the {} for {title} · clears in {secs}s",
                 field.name()
             );
-            std::thread::sleep(Duration::from_secs(secs));
-            board.clear_now();
+            wait_out_the_wipe(&board, secs)?;
         }
         // `clipboard_timeout = 0` asked for it to stay; nothing to wait for.
         None => {
@@ -1501,8 +1561,7 @@ fn make_password(
                 settings.amount(),
                 settings.describe()
             );
-            std::thread::sleep(Duration::from_secs(secs));
-            board.clear_now();
+            wait_out_the_wipe(&board, secs)?;
         }
         None => {
             eprintln!(
@@ -1528,12 +1587,19 @@ fn walk_groups(vault: &Vault) -> Vec<(GroupId, usize)> {
     out
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
     /* The window title follows the vault, so a wall of terminals says which
     one holds what. Only written when it changes: an escape sequence per
     frame is a write per frame for nothing. */
     let mut titled = String::new();
     while !app.quit {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         app.expire_flash();
         /* Once per frame, not per keypress: idleness is the absence of keys,
         and nothing else on screen moves between messages to re-check it. */
@@ -1543,11 +1609,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
         and the screen has to carry "unlocking…" before it does. */
         if app.unlocking {
             unlock_now(app);
+            drain_input()?;
             terminal.draw(|frame| ui::draw(frame, app))?;
         }
         // Same for a save that waits on the hardware key.
         if app.has_pending() {
             app.flush_pending();
+            drain_input()?;
             terminal.draw(|frame| ui::draw(frame, app))?;
         }
         /* Sanitised: the title is a file name, and a file name may hold an
@@ -1573,15 +1641,46 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+// An event after the deadline locks instead of counting as presence: one queued across a suspend
+// would otherwise restart the clock before the frame loop looked at it. False when it locked.
+fn present(app: &mut App) -> bool {
+    if app.idle_expired(std::time::Instant::now()) {
+        app.check_idle();
+        return false;
+    }
+    app.touch();
+    true
+}
+
+// Keys typed while an unlock or a save blocked this thread were meant for a screen that looked
+// stuck, often the password again. Played into the browser they would be commands, so they go.
+fn drain_input() -> Result<()> {
+    while event::poll(Duration::ZERO)? {
+        let _ = event::read()?;
+    }
+    Ok(())
+}
+
 /* Wheel scrolls the pane under the pointer, click selects a row and hands
 that pane the keys. Nothing here is the only way to do anything — the mouse
 is a convenience over a keyboard app, so it stays out of the popups, where
 a stray click would answer a question. */
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    // A click or a scroll is somebody at the screen. A pointer drifting over the window is not.
+    let deliberate = matches!(
+        mouse.kind,
+        MouseEventKind::Down(_)
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+    );
+    if deliberate && !present(app) {
+        return;
+    }
     app.drop_blocked_menu();
     // Ahead of `click`, whose copy rows match on the screen row alone and may sit under a menu row.
     if app.menu.is_some() {
-        app.touch();
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => app.click_menu(mouse.column, mouse.row),
             MouseEventKind::Down(MouseButton::Right) => {
@@ -1601,7 +1700,6 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
     if app.view != app::View::Browser || app.popup_open() {
         return;
     }
-    app.touch();
     match mouse.kind {
         MouseEventKind::ScrollDown => app.wheel(mouse.column, mouse.row, true),
         MouseEventKind::ScrollUp => app.wheel(mouse.column, mouse.row, false),
@@ -1615,7 +1713,10 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
 // press Enter) except in notes, and the pasted string is wiped, since it may be a password or a seed.
 fn handle_paste(app: &mut App, mut text: String) {
     const LIMIT: usize = 16 * 1024;
-    app.touch();
+    if !present(app) {
+        text.zeroize();
+        return;
+    }
     if !app.takes_text() {
         app.say("nothing here takes pasted text");
     } else if text.len() > LIMIT {
@@ -1673,7 +1774,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     /* First, because this is the proof of presence: every key that reaches
     the session restarts the idle clock, including the ones swallowed
     below. The poll timeout is not presence, so `run` never touches it. */
-    app.touch();
+    if !present(app) {
+        return;
+    }
     app.drop_blocked_menu();
     /* Ahead of every screen's keys: it is the UI's own question and the
     answer must not also reach the list behind it. */
@@ -1786,7 +1889,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     match code {
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.ask_quit(),
         KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc never ends the session. There is no screen behind the lock yet,
@@ -1804,7 +1907,7 @@ broken key. */
 fn handle_browser_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         KeyCode::Char('h') | KeyCode::Char('?') => app.open_help(),
         KeyCode::Char('q') => app.ask_quit(),
         /* Esc unwinds the armed cut, then a kept filter, before its usual
@@ -2029,7 +2132,7 @@ fn handle_history_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('k') | KeyCode::Up => app.history_move(false),
         KeyCode::Char('*') => app.history_reveal(),
         KeyCode::Char('D') => app.clear_history(),
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         _ => {}
     }
 }
@@ -2061,7 +2164,7 @@ fn handle_fields_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('a') => app.fields_add(false),
         KeyCode::Char('f') => app.fields_add(true),
         KeyCode::Char('D') => app.fields_remove(),
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         _ => {}
     }
 }
@@ -2076,7 +2179,7 @@ fn handle_audit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('j') | KeyCode::Down => app.audit_move(true),
         KeyCode::Char('k') | KeyCode::Up => app.audit_move(false),
         KeyCode::Enter => app.audit_open_selected(),
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         _ => {}
     }
 }
@@ -2124,7 +2227,7 @@ to move through, only a tree. */
 fn handle_browse_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         KeyCode::Esc => app.close_browse(),
         KeyCode::Enter | KeyCode::Right => app.browse_choose(),
         KeyCode::Left => app.browse_up(),
@@ -2145,7 +2248,7 @@ a row from the list and never touches the file behind it. */
 fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         KeyCode::Esc => app.close_library(),
         KeyCode::Enter => app.library_choose(),
         KeyCode::Up => app.library_step(false),
@@ -2193,7 +2296,7 @@ unlocks, Esc clears-or-reports, ^c quits. */
 fn handle_unlock_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => app.ask_quit(),
         KeyCode::Esc if !app.active_unlock_value().is_empty() => app.unlock_clear(),
         /* The lock is the screen behind everything, so Esc has nothing to go
         back to. It says so rather than quitting: Esc means the same thing
@@ -2288,6 +2391,7 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     if yes {
         match question {
             Some(Confirm::Quit) => app.quit = true,
+            Some(Confirm::Lock(_)) => app.lock_anyway(),
             /* The delete acts at once: the popup said what it was about, so
             a yes needs no second popup between answer and effect. */
             Some(Confirm::DeleteEntry { id, .. }) => app.confirm_delete_entry(id),
@@ -2403,6 +2507,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_signal_ends_the_wait_for_the_wipe_early() {
+        let board = Board::new(30);
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = signal_hook::low_level::raise(signal_hook::consts::SIGTERM);
+        });
+        let started = std::time::Instant::now();
+        let err = wait_out_the_wipe(&board, 30).unwrap_err();
+        assert!(err.to_string().contains("cleared"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
     use crate::app::Confirm;
     use ratatui::crossterm::event::KeyModifiers;
 
@@ -3242,6 +3359,60 @@ mod tests {
             "{:?}",
             app.session.cut()
         );
+    }
+
+    #[test]
+    fn a_key_after_the_deadline_locks_and_is_not_acted_on() {
+        let mut app = open_browser();
+        app.set_lock_timeout(60);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.session.last_activity = std::time::Instant::now() - Duration::from_secs(61);
+        handle_key(&mut app, KeyCode::Char('D'), KeyModifiers::NONE);
+        assert_eq!(app.view, crate::app::View::Unlock);
+        assert!(app.confirm.is_none(), "the key ran against the vault");
+    }
+
+    #[test]
+    fn a_pointer_moving_over_the_window_is_not_presence() {
+        let mut app = open_browser();
+        let then = std::time::Instant::now() - Duration::from_secs(30);
+        app.session.last_activity = then;
+        let moved = event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, moved);
+        assert_eq!(app.session.last_activity, then);
+        handle_mouse(
+            &mut app,
+            event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                ..moved
+            },
+        );
+        assert!(app.session.last_activity > then);
+    }
+
+    #[test]
+    fn ctrl_c_asks_first_on_every_vault_screen_with_unsaved_changes() {
+        use crate::app::Confirm;
+        let screens: [fn(&mut App); 4] = [
+            |_| {},
+            |app| app.open_fields(),
+            |app| app.open_history(),
+            |app| app.open_audit(),
+        ];
+        for (at, open) in screens.into_iter().enumerate() {
+            let mut app = open_browser();
+            handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            open(&mut app);
+            app.mark_dirty();
+            handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(!app.quit, "screen {at} quit over unsaved changes");
+            assert_eq!(app.confirm, Some(Confirm::Quit), "screen {at}");
+        }
     }
 
     // On the fields screen `D` deletes a field without asking, and in the entry popup `p` copies.

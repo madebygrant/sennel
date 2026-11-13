@@ -215,6 +215,39 @@ fn an_idle_vault_locks_on_the_rust_timer() {
 }
 
 #[test]
+fn lock_with_changes_it_cannot_save_asks_for_a_second_press() {
+    // An in-memory vault has no file to save to, the plainest save that cannot land.
+    let desk = Desk::new(Settings::default(), None);
+    desk.session().open(vault());
+    desk.session().mark_dirty();
+    let first = desk.lock();
+    assert!(!first.ok, "{:?}", first.notes);
+    assert!(
+        first.notes[0].text.contains("Lock again"),
+        "{:?}",
+        first.notes
+    );
+    assert!(desk.status().open);
+    let second = desk.lock();
+    assert!(!desk.status().open, "{:?}", second.notes);
+    assert!(second.notes.iter().any(|n| n.text.contains("were lost")));
+}
+
+#[test]
+fn closing_a_clean_window_while_a_command_runs_briefly_does_not_ask() {
+    let desk = std::sync::Arc::new(Desk::new(Settings::default(), None));
+    desk.session().open(vault());
+    let busy = std::sync::Arc::clone(&desk);
+    let held = std::thread::spawn(move || {
+        let _s = busy.session();
+        std::thread::sleep(Duration::from_millis(50));
+    });
+    std::thread::sleep(Duration::from_millis(10));
+    assert!(!desk.unsaved_or_busy());
+    held.join().unwrap();
+}
+
+#[test]
 fn a_vault_is_created_then_unlocked_from_its_file() {
     let path = std::env::temp_dir().join(format!("sennel-desk-{}.kdbx", std::process::id()));
     let _ = std::fs::remove_file(&path);

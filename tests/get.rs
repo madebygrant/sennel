@@ -628,3 +628,38 @@ fn export_writes_an_owner_only_file_and_never_over_another() {
     );
     std::fs::remove_file(&path).unwrap();
 }
+
+// A stdout that cannot be written to, here a file opened read-only, is a failure, not an empty
+// success: `$(sennel get x --stdout)` would otherwise hand a script nothing and exit 0.
+#[test]
+fn a_stdout_that_refuses_the_write_is_a_failure() {
+    let path = std::env::temp_dir().join(format!("sennel-get-readonly-{}", std::process::id()));
+    std::fs::write(&path, "").unwrap();
+    let read_only = std::fs::File::open(&path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sennel"))
+        .args([
+            "--no-config",
+            "get",
+            "xc entry",
+            "-p",
+            "--stdout",
+            "--db",
+            FIXTURE,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(read_only))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(PASSWORD.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("could not write to stdout"), "{err}");
+}

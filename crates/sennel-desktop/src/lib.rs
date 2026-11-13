@@ -357,12 +357,43 @@ fn quit(app: AppHandle, leaving: State<'_, Leaving>) {
     app.exit(0);
 }
 
+// The default menu's Quit ends the app without `ExitRequested`, so ⌘Q skipped the question about
+// unsaved changes. It is swapped for an item that exits the ordinary way, which asks first.
+#[cfg(target_os = "macos")]
+fn route_quit(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(first)) = menu.items()?.into_iter().next() {
+        let last = first.items()?.len().saturating_sub(1);
+        first.remove_at(last)?;
+        let quit = MenuItem::with_id(app, "sennel-quit", "Quit Sennel", true, Some("CmdOrCtrl+Q"))?;
+        first.append(&quit)?;
+    }
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id() == "sennel-quit" {
+            app.exit(0);
+        }
+    });
+    Ok(())
+}
+
 // Whether a close or quit has to stop and ask first.
 fn must_ask(app: &AppHandle) -> bool {
-    !app.state::<Leaving>().0.load(Ordering::SeqCst) && app.state::<Arc<Desk>>().unsaved()
+    !app.state::<Leaving>().0.load(Ordering::SeqCst) && app.state::<Arc<Desk>>().unsaved_or_busy()
 }
 
 pub fn run(context: tauri::Context) {
+    // A panic on the main thread ends the app without its normal exit. A command's panic is caught
+    // on its own thread and the vault stays open, so that one must not empty the agent.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if std::thread::current().name() == Some("main") {
+            sennel_core::clipboard::emergency_clear();
+            sennel_core::agent::emergency_release();
+        }
+    }));
     let settings = settings::Settings::load().unwrap_or_else(|why| {
         eprintln!("sennel-desktop: {why}");
         settings::Settings::fallback(why)
@@ -381,6 +412,22 @@ pub fn run(context: tauri::Context) {
         .manage(Leaving(AtomicBool::new(false)))
         .setup(move |app| {
             let _ = handle.set(app.handle().clone());
+            #[cfg(target_os = "macos")]
+            route_quit(app.handle())?;
+            // A `kill` or a logout goes through the normal exit, which wipes the clipboard and
+            // takes keys back from the agent. Nobody is there to ask about unsaved changes, so it
+            // does not ask, and every signal is handled, not only the first.
+            use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+            if let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP])
+            {
+                let app = app.handle().clone();
+                std::thread::spawn(move || {
+                    for _ in signals.forever() {
+                        app.state::<Leaving>().0.store(true, Ordering::SeqCst);
+                        app.exit(0);
+                    }
+                });
+            }
             // On a Rust timer, so a hung or hidden webview cannot keep the vault open.
             let app = app.handle().clone();
             let desk = Arc::clone(&desk);

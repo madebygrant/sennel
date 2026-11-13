@@ -68,6 +68,9 @@ chrono.workspace = true
 arboard.workspace = true
 zeroize.workspace = true
 rpassword = "7"
+# Already in the tree under crossterm. A closed terminal or a `kill` must still wipe the clipboard
+# and take keys back from the agent, which only a handler can do.
+signal-hook = "0.3"
 
 [dev-dependencies]
 sennel-core = { path = "crates/sennel-core", features = ["clap", "test-support"] }

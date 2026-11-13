@@ -5,7 +5,8 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use keepass::db::EntryId;
 use ssh_key::{PrivateKey, private::KeypairData};
@@ -26,8 +27,44 @@ const MAX_REPLY: usize = 1 << 20;
 /// The attachment KeePassXC and KeeAgent keep an entry's SSH settings in.
 pub const SETTINGS: &str = "KeeAgent.settings";
 
+// Every conversation runs on a thread the idle lock or the UI needs, so a hung or hostile agent
+// gets this long in all, however slowly it trickles its reply.
+const CONVERSATION: Duration = Duration::from_secs(5);
+const CONNECT: Duration = Duration::from_secs(3);
+
+// The keys this process gave out that a close takes back, for `emergency_release` to find from a
+// panic hook or a signal, where no session is to hand.
+static GIVEN: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// Records which keys a close should take back, replacing what was recorded before.
+pub fn track(blobs: Vec<Vec<u8>>) {
+    *GIVEN.lock().unwrap_or_else(|e| e.into_inner()) = blobs;
+}
+
+/// From a panic hook or a signal: takes back every key `track` recorded. Never blocks on the
+/// record's lock and gives up quietly, since it runs while the process is already going down.
+pub fn emergency_release() {
+    let blobs = match GIVEN.try_lock() {
+        Ok(mut given) => std::mem::take(&mut *given),
+        Err(_) => return,
+    };
+    if blobs.is_empty() {
+        return;
+    }
+    if let Ok(agent) = Agent::connect() {
+        let mut agent = agent.within(CONVERSATION);
+        for blob in blobs {
+            let _ = agent.remove(&blob);
+        }
+    }
+}
+
 pub struct Agent {
     stream: UnixStream,
+    // Set by `within`, for a run of calls that must all finish by then, such as a release.
+    until: Option<Instant>,
+    // After a timeout the agent may still answer, and its late reply would read as the next one's.
+    broken: bool,
 }
 
 impl Agent {
@@ -39,30 +76,96 @@ impl Agent {
     }
 
     pub fn connect_to(path: &Path) -> Result<Self, String> {
-        let stream = UnixStream::connect(path)
-            .map_err(|e| format!("cannot reach the agent at {} · {e}", path.display()))?;
-        // These calls run on the UI thread, so an agent that never answers must not hold the screen.
-        let wait = Some(Duration::from_secs(3));
-        let _ = stream.set_read_timeout(wait);
-        let _ = stream.set_write_timeout(wait);
-        Ok(Agent { stream })
+        // UnixStream has no connect timeout, and a full listen backlog blocks. A thread left behind
+        // holds nothing but the path.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = path.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(UnixStream::connect(at));
+        });
+        let stream = match rx.recv_timeout(CONNECT) {
+            Ok(connected) => connected
+                .map_err(|e| format!("cannot reach the agent at {} · {e}", path.display()))?,
+            Err(_) => return Err(format!("the agent at {} did not answer", path.display())),
+        };
+        Ok(Agent {
+            stream,
+            until: None,
+            broken: false,
+        })
     }
 
+    /// Every call from here on must finish within `limit` of now, all of them together.
+    pub fn within(mut self, limit: Duration) -> Self {
+        self.until = Some(Instant::now() + limit);
+        self
+    }
+
+    // Both directions share one deadline, with the socket's timeout cut to what is left before
+    // every read and write.
     fn call(&mut self, payload: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-        let io = |e: std::io::Error| format!("ssh-agent: {e}");
+        if self.broken {
+            return Err("ssh-agent: gave up on an earlier answer".to_string());
+        }
+        let own = Instant::now() + CONVERSATION;
+        let deadline = self.until.map_or(own, |until| until.min(own));
+        let answer = self.exchange(payload, deadline);
+        self.broken = answer.is_err();
+        answer
+    }
+
+    fn exchange(
+        &mut self,
+        payload: &[u8],
+        deadline: Instant,
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
         let mut message = Zeroizing::new(Vec::with_capacity(payload.len() + 4));
         message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         message.extend_from_slice(payload);
-        self.stream.write_all(&message).map_err(io)?;
+        self.send(&message, deadline)?;
         let mut len = [0u8; 4];
-        self.stream.read_exact(&mut len).map_err(io)?;
+        self.receive(&mut len, deadline)?;
         let len = u32::from_be_bytes(len) as usize;
         if len == 0 || len > MAX_REPLY {
             return Err("ssh-agent sent a reply that is not one".to_string());
         }
         let mut reply = Zeroizing::new(vec![0u8; len]);
-        self.stream.read_exact(&mut reply).map_err(io)?;
+        self.receive(&mut reply, deadline)?;
         Ok(reply)
+    }
+
+    fn left(deadline: Instant) -> Result<Duration, String> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match left.is_zero() {
+            true => Err("ssh-agent: no answer in time".to_string()),
+            false => Ok(left),
+        }
+    }
+
+    fn send(&mut self, mut bytes: &[u8], deadline: Instant) -> Result<(), String> {
+        while !bytes.is_empty() {
+            let _ = self.stream.set_write_timeout(Some(Self::left(deadline)?));
+            match self.stream.write(bytes) {
+                Ok(0) => return Err("ssh-agent closed the connection".to_string()),
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("ssh-agent: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn receive(&mut self, mut buf: &mut [u8], deadline: Instant) -> Result<(), String> {
+        while !buf.is_empty() {
+            let _ = self.stream.set_read_timeout(Some(Self::left(deadline)?));
+            match self.stream.read(buf) {
+                Ok(0) => return Err("ssh-agent closed the connection".to_string()),
+                Ok(n) => buf = &mut buf[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("ssh-agent: {e}")),
+            }
+        }
+        Ok(())
     }
 
     fn expect_success(reply: &[u8], what: &str) -> Result<(), String> {
@@ -288,9 +391,11 @@ pub fn add_entry_key(
     } else {
         key
     };
+    // At least a second: some agents read a lifetime of 0 as no limit at all.
     let lifetime = settings
         .and_then(|s| s.lifetime)
-        .map_or(max_lifetime, |own| own.min(max_lifetime));
+        .map_or(max_lifetime, |own| own.min(max_lifetime))
+        .max(1);
     let confirm = settings.is_some_and(|s| s.confirm);
     agent
         .add(&key, Some(lifetime), confirm)
@@ -341,6 +446,76 @@ pub fn load_vault(agent: &mut Agent, vault: &Vault, max_lifetime: u32) -> Outcom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An agent at a socket in the temp dir that accepts and then does what `serve` says.
+    fn fake_agent(tag: &str, serve: fn(UnixStream)) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("sennel-agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                serve(stream);
+            }
+        });
+        path
+    }
+
+    #[test]
+    fn an_agent_that_never_answers_gives_up_within_the_deadline() {
+        let path = fake_agent("silent", |stream| {
+            std::thread::sleep(Duration::from_secs(30));
+            drop(stream);
+        });
+        let started = Instant::now();
+        let err = Agent::connect_to(&path)
+            .unwrap()
+            .remove(b"key")
+            .unwrap_err();
+        assert!(
+            started.elapsed() < CONVERSATION + Duration::from_secs(1),
+            "{err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_release_of_many_keys_shares_one_deadline_and_stops_after_a_timeout() {
+        let path = fake_agent("many", |stream| {
+            std::thread::sleep(Duration::from_secs(30));
+            drop(stream);
+        });
+        let started = Instant::now();
+        let mut agent = Agent::connect_to(&path)
+            .unwrap()
+            .within(Duration::from_secs(1));
+        assert!((0..6).all(|_| agent.remove(b"key").is_err()));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_agent_that_trickles_its_reply_gives_up_within_the_deadline() {
+        let path = fake_agent("trickle", |mut stream| {
+            let mut ask = [0u8; 64];
+            let _ = stream.read(&mut ask);
+            // A reply that claims 1 MiB and arrives a byte a second.
+            let _ = stream.write_all(&(1u32 << 20).to_be_bytes());
+            for _ in 0..30 {
+                if stream.write_all(&[SUCCESS]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+        let started = Instant::now();
+        assert!(Agent::connect_to(&path).unwrap().remove(b"key").is_err());
+        assert!(started.elapsed() < CONVERSATION + Duration::from_secs(1));
+        let _ = std::fs::remove_file(&path);
+    }
 
     const KEEPASSXC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <EntrySettings>

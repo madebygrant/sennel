@@ -151,6 +151,8 @@ is about, and the title text cannot be copied around a String. */
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Confirm {
     Quit,
+    // `^l` with changes that could not be saved; the reason rides along for the popup.
+    Lock(String),
     /* The title travels with the id for the prompt line. It is a display
        copy of a name field, never the password: the confirm popup must stay
        safe to screenshot with the vault unlocked. */
@@ -636,6 +638,8 @@ pub struct App {
     pub tick: usize,
     pub view: View,
     pub show_help: bool,
+    // `^l` is waiting on a hardware-key save, and locks once it lands.
+    lock_when_saved: bool,
     /* The colours this session draws in. A value on `App`, not a global: a
     theme that can be switched at runtime cannot live in a OnceLock, and a
     mutable global would make the per-theme tests race each other. */
@@ -809,6 +813,7 @@ impl App {
             resting: "locked".into(),
             level: Level::default(),
             flash_until: None,
+            lock_when_saved: false,
             waiting: VecDeque::new(),
             confirm: None,
             quit: false,
@@ -1297,13 +1302,21 @@ impl App {
             return;
         }
         let secs = self.session.lock_after.map_or(0, |d| d.as_secs());
+        // Nobody is here to ask or to touch a key, so the vault locks anyway, and the message says
+        // what it cost.
+        let lost = self.session.unsaved_before_lock(false);
         self.lock();
         let hint = if self.quick_ready() {
             "  ·  enter for Touch ID"
         } else {
             ""
         };
-        self.warn(format!("locked after {secs} seconds idle{hint}"));
+        match lost {
+            Some(why) => self.error(format!(
+                "locked after {secs} seconds idle  ·  unsaved changes were lost: {why}{hint}"
+            )),
+            None => self.warn(format!("locked after {secs} seconds idle{hint}")),
+        }
     }
 
     /* `^l`: the same wipe on purpose rather than on a timer. Locking used to
@@ -1313,6 +1326,33 @@ impl App {
             self.say("already locked");
             return;
         }
+        if let Some(why) = self.session.unsaved_before_lock(false) {
+            // A save waiting on the hardware key: ask for the touch, then lock once it has landed.
+            if self.has_pending() {
+                self.lock_when_saved = true;
+                self.defer_for_touch(Pending::Save);
+            } else {
+                self.confirm = Some(Confirm::Lock(why));
+            }
+            return;
+        }
+        self.lock_anyway();
+    }
+
+    // After the touch `^l` asked for: lock if the save landed, ask if it did not.
+    fn lock_after_save(&mut self) {
+        match self.session.is_dirty() {
+            false => self.lock_anyway(),
+            true => {
+                self.confirm = Some(Confirm::Lock(
+                    "the save with the hardware key did not land".into(),
+                ))
+            }
+        }
+    }
+
+    /// `^l` answered yes: lock even though unsaved changes go with it.
+    pub fn lock_anyway(&mut self) {
         self.lock();
         self.say(match self.quick_ready() {
             true => "locked  ·  enter for Touch ID",
@@ -1325,7 +1365,6 @@ impl App {
     which zeroize on drop, so nothing may be copied out first. */
     fn lock(&mut self) {
         let failed = self.session.lock();
-        self.report_released(failed);
         self.group_cursor = None;
         self.entry_cursor = None;
         /* Zeroized, not cleared: `String::clear` sets the length to zero and
@@ -1355,11 +1394,28 @@ impl App {
         self.confirm = None;
         self.close_menu();
         self.commands = None;
+        // A search is often a title, and a message often names an entry or a field.
+        if let Some(needle) = self.search.as_mut() {
+            needle.zeroize();
+        }
         self.search = None;
+        if let Some((key, _)) = self.rows_cache.as_mut()
+            && let Some(needle) = key.needle.as_mut()
+        {
+            needle.zeroize();
+        }
+        self.rows_cache = None;
+        self.searcher.clear();
+        self.waiting.clear();
+        self.flash_until = None;
+        self.show_help = false;
         self.band = false;
         self.view = View::Unlock;
         self.resting = "locked".into();
+        self.stage = self.resting.clone();
         self.refresh_db_state();
+        // After the messages are cleared, so this one is not cleared with them.
+        self.report_released(failed);
     }
 
     /// Wipe the clipboard if what is on it is still ours. Called on the way
@@ -3246,6 +3302,9 @@ impl App {
             Pending::Merge => self.merge_vault(),
         }
         self.flushing = false;
+        if std::mem::take(&mut self.lock_when_saved) {
+            self.lock_after_save();
+        }
     }
 
     /* Autosave after every mutation. Dirty is set before the attempt and
@@ -4873,6 +4932,35 @@ pub mod tests {
         assert_eq!(app.stage, "locked");
     }
 
+    #[test]
+    fn an_idle_lock_that_drops_unsaved_changes_says_so() {
+        // An in-memory vault has no file to save to, the plainest save that cannot land.
+        let mut app = open_app();
+        app.set_lock_timeout(60);
+        app.mark_dirty();
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
+        app.check_idle();
+        assert!(!app.session.is_open());
+        assert!(
+            app.stage
+                .contains("unsaved changes were lost: the vault has no file yet"),
+            "{}",
+            app.stage
+        );
+    }
+
+    #[test]
+    fn ctrl_l_asks_before_dropping_unsaved_changes() {
+        let mut app = open_app();
+        app.mark_dirty();
+        app.lock_now();
+        assert!(app.session.is_open(), "^l locked over unsaved changes");
+        assert!(matches!(app.confirm, Some(Confirm::Lock(_))));
+        app.confirm = None;
+        app.lock_anyway();
+        assert!(!app.session.is_open());
+    }
+
     // Monotonic clocks stop during suspend; the wall clock sees it.
     #[test]
     fn a_suspend_counts_as_idle_time() {
@@ -5629,18 +5717,37 @@ pub mod tests {
     }
 
     #[test]
-    fn locking_drops_a_save_that_was_waiting_for_the_key() {
+    fn ctrl_l_saves_with_the_key_before_it_locks_and_the_idle_lock_does_not_wait() {
         let tmp = temp_path("keyed-lock");
         Vault::new()
             .save_as_keyed(&tmp.0, "pw", None, keyed(&tmp.0))
             .unwrap();
-        let mut app = open_app();
-        app.session
-            .open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
-        app.persist();
-        assert!(app.has_pending());
+        let keyed_app = || {
+            let mut app = open_app();
+            app.session
+                .open(Vault::open_keyed(&tmp.0, "pw", None, keyed(&tmp.0)).unwrap());
+            app.persist();
+            assert!(app.has_pending());
+            app
+        };
+
+        // Somebody pressed ^l, so the save waits for their touch and the lock follows it.
+        let mut app = keyed_app();
         app.lock_now();
+        assert!(app.session.is_open(), "^l locked before the save");
+        assert!(app.stage.contains("touch your key"), "{}", app.stage);
+        app.flush_pending();
+        assert!(!app.session.is_open(), "the save landed and nothing locked");
         assert!(!app.has_pending());
+
+        // Nobody is there for an idle lock, so it locks without the save.
+        let mut app = keyed_app();
+        app.set_lock_timeout(60);
+        app.session.last_activity = Instant::now() - Duration::from_secs(61);
+        app.check_idle();
+        assert!(!app.session.is_open());
+        assert!(!app.has_pending());
+        assert!(app.stage.contains("were lost"), "{}", app.stage);
     }
 
     // `^f` keeps both: theirs is merged into the work that was refused a save.
