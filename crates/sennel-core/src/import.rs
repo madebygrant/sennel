@@ -11,6 +11,10 @@ The CSV parser is here rather than a dependency because RFC 4180 is small
 and the alternative is pulling a crate into a password manager to read
 about sixty lines' worth of quoting rules. */
 
+use zeroize::Zeroizing;
+
+use crate::wiped::WipedString;
+
 /// One row of an export, in Sennel's terms.
 /* Holds a password and a one-time seed in the clear, so it wipes on drop. The
 file it came from is plaintext on disk either way — which is why `import`
@@ -48,16 +52,24 @@ impl Row {
     /// What `Drop` does, observable on a live value. See `vault::Extra::wipe`.
     pub fn wipe(&mut self) {
         use zeroize::Zeroize;
-        self.password.zeroize();
-        self.otp.zeroize();
-        // Notes in an export routinely hold recovery codes and PINs.
-        self.notes.zeroize();
+        for cell in [
+            &mut self.group,
+            &mut self.username,
+            &mut self.password,
+            &mut self.url,
+            &mut self.notes,
+            &mut self.otp,
+        ] {
+            cell.zeroize();
+        }
     }
 }
 
 impl Drop for Row {
     fn drop(&mut self) {
+        use zeroize::Zeroize;
         self.wipe();
+        self.title.zeroize();
     }
 }
 
@@ -110,18 +122,19 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
         .iter()
         .zip(&map)
         .filter(|(_, c)| c.is_none())
-        .map(|(name, _)| name.clone())
+        .map(|(name, _)| name.to_string())
         .filter(|name| !name.trim().is_empty())
         .collect();
 
     let mut rows = Vec::new();
-    for record in records {
+    for mut record in records {
         // A trailing newline gives one empty record; it is not an entry.
         if record.iter().all(|f| f.trim().is_empty()) {
             continue;
         }
         let mut row = Row::default();
-        for (at, field) in record.into_iter().enumerate() {
+        // Cells left behind (ignored columns, a second url) are wiped when `record` drops.
+        for (at, field) in record.iter_mut().enumerate() {
             let Some(Some(into)) = map.get(at) else {
                 continue;
             };
@@ -138,7 +151,7 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
             /* First one wins: 1Password writes several url columns, and the
             first is the one the item is actually for. */
             if slot.is_empty() {
-                *slot = field;
+                *slot = std::mem::take(&mut **field);
             }
         }
         if row.title.trim().is_empty() {
@@ -153,12 +166,16 @@ pub fn read_csv(text: &str) -> Result<Import, String> {
 a doubled quote inside a quoted field is one quote. Anything else is taken
 literally rather than refused — an export with a stray quote in a notes
 field should still import. */
-fn parse(text: &str) -> Vec<Vec<String>> {
+fn parse(text: &str) -> Vec<Vec<Zeroizing<String>>> {
+    const CELL: usize = 64;
     let mut records = Vec::new();
     let mut record = Vec::new();
-    let mut field = String::new();
+    let mut field = WipedString::with_capacity(CELL);
     let mut quoted = false;
     let mut chars = text.chars().peekable();
+    let cut = |field: &mut WipedString| {
+        std::mem::replace(field, WipedString::with_capacity(CELL)).into_inner()
+    };
     while let Some(c) = chars.next() {
         match c {
             '"' if quoted => {
@@ -170,10 +187,10 @@ fn parse(text: &str) -> Vec<Vec<String>> {
                 }
             }
             '"' if field.is_empty() => quoted = true,
-            ',' if !quoted => record.push(std::mem::take(&mut field)),
+            ',' if !quoted => record.push(cut(&mut field)),
             '\r' if !quoted => {}
             '\n' if !quoted => {
-                record.push(std::mem::take(&mut field));
+                record.push(cut(&mut field));
                 records.push(std::mem::take(&mut record));
             }
             _ => field.push(c),
@@ -181,7 +198,7 @@ fn parse(text: &str) -> Vec<Vec<String>> {
     }
     // A file with no trailing newline still ends in a record.
     if !field.is_empty() || !record.is_empty() {
-        record.push(field);
+        record.push(field.into_inner());
         records.push(record);
     }
     records
@@ -461,9 +478,9 @@ mod tests {
         let mut row = Row {
             group: String::new(),
             title: "mail".into(),
-            username: String::new(),
+            username: "ada@example.com".into(),
             password: "imported-password-in-the-clear".repeat(4),
-            url: String::new(),
+            url: "https://bank.example".into(),
             notes: "recovery pin 4821".repeat(4),
             otp: "JBSWY3DPEHPK3PXP".repeat(4),
         };
@@ -471,6 +488,8 @@ mod tests {
             (row.password.as_ptr(), row.password.capacity(), "password"),
             (row.otp.as_ptr(), row.otp.capacity(), "otp"),
             (row.notes.as_ptr(), row.notes.capacity(), "notes"),
+            (row.username.as_ptr(), row.username.capacity(), "username"),
+            (row.url.as_ptr(), row.url.capacity(), "url"),
         ];
         row.wipe();
         for (ptr, cap, what) in each {

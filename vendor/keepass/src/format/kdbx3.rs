@@ -8,6 +8,7 @@ use crate::{
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use std::convert::TryFrom;
 
@@ -22,7 +23,7 @@ struct KDBX3Header {
     kdf_config: KdfConfig,
 
     outer_iv: Vec<u8>,
-    protected_stream_key: Vec<u8>,
+    protected_stream_key: Zeroizing<Vec<u8>>,
     stream_start: Vec<u8>,
     inner_cipher: InnerCipherConfig,
     body_start: usize,
@@ -35,7 +36,7 @@ fn parse_outer_header(data: &[u8]) -> Result<KDBX3Header, Kdbx3OuterHeaderError>
     let mut transform_seed: Option<Vec<u8>> = None;
     let mut transform_rounds: Option<u64> = None;
     let mut outer_iv: Option<Vec<u8>> = None;
-    let mut protected_stream_key: Option<Vec<u8>> = None;
+    let mut protected_stream_key: Option<Zeroizing<Vec<u8>>> = None;
     let mut stream_start: Option<Vec<u8>> = None;
     let mut inner_cipher: Option<InnerCipherConfig> = None;
 
@@ -100,7 +101,7 @@ fn parse_outer_header(data: &[u8]) -> Result<KDBX3Header, Kdbx3OuterHeaderError>
             7 => outer_iv = Some(entry_buffer.to_vec()),
 
             // PROTECTEDSTREAMKEY - Key for decrypting the inner protected values
-            8 => protected_stream_key = Some(entry_buffer.to_vec()),
+            8 => protected_stream_key = Some(Zeroizing::new(entry_buffer.to_vec())),
 
             // STREAMSTARTBYTES - First bytes of decrypted payload (to check correct decryption)
             9 => stream_start = Some(entry_buffer.to_vec()),
@@ -205,7 +206,7 @@ pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 pub(crate) fn decrypt_kdbx3(
     data: &[u8],
     db_key: &DatabaseKey,
-) -> Result<(DatabaseConfig, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
+) -> Result<(DatabaseConfig, Box<dyn Cipher>, Zeroizing<Vec<u8>>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
     let header = parse_outer_header(data)
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx3(Kdbx3OpenError::OuterHeader(e))))?;
@@ -230,23 +231,28 @@ pub(crate) fn decrypt_kdbx3(
     let payload_encrypted = data.get(pos..).ok_or(DatabaseOpenError::UnexpectedEof)?;
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
+    // SENNEL PATCH: every key, the decrypted payload and the XML are wiped, as in KDBX 4.
+    let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = calculate_sha256(&key_elements);
+    let composite_key = Zeroizing::new(calculate_sha256(&key_elements));
 
     // transform the key
-    let transformed_key = config
-        .kdf_config
-        .get_kdf_seeded(&header.transform_seed)
-        .transform_key(&composite_key)?;
+    let transformed_key = Zeroizing::new(
+        config
+            .kdf_config
+            .get_kdf_seeded(&header.transform_seed)
+            .transform_key(&composite_key)?,
+    );
 
-    let master_key = calculate_sha256(&[header.master_seed.as_ref(), &transformed_key]);
+    let master_key = Zeroizing::new(calculate_sha256(&[header.master_seed.as_ref(), &transformed_key[..]]));
 
     // Decrypt payload
-    let payload = config
-        .outer_cipher_config
-        .get_cipher(&master_key, header.outer_iv.as_ref())?
-        .decrypt(payload_encrypted)?;
+    let payload = Zeroizing::new(
+        config
+            .outer_cipher_config
+            .get_cipher(&master_key, header.outer_iv.as_ref())?
+            .decrypt(payload_encrypted)?,
+    );
 
     // Check if we decrypted correctly
     let payload_start = payload
@@ -256,7 +262,8 @@ pub(crate) fn decrypt_kdbx3(
         return Err(DatabaseKeyError::IncorrectKey.into());
     }
 
-    let mut buf = Vec::new();
+    // Never larger than the payload it is cut from, so it does not grow.
+    let mut buf = Zeroizing::new(Vec::with_capacity(payload.len()));
 
     pos = 32;
     let mut block_index = 0;
@@ -300,13 +307,13 @@ pub(crate) fn decrypt_kdbx3(
         }
 
         // Decompress block_buffer_compressed
-        buf.append(&mut block_buffer_compressed.to_vec());
+        buf.extend_from_slice(block_buffer_compressed);
 
         pos += 40 + block_size;
         block_index += 1;
     }
 
-    let xml = compression.decompress(&buf)?;
+    let xml = Zeroizing::new(compression.decompress(&buf)?);
 
     Ok((config, inner_decryptor, xml))
 }

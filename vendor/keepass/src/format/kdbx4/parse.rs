@@ -4,6 +4,7 @@ use std::convert::{TryFrom, TryInto};
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{
     config::{CompressionConfig, DatabaseConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig},
@@ -47,7 +48,7 @@ pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 pub(crate) fn decrypt_kdbx4(
     data: &[u8],
     db_key: &DatabaseKey,
-) -> Result<(DatabaseConfig, Vec<Value<Vec<u8>>>, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
+) -> Result<(DatabaseConfig, Vec<Value<Vec<u8>>>, Box<dyn Cipher>, Zeroizing<Vec<u8>>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
 
     // parse header
@@ -85,22 +86,28 @@ pub(crate) fn decrypt_kdbx4(
     let db_key = db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
+    // SENNEL PATCH: every key and the decrypted payload are wiped when this returns.
+    let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = crypt::calculate_sha256(&key_elements);
-    let transformed_key = outer_header
-        .kdf_config
-        .get_kdf_seeded(&outer_header.kdf_seed)
-        .transform_key(&composite_key)?;
-    let master_key = crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key]);
+    let composite_key = Zeroizing::new(crypt::calculate_sha256(&key_elements));
+    let transformed_key = Zeroizing::new(
+        outer_header
+            .kdf_config
+            .get_kdf_seeded(&outer_header.kdf_seed)
+            .transform_key(&composite_key)?,
+    );
+    let master_key = Zeroizing::new(crypt::calculate_sha256(&[
+        outer_header.master_seed.as_ref(),
+        &transformed_key[..],
+    ]));
 
     // verify credentials
-    let hmac_key = crypt::calculate_sha512(&[
+    let hmac_key = Zeroizing::new(crypt::calculate_sha512(&[
         &outer_header.master_seed,
-        &transformed_key,
+        &transformed_key[..],
         &hmac_block_stream::HMAC_KEY_END,
-    ]);
-    let header_hmac_key = hmac_block_stream::get_hmac_block_key(u64::MAX, &hmac_key);
+    ]));
+    let header_hmac_key = Zeroizing::new(hmac_block_stream::get_hmac_block_key(u64::MAX, &hmac_key));
 
     #[allow(clippy::expect_used)] // HMAC block key is always correctly sized, so this can't fail
     if header_hmac
@@ -116,15 +123,19 @@ pub(crate) fn decrypt_kdbx4(
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx4(Kdbx4OpenError::BlockStream(e))))?;
 
     // Decrypt and decompress encrypted payload
-    let payload_compressed = outer_header
-        .outer_cipher_config
-        .get_cipher(&master_key, &outer_header.outer_iv)?
-        .decrypt(&payload_encrypted)?;
+    let payload_compressed = Zeroizing::new(
+        outer_header
+            .outer_cipher_config
+            .get_cipher(&master_key, &outer_header.outer_iv)?
+            .decrypt(&payload_encrypted)?,
+    );
 
-    let payload = outer_header
-        .compression_config
-        .get_compression()
-        .decompress(&payload_compressed)?;
+    let payload = Zeroizing::new(
+        outer_header
+            .compression_config
+            .get_compression()
+            .decompress(&payload_compressed)?,
+    );
 
     // KDBX4 has inner header, too - parse it
     let (header_attachments, inner_header, body_start) = parse_inner_header(&payload)
@@ -149,7 +160,7 @@ pub(crate) fn decrypt_kdbx4(
         public_custom_data: outer_header.public_custom_data,
     };
 
-    Ok((config, header_attachments, inner_decryptor, xml.to_vec()))
+    Ok((config, header_attachments, inner_decryptor, Zeroizing::new(xml.to_vec())))
 }
 
 fn parse_outer_header(data: &[u8]) -> Result<(KDBX4OuterHeader, usize), Kdbx4OuterHeaderError> {
@@ -324,7 +335,7 @@ fn parse_inner_header(
                 inner_random_stream = Some(InnerCipherConfig::try_from(LittleEndian::read_u32(entry_buffer))?);
             }
 
-            INNER_HEADER_RANDOM_STREAM_KEY => inner_random_stream_key = Some(entry_buffer.to_vec()),
+            INNER_HEADER_RANDOM_STREAM_KEY => inner_random_stream_key = Some(Zeroizing::new(entry_buffer.to_vec())),
 
             #[allow(clippy::indexing_slicing)] // we check entry buffer length at the beginning of the block
             INNER_HEADER_BINARY_ATTACHMENTS => {

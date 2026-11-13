@@ -55,7 +55,8 @@ struct KDBX4OuterHeader {
 
 struct KDBX4InnerHeader {
     inner_random_stream: InnerCipherConfig,
-    inner_random_stream_key: Vec<u8>,
+    // SENNEL PATCH: it decrypts every protected value, so it is wiped like the other keys.
+    inner_random_stream_key: zeroize::Zeroizing<Vec<u8>>,
 }
 
 #[cfg(feature = "save_kdbx4")]

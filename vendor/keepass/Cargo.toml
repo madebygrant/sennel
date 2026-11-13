@@ -213,6 +213,7 @@ version = "0.13"
 
 [dependencies.hybrid-array]
 version = "0.4"
+features = ["zeroize"]
 
 [dependencies.indexmap]
 version = "2"

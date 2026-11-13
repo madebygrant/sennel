@@ -1135,7 +1135,7 @@ impl Desk {
                 .unwrap_or_default(),
             has_password: !password.is_empty(),
             password_length: password.chars().count(),
-            has_otp: sennel_core::vault::raw_otp(&e).is_some(),
+            has_otp: sennel_core::vault::has_otp(&e),
             otp: sennel_core::vault::totp_shape(&e)
                 .map(|(period, digits)| OtpShape { period, digits }),
             // On an env entry the variables are the view itself, so the paperclip counts files only.
@@ -1834,20 +1834,19 @@ impl Desk {
         if !self.session().is_open() {
             return Err("locked".into());
         }
-        let found = scanned(Zeroizing::new(qr::from_clipboard()?), title, username)?;
-        qr::clear_clipboard();
-        Ok(found)
+        let text = qr::from_clipboard()?;
+        // Any otpauth QR is a secret, even one `seed` then refuses, such as a counter-based code.
+        if text.trim().starts_with("otpauth") {
+            qr::clear_clipboard();
+        }
+        scanned(text, title, username)
     }
 
     pub fn scan_file(&self, path: &str, title: &str, username: &str) -> Result<Scanned, String> {
         if !self.session().is_open() {
             return Err("locked".into());
         }
-        scanned(
-            Zeroizing::new(qr::from_file(Path::new(path))?),
-            title,
-            username,
-        )
+        scanned(qr::from_file(Path::new(path))?, title, username)
     }
 
     fn sort(&self) -> SortOrder {
@@ -1955,7 +1954,7 @@ impl Desk {
 }
 
 fn scanned(text: Zeroizing<String>, title: &str, username: &str) -> Result<Scanned, String> {
-    let url = Zeroizing::new(qr::seed(&text, title, username)?);
+    let url = qr::seed(&text, title, username)?;
     let otp =
         sennel_core::vault::totp_shape_of(&url).map(|(period, digits)| OtpShape { period, digits });
     let label = sennel_core::vault::totp_label_of(&url);

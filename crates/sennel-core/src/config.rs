@@ -484,10 +484,9 @@ impl Generator {
     /// ten digits. One number the flashes and the popup can share.
     pub fn bits(&self) -> f64 {
         match self.kind {
-            crate::generator::Kind::Complex => crate::generator::entropy_bits(
-                self.length,
-                self.classes.alphabet_len(self.exclude_ambiguous),
-            ),
+            crate::generator::Kind::Complex => {
+                crate::generator::generated_bits(self.length, self.classes, self.exclude_ambiguous)
+            }
             crate::generator::Kind::Passphrase => crate::generator::passphrase_bits(self.words),
             crate::generator::Kind::Pin => crate::generator::pin_bits(self.pin_length),
         }

@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::wiped::WipedString;
+
 use keepass::{
     ChallengeResponseKey, Database, DatabaseKey,
     config::KdfConfig,
@@ -104,8 +106,30 @@ pub fn invisible(c: char) -> bool {
 }
 
 /// The raw `otp` field, which is an `otpauth://` URL when there is one.
-pub fn raw_otp(entry: &EntryRef<'_>) -> Option<String> {
-    entry.get_raw_otp_value().map(str::to_string)
+pub fn raw_otp(entry: &EntryRef<'_>) -> Option<Zeroizing<String>> {
+    entry
+        .get_raw_otp_value()
+        .map(|url| Zeroizing::new(url.to_string()))
+}
+
+/// Whether an entry has a one-time code, without copying its seed.
+pub fn has_otp(entry: &EntryRef<'_>) -> bool {
+    entry.get_raw_otp_value().is_some()
+}
+
+// Case-insensitive `contains` against an already lowercased needle. ASCII text is compared in
+// place; anything else is lowercased into a copy that is wiped, since the text may be a password.
+fn contains_folded(text: &str, lower: &str) -> bool {
+    if lower.is_empty() {
+        return true;
+    }
+    if text.is_ascii() && lower.is_ascii() {
+        return text
+            .as_bytes()
+            .windows(lower.len())
+            .any(|w| w.eq_ignore_ascii_case(lower.as_bytes()));
+    }
+    Zeroizing::new(text.to_lowercase()).contains(lower)
 }
 
 /* What a site gives you is either a long `otpauth://` URL (behind the QR
@@ -113,7 +137,7 @@ code) or a run of base32 with spaces in it ("JBSW Y3DP EHPK 3PXP"). Both
 have to work: retyping the second into the first by hand is exactly the
 kind of chore a password manager exists to absorb. The URL is what KDBX
 stores, so a bare secret gets wrapped in one. */
-pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, String> {
+pub fn totp_url(input: &str, title: &str, username: &str) -> Result<Zeroizing<String>, String> {
     let input = input.trim();
     if input.is_empty() {
         return Err("nothing to read".into());
@@ -140,11 +164,12 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
     }
     /* Groupings and hyphens are how the secret is printed, never part of it,
     and base32 is case-insensitive. */
-    let secret: String = input
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .collect::<String>()
-        .to_uppercase();
+    let mut secret = WipedString::with_capacity(input.len());
+    for c in input.chars().filter(|c| !c.is_whitespace() && *c != '-') {
+        for upper in c.to_uppercase() {
+            secret.push(upper);
+        }
+    }
     if secret.is_empty() {
         return Err("nothing to read".into());
     }
@@ -166,10 +191,17 @@ pub fn totp_url(input: &str, title: &str, username: &str) -> Result<String, Stri
     /* Digits and period spelled out rather than left to a default: see
     `with_digits` for why the default is the one thing here that cannot be
     left unsaid. */
-    let url = format!(
-        "otpauth://totp/{}?secret={secret}&digits=6&period=30",
-        urlish(&label)
-    );
+    let mut url = WipedString::with_capacity(128);
+    for part in [
+        "otpauth://totp/",
+        &urlish(&label),
+        "?secret=",
+        &secret,
+        "&digits=6&period=30",
+    ] {
+        url.push_str(part);
+    }
+    let url = url.into_inner();
     /* Parsed before it is stored: a seed that cannot produce a code must be
     refused while the form is still open and the text still on screen. */
     url.parse::<keepass::db::TOTP>()
@@ -182,18 +214,20 @@ an `otpauth://` url does not say — the keepass crate treats it as eight, so
 a url written by a site that left `digits` out would produce codes that are
 the right secret and the wrong length. Spelled out on the way in and on the
 way to the screen, and never by rewriting what is stored. */
-fn with_digits(url: &str) -> String {
+fn with_digits(url: &str) -> Zeroizing<String> {
+    let mut out = WipedString::with_capacity(url.len());
+    out.push_str(url);
     let Some((_, query)) = url.split_once('?') else {
-        return url.to_string();
+        return out.into_inner();
     };
     // Exactly `digits`: keepass reads no other spelling, and falls back to 8 for `DIGITS=`.
     let named = query
         .split('&')
         .any(|pair| pair.split('=').next() == Some("digits"));
-    if named {
-        return url.to_string();
+    if !named {
+        out.push_str("&digits=6");
     }
-    format!("{url}&digits=6")
+    out.into_inner()
 }
 
 // keepass takes any period and digit count. A period of 0 divides by zero and a large digit count
@@ -556,17 +590,17 @@ impl<'v> Refs<'v> {
                 if code(other).is_none() && other != 'O' {
                     return Err(unreadable());
                 }
-                let lower = needle.to_lowercase();
+                let lower = Zeroizing::new(needle.to_lowercase());
                 let matches = |e: &EntryRef<'_>| match code(other) {
                     Some(name) => e
                         .fields
                         .get(name)
-                        .is_some_and(|v| v.get().to_lowercase().contains(&lower)),
+                        .is_some_and(|v| contains_folded(v.get(), &lower)),
                     None => e
                         .fields
                         .iter()
                         .filter(|(name, _)| !STANDARD.contains(&name.as_str()))
-                        .any(|(_, v)| v.get().to_lowercase().contains(&lower)),
+                        .any(|(_, v)| contains_folded(v.get(), &lower)),
                 };
                 let hits: Vec<EntryId> = vault
                     .entry_refs()
@@ -2886,8 +2920,13 @@ pub fn audit(vault: &Vault) -> Vec<(EntryId, Issue)> {
     use std::hash::{Hash, Hasher};
 
     let entries = vault.entry_refs();
+    // Keyed per run, so the bucket keys left in freed memory cannot be matched against guesses.
+    // If the OS has no randomness the key stays zero, which still finds reuse.
+    let mut key = Zeroizing::new([0u8; 16]);
+    let _ = getrandom::fill(&mut key[..]);
     let digest = |password: &str| {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(&key[..]);
         password.hash(&mut hasher);
         hasher.finish()
     };
@@ -2961,8 +3000,8 @@ Secrets included, because the point is that they survived unchanged; this
 never leaves the process. Sorted, because entry order is not something a
 format change promises to keep. The separator is a control character no
 field can contain, so two entries cannot collide by concatenation. */
-pub fn inventory(vault: &Vault) -> Vec<String> {
-    let mut out: Vec<String> = vault
+pub fn inventory(vault: &Vault) -> Vec<Zeroizing<String>> {
+    let mut out: Vec<Zeroizing<String>> = vault
         .entry_refs()
         .iter()
         .map(|e| {
@@ -2970,18 +3009,25 @@ pub fn inventory(vault: &Vault) -> Vec<String> {
                 .parent_group_of_entry(&e.id())
                 .map(|g| vault.group_path(&g).join("/"))
                 .unwrap_or_default();
-            [
+            let parts = [
                 group.as_str(),
                 e.title(),
                 e.username(),
                 e.password(),
                 e.url(),
                 e.notes(),
-            ]
-            .join("\u{1}")
+            ];
+            let mut row = WipedString::with_capacity(256);
+            for (at, part) in parts.iter().enumerate() {
+                if at > 0 {
+                    row.push('\u{1}');
+                }
+                row.push_str(part);
+            }
+            row.into_inner()
         })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     out
 }
 
@@ -4727,6 +4773,16 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_search_folds_case_the_way_lowercasing_did() {
+        assert!(contains_folded("Hunter2Pass", "hunter2"));
+        assert!(contains_folded("anything", ""));
+        assert!(!contains_folded("hunt", "hunter"));
+        assert!(contains_folded("ÉCOLE secrète", "école"));
+        // The Kelvin sign lowercases to an ASCII k, so non-ASCII text takes the copying path.
+        assert!(contains_folded("\u{212A}ey", "key"));
+    }
+
+    #[test]
     fn a_reference_by_id_reads_the_other_entry() {
         use crate::vault::{PASSWORD, USERNAME, resolved};
         let mut v = vault();
@@ -5910,7 +5966,7 @@ mod tests {
         otherwise mint eight digits where the site expects six. */
         let url = totp_url("otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP", "x", "y").unwrap();
         assert_eq!(
-            url,
+            url.as_str(),
             "otpauth://totp/Bank:me?secret=JBSWY3DPEHPK3PXP&digits=6"
         );
 
@@ -5918,13 +5974,15 @@ mod tests {
         let from_print = totp_url("jbsw y3dp-ehpk 3pxp", "Bank", "me").unwrap();
         assert!(
             from_print.starts_with("otpauth://totp/Bank:me?secret="),
-            "{from_print}"
+            "{}",
+            *from_print
         );
         assert!(
             from_print.contains("secret=JBSWY3DPEHPK3PXP"),
-            "{from_print}"
+            "{}",
+            *from_print
         );
-        assert!(from_print.contains("digits=6"), "{from_print}");
+        assert!(from_print.contains("digits=6"), "{}", *from_print);
 
         // And both produce the same six digits.
         let a: keepass::db::TOTP = url.parse().unwrap();
@@ -5967,7 +6025,7 @@ mod tests {
         assert_eq!(code.len(), 6, "{code}");
         // And the file still holds exactly what was put in it.
         assert_eq!(
-            raw_otp(&entry).as_deref(),
+            raw_otp(&entry).as_deref().map(String::as_str),
             Some("otpauth://totp/Bank?secret=JBSWY3DPEHPK3PXP")
         );
     }
@@ -6009,7 +6067,10 @@ mod tests {
         let url = totp_url("JBSWY3DPEHPK3PXP", "Bank", "me").unwrap();
         v.set_otp(&id, Some(&url)).unwrap();
         let entry = v.get_entry(&id).unwrap();
-        assert_eq!(raw_otp(&entry).as_deref(), Some(url.as_str()));
+        assert_eq!(
+            raw_otp(&entry).as_deref().map(String::as_str),
+            Some(url.as_str())
+        );
         let (code, left) = totp_now(&entry).expect("no code from a good seed");
         assert_eq!(code.len(), 6);
         assert!(left <= 30 && left > 0, "{left}");

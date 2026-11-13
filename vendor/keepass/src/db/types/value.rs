@@ -15,6 +15,15 @@ pub enum Value<T: Zeroize> {
     Protected(SecretBox<T>),
 }
 
+// SENNEL PATCH: an unprotected title, username or URL is wiped when it drops, as a protected one is.
+impl<T: Zeroize> Drop for Value<T> {
+    fn drop(&mut self) {
+        if let Value::Unprotected(data) = self {
+            data.zeroize();
+        }
+    }
+}
+
 impl<T: Zeroize + Display> std::fmt::Display for Value<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

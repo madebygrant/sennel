@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 use keepass::db::{CustomDataItem, CustomDataValue, EntryId, EntryRef, Times};
 
 use crate::vault::{EntryExt, STANDARD, Vault, VaultError, resolve_text};
+use crate::wiped::WipedString;
 
 /// Entry custom data that marks an entry as a set of environment variables.
 pub const TYPE_KEY: &str = "sennel.type";
@@ -463,13 +464,17 @@ pub fn quoted(value: &str, one_line: bool) -> Zeroizing<String> {
         .chars()
         // No `~`: a shell sourcing the file expands a leading one and any after a `:`.
         .all(|c| c.is_ascii_alphanumeric() || "-_./:@+,%=^".contains(c));
+    let mut out = WipedString::with_capacity(value.len() + 2);
     if bare {
-        return Zeroizing::new(value.to_string());
+        out.push_str(value);
+        return out.into_inner();
     }
     if !value.contains('\'') && !(one_line && value.contains(['\n', '\r'])) {
-        return Zeroizing::new(format!("'{value}'"));
+        out.push('\'');
+        out.push_str(value);
+        out.push('\'');
+        return out.into_inner();
     }
-    let mut out = Zeroizing::new(String::with_capacity(value.len() + 2));
     out.push('"');
     for c in value.chars() {
         match c {
@@ -483,7 +488,7 @@ pub fn quoted(value: &str, one_line: bool) -> Zeroizing<String> {
         }
     }
     out.push('"');
-    out
+    out.into_inner()
 }
 
 /// One line of an exported file.
@@ -494,7 +499,7 @@ pub fn render_var(
     disabled: bool,
     comment: &str,
 ) -> Zeroizing<String> {
-    let mut line = Zeroizing::new(String::new());
+    let mut line = WipedString::with_capacity(name.len() + value.len() + 16);
     if disabled {
         line.push_str("# ");
     }
@@ -509,7 +514,7 @@ pub fn render_var(
         line.push_str(" # ");
         line.push_str(comment);
     }
-    line
+    line.into_inner()
 }
 
 fn custom_str<'a>(entry: &'a EntryRef<'_>, key: &str) -> Option<&'a str> {
@@ -572,7 +577,8 @@ pub fn var_count(entry: &EntryRef<'_>) -> usize {
 /// resolved, falling back to the raw text when one is broken, as the other exports do. Returns the
 /// fields left out because their names are not variable names.
 pub fn export(vault: &Vault, entry: &EntryRef<'_>) -> (Zeroizing<String>, Vec<String>) {
-    let mut out = Zeroizing::new(String::new());
+    let mut out =
+        WipedString::with_capacity(entry.fields.values().map(|v| v.get().len() * 2 + 64).sum());
     let mut skipped = Vec::new();
     let value = |field: &str| {
         let raw = entry
@@ -635,7 +641,7 @@ pub fn export(vault: &Vault, entry: &EntryRef<'_>) -> (Zeroizing<String>, Vec<St
         out.push_str(&render_var(&row.name, &value, false, row.disabled, ""));
         out.push('\n');
     }
-    (out, skipped)
+    (out.into_inner(), skipped)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

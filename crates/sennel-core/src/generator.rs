@@ -125,16 +125,6 @@ impl Classes {
         }
         (pools, required)
     }
-
-    /// Combined alphabet size, for the entropy estimate. Ambiguity excluded
-    /// here too, so the number matches what was actually drawn from.
-    pub fn alphabet_len(self, exclude_ambiguous: bool) -> usize {
-        self.pools(exclude_ambiguous)
-            .0
-            .iter()
-            .map(|p| p.len())
-            .sum()
-    }
 }
 
 /// Eight uniform bytes from the OS, as one number. Failures are real (no
@@ -147,8 +137,7 @@ fn os_draw() -> Result<u64, String> {
 }
 
 /// A uniform index into `n`, rejection-sampled so `%` never skews the pick.
-// Drawn from 64 bits: a one-byte draw with n = 255 gave index 0 double weight,
-// and the shuffle can ask for it (LENGTH_RANGE tops out at 256).
+// Drawn from 64 bits: a one-byte draw with n = 255 gave index 0 double weight.
 fn os_index(n: usize) -> Result<usize, String> {
     if n == 0 {
         return Err("nothing to draw from".to_string());
@@ -164,12 +153,8 @@ fn os_index(n: usize) -> Result<usize, String> {
     }
 }
 
-/// Generate a password of `len` characters from the requested classes.
-///
-/// Every requested class is guaranteed present (one forced pick per class
-/// first, then the rest drawn from the combined pool) — a "digits on" result
-/// without a digit would read as a broken generator. Errors are strings the
-/// UI can show verbatim; they name the cause, never the output.
+/// A password of `len` characters holding every requested class. A draw missing a class is
+/// thrown away, so every accepted password is equally likely and `generated_bits` is exact.
 pub fn generate(len: usize, classes: Classes, exclude_ambiguous: bool) -> Result<String, String> {
     if len == 0 {
         return Err("length must be at least 1".into());
@@ -186,27 +171,54 @@ pub fn generate(len: usize, classes: Classes, exclude_ambiguous: bool) -> Result
     }
     let all: Vec<u8> = pools.concat();
     let mut out = Vec::with_capacity(len);
-    /* One guaranteed pick per requested class, in class order. */
-    for pool in pools.iter().take(required.len()) {
-        let at = os_index(pool.len())?;
-        out.push(pool[at]);
-    }
-    while out.len() < len {
-        let at = os_index(all.len())?;
-        out.push(all[at]);
-    }
-    /* Shuffle the forced picks out of their positions: class order at the
-    front would be structure a guesser could use. Fisher-Yates with the
-    same OS source. */
-    for i in (1..out.len()).rev() {
-        let j = os_index(i + 1)?;
-        out.swap(i, j);
+    loop {
+        out.clear();
+        for _ in 0..len {
+            out.push(all[os_index(all.len())?]);
+        }
+        if pools
+            .iter()
+            .all(|pool| out.iter().any(|c| pool.contains(c)))
+        {
+            break;
+        }
     }
     String::from_utf8(out).map_err(|_| "generator produced non-utf8".into())
 }
 
+/// The exact entropy of `generate`'s output: log2 of how many passwords it can return, which is
+/// every string of `len` over the pool that holds each class. Counted by inclusion-exclusion over
+/// the classes left out, in proportions of `pool^len` so long lengths do not overflow.
+pub fn generated_bits(len: usize, classes: Classes, exclude_ambiguous: bool) -> f64 {
+    let sizes: Vec<f64> = classes
+        .pools(exclude_ambiguous)
+        .0
+        .iter()
+        .map(|pool| pool.len() as f64)
+        .collect();
+    let total: f64 = sizes.iter().sum();
+    if len < sizes.len() || total <= 1.0 {
+        return 0.0;
+    }
+    let power = i32::try_from(len).unwrap_or(i32::MAX);
+    let mut share = 0.0;
+    for left_out in 0..1u32 << sizes.len() {
+        let missing: f64 = (0..sizes.len())
+            .filter(|i| left_out & (1 << i) != 0)
+            .map(|i| sizes[i])
+            .sum();
+        let term = (1.0 - missing / total).powi(power);
+        share += if left_out.count_ones() % 2 == 0 {
+            term
+        } else {
+            -term
+        };
+    }
+    len as f64 * total.log2() + share.log2()
+}
+
 /// Estimated entropy in bits: `len * log2(alphabet)`. An estimate, not a
-/// promise — it assumes uniform draws, which the generator makes.
+/// promise — it assumes uniform draws.
 pub fn entropy_bits(len: usize, alphabet_len: usize) -> f64 {
     if len == 0 || alphabet_len <= 1 {
         return 0.0;
@@ -423,6 +435,37 @@ mod tests {
         ] {
             let got = typed_bits(password);
             assert!((got - bits).abs() < 1e-6, "{password}: {got} != {bits}");
+        }
+    }
+
+    #[test]
+    fn short_passwords_are_priced_by_what_the_generator_can_return() {
+        // Four characters, four classes: one of each in any order, 4! × 26 × 26 × 10 × 26.
+        let exact = (24.0f64 * 26.0 * 26.0 * 10.0 * 26.0).log2();
+        assert!((generated_bits(4, all_on(), false) - exact).abs() < 1e-9);
+        assert!(generated_bits(4, all_on(), false) < entropy_bits(4, 88) - 3.5);
+        // Long passwords barely move from the plain estimate.
+        let twenty = generated_bits(20, all_on(), false);
+        assert!(entropy_bits(20, 88) - twenty < 0.2, "{twenty}");
+        // One class has nothing to leave out.
+        let lower = Classes {
+            lower: true,
+            upper: false,
+            digits: false,
+            symbols: false,
+        };
+        assert!((generated_bits(12, lower, false) - entropy_bits(12, 26)).abs() < 1e-9);
+        assert_eq!(generated_bits(2, all_on(), false), 0.0);
+    }
+
+    #[test]
+    fn every_short_password_holds_every_class() {
+        for _ in 0..10_000 {
+            let pw = generate(4, all_on(), false).unwrap();
+            assert!(pw.chars().any(|c| c.is_ascii_lowercase()), "{pw}");
+            assert!(pw.chars().any(|c| c.is_ascii_uppercase()), "{pw}");
+            assert!(pw.chars().any(|c| c.is_ascii_digit()), "{pw}");
+            assert!(pw.bytes().any(|c| SYMBOLS.contains(&c)), "{pw}");
         }
     }
 

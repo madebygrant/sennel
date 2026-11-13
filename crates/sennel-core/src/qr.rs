@@ -4,6 +4,9 @@
 use std::path::Path;
 
 use arboard::Clipboard;
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::wiped::WipedBytes;
 
 use crate::vault::totp_url;
 
@@ -14,7 +17,7 @@ const MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 // A setup page can hold other codes, such as an app store link, so a one-time code wins over
 // whatever was found first. A code drawn light on dark is tried inverted.
-pub fn decode(width: usize, height: usize, rgba: &[u8]) -> Result<String, String> {
+pub fn decode(width: usize, height: usize, rgba: &[u8]) -> Result<Zeroizing<String>, String> {
     if width == 0 || height == 0 || rgba.len() < width * height * 4 {
         return Err(NONE_FOUND.into());
     }
@@ -22,36 +25,58 @@ pub fn decode(width: usize, height: usize, rgba: &[u8]) -> Result<String, String
     if found.is_empty() {
         found = texts(width, height, rgba, true);
     }
-    let first = found.first().cloned();
+    let otp = found.iter().position(|t| t.trim().starts_with("otpauth"));
+    match otp.or(if found.is_empty() { None } else { Some(0) }) {
+        Some(at) => Ok(found.swap_remove(at)),
+        None => Err(NONE_FOUND.into()),
+    }
+}
+
+/// Whether a decode found a one-time code, after which the image itself is a secret to wipe.
+fn holds_code(found: &Result<Zeroizing<String>, String>) -> bool {
     found
-        .into_iter()
-        .find(|t| t.trim().starts_with("otpauth"))
-        .or(first)
-        .ok_or_else(|| NONE_FOUND.into())
+        .as_ref()
+        .is_ok_and(|t| t.trim().starts_with("otpauth"))
 }
 
 // rqrr 0.11 asserts on some crafted images, so a decode that panics found nothing.
-fn texts(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<String> {
+fn texts(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<Zeroizing<String>> {
     crate::quiet::quietly(|| decode_grids(width, height, rgba, invert)).unwrap_or_default()
 }
 
-fn decode_grids(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<String> {
-    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
-        let at = (y * width + x) * 4;
+fn decode_grids(width: usize, height: usize, rgba: &[u8], invert: bool) -> Vec<Zeroizing<String>> {
+    // The greyscale copy rqrr searches, wiped when the search drops it.
+    let mut grey = WipedBytes::with_capacity(width * height);
+    for at in (0..width * height).map(|at| at * 4) {
         let [r, g, b, a] = [0, 1, 2, 3].map(|i| u32::from(rgba[at + i]));
         // Over white, since a transparent PNG's clear pixels would otherwise read as black.
         let luma = ((r * 299 + g * 587 + b * 114) / 1000 * a / 255 + (255 - a)) as u8;
-        if invert { 255 - luma } else { luma }
-    });
-    prepared
+        grey.push(if invert { 255 - luma } else { luma });
+    }
+    let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
+        return Vec::new();
+    };
+    let Some(image) = image::ImageBuffer::<image::Luma<u8>, _>::from_raw(w, h, grey) else {
+        return Vec::new();
+    };
+    rqrr::PreparedImage::prepare(image)
         .detect_grids()
         .into_iter()
-        .filter_map(|grid| grid.decode().ok().map(|(_, text)| text))
+        .filter_map(|grid| {
+            // A payload is at most a few KB, so this buffer is not expected to grow.
+            let mut text = WipedBytes::with_capacity(8192);
+            grid.decode_to(&mut text).ok()?;
+            let mut text = text.into_inner();
+            String::from_utf8(std::mem::take(&mut *text))
+                .map(Zeroizing::new)
+                .map_err(|e| e.into_bytes().zeroize())
+                .ok()
+        })
         .collect()
 }
 
 /// A QR's text as the URL an entry stores, refusing anything that is not a time-based code.
-pub fn seed(text: &str, title: &str, username: &str) -> Result<String, String> {
+pub fn seed(text: &str, title: &str, username: &str) -> Result<Zeroizing<String>, String> {
     let text = text.trim();
     if !text.starts_with("otpauth") {
         return Err("that QR code is not a one-time code".into());
@@ -61,15 +86,19 @@ pub fn seed(text: &str, title: &str, username: &str) -> Result<String, String> {
 
 /// The image on the clipboard. Left in place: only once it proves to hold a one-time code is it a
 /// secret, and then the caller clears it with `clear_clipboard`.
-pub fn from_clipboard() -> Result<String, String> {
-    let image = Clipboard::new()
+pub fn from_clipboard() -> Result<Zeroizing<String>, String> {
+    let mut image = Clipboard::new()
         .map_err(|e| format!("no clipboard to read · {e}"))?
         .get_image()
         .map_err(|_| {
             "no image on the clipboard · copy a screenshot of the QR code first".to_string()
         })?;
     fits(image.width, image.height)?;
-    decode(image.width, image.height, &image.bytes)
+    let found = decode(image.width, image.height, &image.bytes);
+    if holds_code(&found) {
+        image.bytes.to_mut().zeroize();
+    }
+    found
 }
 
 // The file path's limit, for whatever another program put on the clipboard. arboard has already
@@ -90,7 +119,7 @@ pub fn clear_clipboard() {
     }
 }
 
-pub fn from_file(path: &Path) -> Result<String, String> {
+pub fn from_file(path: &Path) -> Result<Zeroizing<String>, String> {
     let unreadable =
         |e: &dyn std::fmt::Display| format!("cannot read {} as an image · {e}", path.display());
     let mut reader = image::ImageReader::open(path)
@@ -102,18 +131,43 @@ pub fn from_file(path: &Path) -> Result<String, String> {
     limits.max_image_height = Some(MAX_SIDE);
     limits.max_alloc = Some(MAX_BYTES);
     reader.limits(limits);
-    let image = reader
-        .decode()
-        .map_err(|e| match e {
-            image::ImageError::Limits(_) => "image too large · crop it to the QR code".to_string(),
-            e => unreadable(&e),
-        })?
-        .into_rgba8();
-    decode(
-        image.width() as usize,
-        image.height() as usize,
-        image.as_raw(),
-    )
+    let mut source = reader.decode().map_err(|e| match e {
+        image::ImageError::Limits(_) => "image too large · crop it to the QR code".to_string(),
+        e => unreadable(&e),
+    })?;
+    let mut converted = match source {
+        image::DynamicImage::ImageRgba8(_) => None,
+        _ => Some(source.to_rgba8()),
+    };
+    let found = match converted.as_ref().or(source.as_rgba8()) {
+        Some(rgba) => decode(rgba.width() as usize, rgba.height() as usize, rgba.as_raw()),
+        None => Err(NONE_FOUND.into()),
+    };
+    if holds_code(&found) {
+        if let Some(rgba) = converted.as_mut() {
+            rgba.zeroize();
+        }
+        wipe_pixels(&mut source);
+    }
+    found
+}
+
+// Whatever layout the file decoded to: a JPEG is RGB, a 16-bit PNG is u16.
+fn wipe_pixels(image: &mut image::DynamicImage) {
+    use image::DynamicImage as D;
+    match image {
+        D::ImageLuma8(b) => b.zeroize(),
+        D::ImageLumaA8(b) => b.zeroize(),
+        D::ImageRgb8(b) => b.zeroize(),
+        D::ImageRgba8(b) => b.zeroize(),
+        D::ImageLuma16(b) => b.zeroize(),
+        D::ImageLumaA16(b) => b.zeroize(),
+        D::ImageRgb16(b) => b.zeroize(),
+        D::ImageRgba16(b) => b.zeroize(),
+        D::ImageRgb32F(b) => b.zeroize(),
+        D::ImageRgba32F(b) => b.zeroize(),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -171,11 +225,14 @@ mod tests {
 
     #[test]
     fn a_saved_qr_reads_back_its_url() {
-        assert_eq!(from_file(&fixture("otp-qr.png")).as_deref(), Ok(SCANNED));
+        assert_eq!(
+            from_file(&fixture("otp-qr.png")).map(|t| t.to_string()),
+            Ok(SCANNED.into())
+        );
         // Clear pixels read as white, not black, or the code's quiet zone disappears.
         assert_eq!(
-            from_file(&fixture("otp-qr-clear.png")).as_deref(),
-            Ok(SCANNED)
+            from_file(&fixture("otp-qr-clear.png")).map(|t| t.to_string()),
+            Ok(SCANNED.into())
         );
     }
 
@@ -196,7 +253,10 @@ mod tests {
                 *c = 255 - *c;
             }
         }
-        assert_eq!(decode(w, h, &rgba).as_deref(), Ok(SCANNED));
+        assert_eq!(
+            decode(w, h, &rgba).map(|t| t.to_string()),
+            Ok(SCANNED.into())
+        );
     }
 
     #[test]
@@ -213,7 +273,10 @@ mod tests {
                 both[to..to + sw * 4].copy_from_slice(&src[from..from + sw * 4]);
             }
         }
-        assert_eq!(decode(width, height, &both).as_deref(), Ok(SCANNED));
+        assert_eq!(
+            decode(width, height, &both).map(|t| t.to_string()),
+            Ok(SCANNED.into())
+        );
     }
 
     #[test]
@@ -243,7 +306,8 @@ mod tests {
         .unwrap();
         assert!(
             url.starts_with("otpauth://totp/") && url.contains("JBSWY3DPEHPK3PXP"),
-            "{url}"
+            "{}",
+            *url
         );
     }
 }

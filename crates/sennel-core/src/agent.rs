@@ -13,6 +13,7 @@ use ssh_key::{PrivateKey, private::KeypairData};
 use zeroize::Zeroizing;
 
 use crate::vault::{EntryExt, Vault};
+use crate::wiped::WipedBytes;
 
 const REQUEST_IDENTITIES: u8 = 11;
 const IDENTITIES_ANSWER: u8 = 12;
@@ -189,7 +190,8 @@ impl Agent {
 
     /// Takes the key out again, by its public half.
     pub fn remove(&mut self, blob: &[u8]) -> Result<(), String> {
-        let mut payload = vec![REMOVE_IDENTITY];
+        let mut payload = WipedBytes::with_capacity(5 + blob.len());
+        payload.push(REMOVE_IDENTITY);
         put_string(&mut payload, blob);
         let reply = self.call(&payload)?;
         Self::expect_success(&reply, "remove the key")
@@ -207,17 +209,17 @@ impl Agent {
     }
 }
 
-fn put_u32(out: &mut Vec<u8>, n: u32) {
+fn put_u32(out: &mut WipedBytes, n: u32) {
     out.extend_from_slice(&n.to_be_bytes());
 }
 
-fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
+fn put_string(out: &mut WipedBytes, bytes: &[u8]) {
     put_u32(out, bytes.len() as u32);
     out.extend_from_slice(bytes);
 }
 
 // An unsigned big-endian number as the agent wants it: no leading zeros, one back in if the top bit is set.
-fn put_mpint(out: &mut Vec<u8>, be: &[u8]) {
+fn put_mpint(out: &mut WipedBytes, be: &[u8]) {
     let be = &be[be.iter().take_while(|b| **b == 0).count()..];
     if be.first().is_some_and(|b| b & 0x80 != 0) {
         put_u32(out, be.len() as u32 + 1);
@@ -234,13 +236,14 @@ fn add_message(
     lifetime: Option<u32>,
     confirm: bool,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
-    let mut out = Zeroizing::new(vec![ADD_ID_CONSTRAINED]);
+    let mut out = WipedBytes::with_capacity(4096);
+    out.push(ADD_ID_CONSTRAINED);
     put_string(&mut out, key.algorithm().as_str().as_bytes());
     match key.key_data() {
         KeypairData::Ed25519(pair) => {
             put_string(&mut out, pair.public.as_ref());
             // Seed then public key, which is the 64 bytes the agent expects.
-            put_string(&mut out, &pair.to_bytes());
+            put_string(&mut out, &Zeroizing::new(pair.to_bytes())[..]);
         }
         KeypairData::Rsa(pair) => {
             for n in [
@@ -274,7 +277,7 @@ fn add_message(
     if confirm {
         out.push(CONSTRAIN_CONFIRM);
     }
-    Ok(out)
+    Ok(out.into_inner())
 }
 
 /// What an entry's `KeeAgent.settings` attachment says to do with its key.
@@ -597,15 +600,15 @@ mod tests {
 
     #[test]
     fn mpints_drop_leading_zeros_and_keep_numbers_positive() {
-        let mut out = Vec::new();
+        let mut out = WipedBytes::with_capacity(0);
         put_mpint(&mut out, &[0, 0, 0x7f, 1]);
-        assert_eq!(out, [0, 0, 0, 2, 0x7f, 1]);
-        let mut out = Vec::new();
+        assert_eq!(&*out, [0, 0, 0, 2, 0x7f, 1]);
+        let mut out = WipedBytes::with_capacity(0);
         put_mpint(&mut out, &[0, 0x80, 1]);
-        assert_eq!(out, [0, 0, 0, 3, 0, 0x80, 1]);
-        let mut out = Vec::new();
+        assert_eq!(&*out, [0, 0, 0, 3, 0, 0x80, 1]);
+        let mut out = WipedBytes::with_capacity(0);
         put_mpint(&mut out, &[0, 0]);
-        assert_eq!(out, [0, 0, 0, 0]);
+        assert_eq!(&*out, [0, 0, 0, 0]);
     }
 
     // Checks the wire format against a real ssh-agent on a private socket: every key type, removal, and a

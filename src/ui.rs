@@ -8,6 +8,7 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use zeroize::Zeroizing;
 
 use crate::app::{
     self, App, Confirm, FormField, FormKind, GroupPromptKind, Level, MENUS, Pane, View,
@@ -81,6 +82,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.menu_shown = 0;
     // Before the header lights the label of a menu that a popup has just covered.
     app.drop_blocked_menu();
+    if let Some(form) = app.form.as_mut() {
+        form.refresh_otp_check();
+    }
     /* The band squeezes the body from below only while it is open: a fixed
     row the rest of the time would leave a hole where search should be. */
     let band = if app.search.is_some() { 1 } else { 0 };
@@ -420,27 +424,29 @@ next field. Callers pad to the column count, which absorbs coming back
 short. A cut ends in `…` — without it `Root/Bankin` reads as a group
 somebody named Bankin. */
 // `truncate` from the other end, for a box being typed into: the end is where the typing is.
+// Both cut by slicing and copy once into an exact buffer: either may be handed a revealed secret,
+// and a String grown by push frees its old blocks unwiped.
 fn truncate_start(text: &str, width: usize) -> String {
     if cols(text) <= width {
         return text.to_string();
     }
     let room = width.saturating_sub(1);
-    let mut kept: Vec<char> = Vec::new();
-    let mut used = 0;
-    for c in text.chars().rev() {
+    let (mut from, mut used) = (text.len(), 0);
+    for (at, c) in text.char_indices().rev() {
         let w = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + w > room {
             break;
         }
         used += w;
-        kept.push(c);
+        from = at;
     }
-    let tail: String = kept.into_iter().rev().collect();
+    let tail = &text[from..];
+    let mut out = String::with_capacity(tail.len() + '…'.len_utf8());
     if width > 0 {
-        format!("…{tail}")
-    } else {
-        tail
+        out.push('…');
     }
+    out.push_str(tail);
+    out
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -449,16 +455,17 @@ fn truncate(text: &str, width: usize) -> String {
     }
     // One column is the ellipsis itself; none is nothing to say it in.
     let room = width.saturating_sub(1);
-    let mut out = String::new();
-    let mut used = 0;
-    for c in text.chars() {
+    let (mut to, mut used) = (0, 0);
+    for (at, c) in text.char_indices() {
         let w = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + w > room {
             break;
         }
         used += w;
-        out.push(c);
+        to = at + c.len_utf8();
     }
+    let mut out = String::with_capacity(to + '…'.len_utf8());
+    out.push_str(&text[..to]);
     if width > 0 {
         out.push('…');
     }
@@ -693,7 +700,7 @@ fn draw_entries(frame: &mut Frame, app: &mut App, area: Rect) {
                 .session
                 .vault()
                 .and_then(|v| v.get_entry(id))
-                .is_some_and(|e| crate::vault::raw_otp(&e).is_some());
+                .is_some_and(|e| crate::vault::has_otp(&e));
             let expired = app
                 .session
                 .vault()
@@ -784,21 +791,18 @@ layout is the only thing that can know, and a click recomputing it would be
 a second copy of this function's decisions. */
 // A field as the detail pane shows it: references resolved with any password masked, or the raw
 // `{REF:...}` when one is broken, so the pane shows what is stored instead of hiding the problem.
-fn shown(app: &App, raw: &str) -> String {
+fn shown(app: &App, raw: &str) -> Zeroizing<String> {
     let resolved = match app.session.vault() {
         Some(vault) => crate::vault::resolve_shown(vault, raw),
-        None => Ok(zeroize::Zeroizing::new(raw.to_string())),
+        None => Ok(Zeroizing::new(raw.to_string())),
     };
-    resolved
-        .map(|text| text.to_string())
-        .unwrap_or_else(|_| raw.to_string())
+    resolved.unwrap_or_else(|_| Zeroizing::new(raw.to_string()))
 }
 
 // A secret the user asked to see, `*` on the password or a protected field: resolved in full.
-fn revealed(app: &App, raw: &str) -> String {
+fn revealed(app: &App, raw: &str) -> Zeroizing<String> {
     app.referenced(raw)
-        .map(|text| text.to_string())
-        .unwrap_or_else(|_| raw.to_string())
+        .unwrap_or_else(|_| Zeroizing::new(raw.to_string()))
 }
 
 fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1249,18 +1253,22 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
         /* `^r` reveals: the caret is a char index over the raw value, and the
         masked form has the same char count, so the block lands in the
         same place either way. */
-        let shown = if secret && !app.unlock_reveal {
+        let shown = Zeroizing::new(if secret && !app.unlock_reveal {
             "•".repeat(value.chars().count())
         } else {
             value.to_string()
-        };
+        });
         /* Drawn between the halves, so the block is where the next character
         lands rather than always at the end of the line. */
         let text = if focused {
             let (before, after) = shown.split_at(split_at_char(&shown, app.caret));
-            format!("{before}█{after}")
+            let mut text = String::with_capacity(shown.len() + '█'.len_utf8());
+            text.push_str(before);
+            text.push('█');
+            text.push_str(after);
+            text
         } else {
-            shown
+            shown.to_string()
         };
         let style = if focused {
             Style::new().fg(p.text)
@@ -2073,7 +2081,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
 
     let row = |label: &'static str, field: FormField, value: &str| -> Line<'_> {
         let focused = form.field == field;
-        let shown = match field {
+        let shown = Zeroizing::new(match field {
             /* The edit password box starts empty on purpose; typed content
             masks. The hint only shows while the box holds nothing. */
             FormField::Password if value.is_empty() && !form.password_touched => {
@@ -2094,7 +2102,7 @@ fn draw_form(frame: &mut Frame, app: &App) {
             FormField::Otp if form.reveal => value.to_string(),
             FormField::Otp => "•".repeat(value.chars().count()),
             _ => value.to_string(),
-        };
+        });
         let (head, tail) = split_at_char(&shown, if focused { form.caret } else { 0 });
         let style = if focused {
             Style::new().fg(p.text)
@@ -2167,13 +2175,13 @@ fn draw_form(frame: &mut Frame, app: &App) {
     /* The code the typed seed produces, right now. A seed is a run of
     characters nobody can check by eye, and the site asks for a code to
     confirm the setup — so the box answers with one before it is saved. */
-    if form.otp_touched && !form.otp.trim().is_empty() {
-        let note = match crate::vault::totp_url(&form.otp, &form.title, &form.username) {
-            Ok(url) => match crate::vault::totp_code_of(&url) {
+    if let Some(check) = &form.otp_check {
+        let note = match &check.url {
+            Ok(url) => match crate::vault::totp_code_of(url) {
                 Some((code, left)) => (format!("{code} · {left}s"), p.cursor),
                 None => ("cannot read the clock".to_string(), p.warn),
             },
-            Err(why) => (why, p.warn),
+            Err(why) => (why.clone(), p.warn),
         };
         lines.push(Line::from(vec![
             p.faint(format!(" {:<LABEL$}", "")),
@@ -2359,17 +2367,17 @@ fn draw_history(frame: &mut Frame, app: &App) {
             .map(local)
             .unwrap_or_else(|| "unknown".to_string());
         // A fixed mask, as the detail pane uses: the length of an old password is a clue to it.
-        let secret = if history.reveal {
-            row.password.clone()
+        let secret: &str = if history.reveal {
+            &row.password
         } else {
-            "••••••••".to_string()
+            "••••••••"
         };
         let head = truncate(&format!("{when}  {}", row.username), inner / 2);
         lines.push(Line::from(vec![
             if live { p.lit("▌") } else { Span::raw(" ") },
             Span::styled(format!(" {head}  "), p.row(live)),
             Span::styled(
-                truncate(&secret, inner.saturating_sub(cols(&head) + 3)),
+                truncate(secret, inner.saturating_sub(cols(&head) + 3)),
                 Style::new().fg(p.muted),
             ),
         ]));
@@ -2430,15 +2438,17 @@ fn draw_fields(frame: &mut Frame, app: &App) {
                 // A fixed mask while it is a secret, as the password row has, so `*` means one thing
                 // everywhere and the length gives nothing away. Masked, it is not resolved at all.
                 let shown = match (*secret, fields.reveal) {
-                    (true, false) => "••••••••".to_string(),
+                    (true, false) => Zeroizing::new("••••••••".to_string()),
                     (true, true) => revealed(app, value),
                     (false, _) => shown(app, value),
                 };
                 (name.clone(), shown, if *secret { p.muted } else { p.text })
             }
-            crate::vault::Extra::File { name, bytes } => {
-                (name.clone(), format!("{bytes} bytes"), p.cursor)
-            }
+            crate::vault::Extra::File { name, bytes } => (
+                name.clone(),
+                Zeroizing::new(format!("{bytes} bytes")),
+                p.cursor,
+            ),
         };
         let label = truncate(&name, inner / 2);
         let room_for_value = inner.saturating_sub(cols(&label) + 3);
@@ -2460,11 +2470,11 @@ fn draw_fields(frame: &mut Frame, app: &App) {
     if let Some(add) = &fields.adding {
         let value_label = if add.from_file { "file" } else { "value" };
         let box_ = |label: &str, text: &str, focused: bool, mask: bool| {
-            let shown = if mask && !fields.reveal {
+            let shown = Zeroizing::new(if mask && !fields.reveal {
                 "•".repeat(text.chars().count())
             } else {
                 text.to_string()
-            };
+            });
             let (head, tail) = split_at_char(&shown, if focused { add.caret } else { 0 });
             let style = if focused {
                 Style::new().fg(p.text)
@@ -2622,11 +2632,11 @@ fn draw_rekey(frame: &mut Frame, app: &App) {
         /* Masked to its own length, not a fixed run: on the box you are
         typing into, the count is the only feedback there is, and it is
         already on your screen and nowhere else. */
-        let shown = if rekey.reveal {
+        let shown = Zeroizing::new(if rekey.reveal {
             value.to_string()
         } else {
             "•".repeat(value.chars().count())
-        };
+        });
         let (head, tail) = split_at_char(&shown, if focused { rekey.caret } else { 0 });
         let style = if focused {
             Style::new().fg(p.text)

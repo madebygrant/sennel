@@ -5,6 +5,7 @@
 use zeroize::Zeroizing;
 
 use crate::vault::{EntryExt, Extra, Vault, extra_rows, raw_otp, resolve_text};
+use crate::wiped::WipedString;
 
 /// What `export` writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,14 +73,22 @@ pub fn render(
     }
     rows.sort_by_key(|r| (r.group.to_lowercase(), r.entry.title().to_lowercase()));
 
-    let mut out = Zeroizing::new(String::new());
+    // Escaping can grow a field, so this is a first guess and WipedString handles the rest.
+    let mut out = WipedString::with_capacity(
+        rows.iter()
+            .map(|r| {
+                let e = &r.entry;
+                256 + r.group.len() + e.fields.values().map(|v| v.get().len()).sum::<usize>()
+            })
+            .sum(),
+    );
     let (mut fields, mut files) = (0, 0);
     match format {
         ExportFormat::Csv => {
             out.push_str("Group,Title,Username,Password,URL,Notes,TOTP\n");
             for row in &rows {
                 let e = &row.entry;
-                let otp = Zeroizing::new(raw_otp(e).unwrap_or_default());
+                let otp = raw_otp(e).unwrap_or_default();
                 let (username, password, url, notes) = (
                     exported(vault, e.username()),
                     exported(vault, e.password()),
@@ -119,9 +128,9 @@ pub fn render(
             for (i, row) in rows.iter().enumerate() {
                 let e = &row.entry;
                 out.push_str(if i == 0 { "    {" } else { ",\n    {" });
-                let otp = raw_otp(e).map(Zeroizing::new);
+                let otp = raw_otp(e);
                 let mut first = true;
-                let mut key = |out: &mut String, name: &str| {
+                let mut key = |out: &mut WipedString, name: &str| {
                     out.push_str(if first { "\n      " } else { ",\n      " });
                     first = false;
                     push_json(out, name);
@@ -204,7 +213,7 @@ pub fn render(
         }
     }
     Ok(Exported {
-        text: out,
+        text: out.into_inner(),
         entries: rows.len(),
         left_out_fields: fields,
         left_out_files: files,
@@ -212,7 +221,7 @@ pub fn render(
 }
 
 // RFC 4180: quoted only when it has to be, so `import` and every spreadsheet read it back unchanged.
-fn push_csv(out: &mut String, cell: &str) {
+fn push_csv(out: &mut WipedString, cell: &str) {
     if !cell.contains([',', '"', '\n', '\r']) {
         out.push_str(cell);
         return;
@@ -227,7 +236,7 @@ fn push_csv(out: &mut String, cell: &str) {
     out.push('"');
 }
 
-fn push_json(out: &mut String, text: &str) {
+fn push_json(out: &mut WipedString, text: &str) {
     out.push('"');
     for c in text.chars() {
         match c {
@@ -236,7 +245,9 @@ fn push_json(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => {
+                let _ = std::fmt::Write::write_fmt(out, format_args!("\\u{:04x}", c as u32));
+            }
             c => out.push(c),
         }
     }
@@ -382,8 +393,8 @@ mod tests {
 
     #[test]
     fn json_escapes_what_would_break_it() {
-        let mut out = String::new();
+        let mut out = WipedString::with_capacity(0);
         push_json(&mut out, "a\"b\\c\n\t\u{1}é");
-        assert_eq!(out, "\"a\\\"b\\\\c\\n\\t\\u0001é\"");
+        assert_eq!(&*out, "\"a\\\"b\\\\c\\n\\t\\u0001é\"");
     }
 }

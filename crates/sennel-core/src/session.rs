@@ -837,7 +837,7 @@ impl<S: Seal> Session<S> {
             return Err(EntryError::NoTitle);
         }
         let expires = parse_expiry(input.expires).map_err(EntryError::Expiry)?;
-        let otp: Option<Option<String>> = match input.otp {
+        let otp: Option<Option<Zeroizing<String>>> = match input.otp {
             None => None,
             Some(seed) if seed.trim().is_empty() => Some(None),
             Some(seed) => Some(Some(
@@ -891,7 +891,7 @@ impl<S: Seal> Session<S> {
                     .and_then(|()| vault.set_expiry(&id, expires))
                     .and_then(|()| match otp.as_ref() {
                         None => Ok(()),
-                        Some(url) => vault.set_otp(&id, url.as_deref()),
+                        Some(url) => vault.set_otp(&id, url.as_ref().map(|u| u.as_str())),
                     })
                     .map_err(EntryError::Vault)?;
                 if let Some(before) = before {

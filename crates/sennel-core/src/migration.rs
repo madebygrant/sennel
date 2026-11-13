@@ -72,15 +72,22 @@ fn url(account: &[u8]) -> Result<Zeroizing<String>, String> {
     } else {
         format!("{issuer}:{name}")
     };
-    let mut out = format!(
-        "otpauth://totp/{}?secret={}&algorithm={algorithm}&digits={digits}&period=30",
-        crate::vault::urlish(&label),
-        *base32(secret)
-    );
-    if !issuer.is_empty() {
-        out.push_str(&format!("&issuer={}", crate::vault::urlish(&issuer)));
+    let params = format!("&algorithm={algorithm}&digits={digits}&period=30");
+    let mut out = crate::wiped::WipedString::with_capacity(160);
+    for part in [
+        "otpauth://totp/",
+        &crate::vault::urlish(&label),
+        "?secret=",
+        &base32(secret),
+        &params,
+    ] {
+        out.push_str(part);
     }
-    Ok(Zeroizing::new(out))
+    if !issuer.is_empty() {
+        out.push_str("&issuer=");
+        out.push_str(&crate::vault::urlish(&issuer));
+    }
+    Ok(out.into_inner())
 }
 
 enum Wire<'a> {

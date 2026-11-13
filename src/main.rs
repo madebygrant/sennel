@@ -887,7 +887,7 @@ fn read_first_line() -> Result<String> {
         std::io::stdin().as_handle().try_clone_to_owned()?
     };
     let mut input = std::fs::File::from(handle);
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let mut bytes = sennel_core::wiped::WipedBytes::with_capacity(1024);
     let mut byte = [0u8; 1];
     while input.read(&mut byte)? == 1 {
         bytes.push(byte[0]);
@@ -896,6 +896,7 @@ fn read_first_line() -> Result<String> {
         }
     }
     byte.zeroize();
+    let mut bytes = bytes.into_inner();
     // Moved, not copied, so the only copy is the one the caller wipes.
     String::from_utf8(std::mem::take(&mut *bytes)).map_err(|e| {
         let mut rejected = e.into_bytes();

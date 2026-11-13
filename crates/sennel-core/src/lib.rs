@@ -20,3 +20,4 @@ pub mod session;
 pub mod sort;
 pub mod touchid;
 pub mod vault;
+pub mod wiped;

@@ -43,8 +43,9 @@ impl Database {
         let data = match database_version {
             DatabaseVersion::KDB(_) => return Err(DatabaseOpenError::UnsupportedVersion),
             DatabaseVersion::KDB2(_) => return Err(DatabaseOpenError::UnsupportedVersion),
-            DatabaseVersion::KDB3(_) => decrypt_kdbx3(data.as_ref(), &key)?.2,
-            DatabaseVersion::KDB4(_) => decrypt_kdbx4(data.as_ref(), &key)?.3,
+            // SENNEL PATCH: both moved out of the buffer their decrypt wipes.
+            DatabaseVersion::KDB3(_) => std::mem::take(&mut *decrypt_kdbx3(data.as_ref(), &key)?.2),
+            DatabaseVersion::KDB4(_) => std::mem::take(&mut *decrypt_kdbx4(data.as_ref(), &key)?.3),
         };
 
         Ok(data)

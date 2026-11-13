@@ -65,6 +65,29 @@ from the crate's own header parser without deriving anything, and Sennel refuses
 first (`crates/sennel-core/src/kdfcap.rs`). Using the crate's parser, not a second one, means the
 settings checked are the ones that would run.
 
+## Unprotected values are wiped on drop
+
+`src/db/types/value.rs`, `impl Drop for Value`.
+
+`Value::Protected` wipes itself through `SecretBox`, but `Value::Unprotected` was freed as it was.
+Titles, usernames, URLs, and notes written by programs that store them unprotected stayed in freed
+memory after a lock. The unprotected variant is now zeroized when the value drops. The impl means
+code can no longer move the contents out of a `Value` by pattern; nothing in the crate or in Sennel
+did.
+
+## The KDBX 3 and 4 parsers wipe their keys and the decrypted payload
+
+`src/format/kdbx4/parse.rs`, `decrypt_kdbx4`, and `src/format/kdbx3.rs`, `decrypt_kdbx3`, which now
+return the XML as `Zeroizing<Vec<u8>>`, and `src/db/open.rs`, `Database::get_xml`, which moves it
+out. The inner stream key is `Zeroizing` in both formats' headers (`src/format/kdbx4/mod.rs`,
+`KDBX4InnerHeader`, and `src/format/kdbx3.rs`, `KDBX3Header`), including the one `dump.rs` makes for
+a save. `Cargo.toml` turns on `hybrid-array`'s `zeroize` feature so the key arrays can be wrapped.
+
+The key elements, the composite, transformed and master keys, the HMAC keys (KDBX 4), the decrypted
+and decompressed payload, and the XML are wrapped in `Zeroizing`. KDBX 3's block buffer is sized to
+the payload up front instead of growing. Buffers inside the cipher and the decompressor are not
+reachable from here.
+
 ## The `aes` range is narrowed
 
 `Cargo.toml`, `[dependencies.aes]`: `"<0.9.3"` became `">=0.9, <0.9.3"`. As a path dependency the

@@ -224,6 +224,7 @@ impl Form {
         self.password.zeroize();
         self.otp.zeroize();
         self.notes.zeroize();
+        self.otp_check = None;
     }
 }
 
@@ -244,6 +245,33 @@ impl Form {
             _ => {}
         }
     }
+
+    // Worked out again only when a box it reads has changed, not on every frame.
+    pub fn refresh_otp_check(&mut self) {
+        if !self.otp_touched || self.otp.trim().is_empty() {
+            self.otp_check = None;
+            return;
+        }
+        let same = self.otp_check.as_ref().is_some_and(|check| {
+            *check.seed == self.otp && check.title == self.title && check.username == self.username
+        });
+        if !same {
+            self.otp_check = Some(OtpCheck {
+                url: crate::vault::totp_url(&self.otp, &self.title, &self.username),
+                seed: zeroize::Zeroizing::new(self.otp.clone()),
+                title: self.title.clone(),
+                username: self.username.clone(),
+            });
+        }
+    }
+}
+
+/// The URL the seed box makes, and the boxes it was made from.
+pub struct OtpCheck {
+    seed: zeroize::Zeroizing<String>,
+    title: String,
+    username: String,
+    pub url: Result<zeroize::Zeroizing<String>, String>,
 }
 
 // Secret boxes reserve capacity up front: a String that grows by realloc frees
@@ -260,6 +288,15 @@ const SEED_BOX: usize = 4096;
 
 pub fn seed_box() -> String {
     String::with_capacity(SEED_BOX)
+}
+
+// Notes hold recovery codes and PINs, and an edit starts from the stored text with room to type.
+const NOTES_BOX: usize = 4096;
+
+pub fn notes_box(from: &str) -> String {
+    let mut notes = String::with_capacity(from.len() + NOTES_BOX);
+    notes.push_str(from);
+    notes
 }
 
 pub struct Form {
@@ -292,6 +329,7 @@ pub struct Form {
     form: `^s` generates into a masked box, and a secret you cannot read is
     one you cannot check before saving. */
     pub reveal: bool,
+    pub otp_check: Option<OtpCheck>,
 }
 
 /* The one-box prompt behind `A` (new group) and `E` (rename group). One box,
@@ -3431,13 +3469,14 @@ impl App {
             url: String::new(),
             tags: String::new(),
             expires: String::new(),
-            notes: String::new(),
+            notes: notes_box(""),
             caret: 0,
             password_touched: false,
             otp: seed_box(),
             otp_touched: false,
             had_otp: false,
             reveal: false,
+            otp_check: None,
         });
     }
 
@@ -3467,7 +3506,7 @@ impl App {
             expires: crate::vault::expires_at(&entry)
                 .map(|at| at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default(),
-            notes: entry.notes().to_string(),
+            notes: notes_box(entry.notes()),
             caret: entry.title().chars().count(),
             password_touched: false,
             /* The stored seed never prefills the box: it is a secret, and a
@@ -3475,8 +3514,9 @@ impl App {
             anything. Empty-and-untouched keeps it, the password's rule. */
             otp: seed_box(),
             otp_touched: false,
-            had_otp: crate::vault::raw_otp(&entry).is_some(),
+            had_otp: crate::vault::has_otp(&entry),
             reveal: false,
+            otp_check: None,
         });
     }
 
@@ -4068,7 +4108,7 @@ impl App {
     pub fn fields_copy(&mut self) {
         let what = match self.fields_selected() {
             Some(crate::vault::Extra::Field { name, value, .. }) => {
-                Some((name.clone(), value.clone()))
+                Some((name.clone(), zeroize::Zeroizing::new(value.clone())))
             }
             Some(crate::vault::Extra::File { .. }) => None,
             None => return,
@@ -5966,7 +6006,7 @@ pub mod tests {
 
         // `t` copies the code, not the seed behind it.
         let stored = crate::vault::raw_otp(&entry).unwrap();
-        assert!(stored.contains("JBSWY3DPEHPK3PXP"), "{stored}");
+        assert!(stored.contains("JBSWY3DPEHPK3PXP"), "{}", *stored);
     }
 
     /* A seed that cannot mint a code never reaches the vault: the form stays
@@ -6033,6 +6073,42 @@ pub mod tests {
         // The earlier save's flash is still up, so drain before reading.
         app.expire_now();
         assert!(app.stage.contains("removed"), "{}", app.stage);
+    }
+
+    #[test]
+    fn the_seed_check_is_worked_out_once_per_change() {
+        let mut app = open_app();
+        app.open_add_form();
+        let form = app.form.as_mut().unwrap();
+        form.title = "Bank".into();
+        form.otp_touched = true;
+        form.otp.push_str("JBSWY3DPEHPK3PXP");
+        form.refresh_otp_check();
+        let first = form
+            .otp_check
+            .as_ref()
+            .unwrap()
+            .url
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        form.refresh_otp_check();
+        let again = form
+            .otp_check
+            .as_ref()
+            .unwrap()
+            .url
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        assert_eq!(first, again, "an unchanged form rebuilt its check");
+        form.title.push('x');
+        form.refresh_otp_check();
+        let url = form.otp_check.as_ref().unwrap().url.as_ref().unwrap();
+        assert!(url.contains("Bankx"), "{}", url.as_str());
+        form.otp.clear();
+        form.refresh_otp_check();
+        assert!(form.otp_check.is_none());
     }
 
     /* Pointing the session at a vault used to last exactly as long as the

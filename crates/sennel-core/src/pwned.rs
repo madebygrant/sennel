@@ -20,13 +20,15 @@ the user can read, run themselves, and see in `ps`. The cost is a
 dependency on curl being installed, which is named when it is missing. */
 
 /// SHA-1 of a string, upper-case hex — the shape HIBP's API answers in.
-pub fn sha1_hex(text: &str) -> String {
+pub fn sha1_hex(text: &str) -> zeroize::Zeroizing<String> {
+    use std::fmt::Write;
     use zeroize::Zeroize;
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     /* A second copy of the password, made only so the padding can be appended
     to it. Wiped before this returns: the caller's copy is the vault's
     business, but this one is ours. */
-    let mut message = text.as_bytes().to_vec();
+    let mut message = Vec::with_capacity(text.len() + 72);
+    message.extend_from_slice(text.as_bytes());
     let bits = (message.len() as u64) * 8;
     message.push(0x80);
     while message.len() % 64 != 56 {
@@ -34,8 +36,8 @@ pub fn sha1_hex(text: &str) -> String {
     }
     message.extend_from_slice(&bits.to_be_bytes());
 
+    let mut w = [0u32; 80];
     for chunk in message.chunks(64) {
-        let mut w = [0u32; 80];
         for (at, word) in chunk.chunks(4).enumerate() {
             w[at] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
@@ -69,7 +71,13 @@ pub fn sha1_hex(text: &str) -> String {
         h[4] = h[4].wrapping_add(e);
     }
     message.zeroize();
-    h.iter().map(|word| format!("{word:08X}")).collect()
+    w.zeroize();
+    let mut hex = zeroize::Zeroizing::new(String::with_capacity(40));
+    for word in h {
+        let _ = write!(hex, "{word:08X}");
+    }
+    h.zeroize();
+    hex
 }
 
 /// What the range endpoint returns, parsed: the suffix and how many breaches
@@ -110,10 +118,13 @@ pub fn is_range(body: &str) -> bool {
 }
 
 /// The five characters that leave this machine, and the rest that never do.
-pub fn split_hash(password: &str) -> (String, String) {
+pub fn split_hash(password: &str) -> (String, zeroize::Zeroizing<String>) {
     let hash = sha1_hex(password);
     let (prefix, suffix) = hash.split_at(5);
-    (prefix.to_string(), suffix.to_string())
+    (
+        prefix.to_string(),
+        zeroize::Zeroizing::new(suffix.to_string()),
+    )
 }
 
 /* One range request. Separated from the lookup so the network is one small
@@ -194,16 +205,22 @@ mod tests {
     nothing and looks exactly like a clean vault. */
     #[test]
     fn the_hash_matches_the_published_vectors() {
-        assert_eq!(sha1_hex(""), "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709");
-        assert_eq!(sha1_hex("abc"), "A9993E364706816ABA3E25717850C26C9CD0D89D");
         assert_eq!(
-            sha1_hex("The quick brown fox jumps over the lazy dog"),
+            sha1_hex("").as_str(),
+            "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+        );
+        assert_eq!(
+            sha1_hex("abc").as_str(),
+            "A9993E364706816ABA3E25717850C26C9CD0D89D"
+        );
+        assert_eq!(
+            sha1_hex("The quick brown fox jumps over the lazy dog").as_str(),
             "2FD4E1C67A2D28FCED849EE1BB76E7391B93EB12"
         );
         /* HIBP's own example, and the one that matters: this is the hash the
         service answers for. */
         assert_eq!(
-            sha1_hex("password"),
+            sha1_hex("password").as_str(),
             "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8"
         );
         /* The lengths where padding decides how many blocks there are: 55
@@ -212,29 +229,29 @@ mod tests {
         Computed with a separate implementation, not read back out of this
         one — a test that asserts whatever the code does proves nothing. */
         assert_eq!(
-            sha1_hex(&"a".repeat(55)),
+            sha1_hex(&"a".repeat(55)).as_str(),
             "C1C8BBDC22796E28C0E15163D20899B65621D65A"
         );
         assert_eq!(
-            sha1_hex(&"a".repeat(56)),
+            sha1_hex(&"a".repeat(56)).as_str(),
             "C2DB330F6083854C99D4B5BFB6E8F29F201BE699"
         );
         assert_eq!(
-            sha1_hex(&"a".repeat(64)),
+            sha1_hex(&"a".repeat(64)).as_str(),
             "0098BA824B5C16427BD7A1122A5A442A25EC644D"
         );
         assert_eq!(
-            sha1_hex(&"a".repeat(119)),
+            sha1_hex(&"a".repeat(119)).as_str(),
             "EE971065AAA017E0632A8CA6C77BB3BF8B1DFC56"
         );
         assert_eq!(
-            sha1_hex(&"a".repeat(120)),
+            sha1_hex(&"a".repeat(120)).as_str(),
             "F34C1488385346A55709BA056DDD08280DD4C6D6"
         );
         // Multi-byte input is hashed as its utf-8 bytes, not its chars.
         assert_eq!(
-            sha1_hex("héllo"),
-            sha1_hex(std::str::from_utf8(&[104, 195, 169, 108, 108, 111]).unwrap())
+            sha1_hex("héllo").as_str(),
+            sha1_hex(std::str::from_utf8(&[104, 195, 169, 108, 108, 111]).unwrap()).as_str()
         );
     }
 
@@ -244,7 +261,7 @@ mod tests {
     fn only_the_first_five_characters_ever_leave() {
         let (prefix, suffix) = split_hash("password");
         assert_eq!(prefix, "5BAA6");
-        assert_eq!(suffix, "1E4C9B93F3F0682250B6CF8331B7EE68FD8");
+        assert_eq!(suffix.as_str(), "1E4C9B93F3F0682250B6CF8331B7EE68FD8");
         assert_eq!(prefix.len(), 5);
         assert_eq!(prefix.len() + suffix.len(), 40);
         // The password itself appears nowhere in what is sent.
