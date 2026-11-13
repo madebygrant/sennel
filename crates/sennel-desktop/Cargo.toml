@@ -28,7 +28,7 @@ chrono.workspace = true
 zeroize = { workspace = true, features = ["serde"] }
 uuid = "1"
 # A `kill` or a logout must still wipe the clipboard and take keys back, through the normal exit.
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 [dev-dependencies]
 sennel-core = { path = "../sennel-core", features = ["test-support"] }
