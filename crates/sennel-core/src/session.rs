@@ -930,6 +930,17 @@ impl<S: Seal> Session<S> {
         Ok(())
     }
 
+    // No undo step: a browser pairing is taken back by revoking it.
+    pub fn set_vault_data(&mut self, key: &str, value: Option<&str>) -> Result<(), VaultError> {
+        let vault = self.vault.as_mut().ok_or(VaultError::Unsaved)?;
+        if !vault.writable() {
+            return Err(VaultError::ReadOnlyFormat(vault.format()));
+        }
+        vault.set_meta_data(key, value);
+        self.moved();
+        Ok(())
+    }
+
     fn push_undo(&mut self, step: Undo) {
         if self.undo.len() == UNDO_DEPTH {
             self.undo.remove(0);

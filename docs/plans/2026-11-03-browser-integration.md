@@ -31,7 +31,7 @@ Two constraints shape the design:
 
 ## First release: read-only fill
 
-### Wave 1: The protocol in core, with no transport
+### Wave 1: The protocol in core, with no transport [done 2026-11-17]
 - Add `crates/sennel-browser`, a library with no Tauri or socket code. It holds:
   - the message types and their JSON shapes, as the protocol document lists them
   - the session crypto, using the `crypto_box` crate (X25519, XSalsa20-Poly1305), with nonce increment and a check that rejects a reused nonce

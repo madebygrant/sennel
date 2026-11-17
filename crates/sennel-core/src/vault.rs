@@ -2850,6 +2850,34 @@ impl Vault {
         group.times.last_modification = Some(Times::now());
         Ok(())
     }
+
+    /// The vault's own custom data, such as KeePassXC's browser pairings. keepass reads any value
+    /// that decodes as base64 as `Binary`, and writes it back as the same base64.
+    pub fn meta_data(&self) -> impl Iterator<Item = (&str, &keepass::db::CustomDataValue)> {
+        self.db
+            .meta
+            .custom_data
+            .iter()
+            .filter_map(|(key, item)| Some((key.as_str(), item.value.as_ref()?)))
+    }
+
+    pub fn set_meta_data(&mut self, key: &str, value: Option<&str>) {
+        let data = &mut self.db.meta.custom_data;
+        match value {
+            Some(text) => {
+                data.insert(
+                    key.to_string(),
+                    keepass::db::CustomDataItem {
+                        value: Some(keepass::db::CustomDataValue::String(text.to_string())),
+                        last_modification_time: Some(Times::now()),
+                    },
+                );
+            }
+            None => {
+                data.remove(key);
+            }
+        }
+    }
 }
 
 /// What is wrong with an entry's password, worst first when one entry has

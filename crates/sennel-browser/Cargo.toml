@@ -1,0 +1,23 @@
+[package]
+name = "sennel-browser"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.88"
+description = "KeePassXC's browser protocol, answered from a Sennel session"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+sennel-core = { path = "../sennel-core" }
+keepass.workspace = true
+serde.workspace = true
+zeroize.workspace = true
+chrono.workspace = true
+serde_json = "1"
+# X25519 with XSalsa20-Poly1305, the NaCl box the extension makes with TweetNaCl.
+crypto_box = "0.9"
+base64 = "0.22"
+sha2 = "0.10"
+url = "2"
+
+[dev-dependencies]
+sennel-core = { path = "../sennel-core", features = ["test-support"] }

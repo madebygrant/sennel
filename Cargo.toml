@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/sennel-core", "crates/sennel-desktop"]
+members = [".", "crates/sennel-core", "crates/sennel-desktop", "crates/sennel-browser"]
 # Third-party source patched in place: built as a dependency, never linted or tested as ours.
 exclude = ["vendor"]
 resolver = "3"
@@ -9,7 +9,7 @@ resolver = "3"
 # what a version bump has to carry over or drop.
 keepass = { path = "vendor/keepass" }
 
-# Shared by both crates, so the pins and features are written once.
+# Shared by the workspace crates, so the pins and features are written once.
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
