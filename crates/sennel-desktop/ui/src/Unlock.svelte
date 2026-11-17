@@ -288,10 +288,11 @@
                 type="button"
                 class="row mono"
                 class:current={row === status.db}
+                title={row}
                 onclick={async () => {
                   mode = "open";
                   if (await choose(row)) passwordBox?.focus();
-                }}>{row}</button
+                }}><bdi>{row}</bdi></button
               >
             </li>
           {/each}
@@ -307,6 +308,7 @@
     height: calc(100% - 30px);
     overflow: auto;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     place-items: center;
     padding: 24px;
   }
@@ -315,6 +317,7 @@
     position: relative;
     width: min(460px, 100%);
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 14px;
   }
 
@@ -449,6 +452,7 @@
     margin: 0;
     padding: 0;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
 
@@ -457,7 +461,9 @@
     width: 100%;
     text-align: left;
     overflow: hidden;
+    white-space: nowrap;
     text-overflow: ellipsis;
+    direction: rtl;
     font-size: 12.5px;
     background: var(--panel);
   }
