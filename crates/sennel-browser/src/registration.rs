@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::proxy::{KEEPASSXC_CHROME, KEEPASSXC_EDGE, KEEPASSXC_FIREFOX};
-use crate::transport::KEEPASSXC_HOST;
+use crate::proxy::{
+    KEEPASSXC_CHROME, KEEPASSXC_EDGE, KEEPASSXC_FIREFOX, SENNEL_CHROME, SENNEL_FIREFOX,
+};
+use crate::transport::{APP_HOST, KEEPASSXC_HOST};
 
 // Marks a manifest as Sennel's whatever path it names, so one written by an older or moved copy of
 // Sennel is never mistaken for KeePassXC's and kept aside in its place.
@@ -225,6 +227,36 @@ fn replaceable(exe: &Path) -> Option<String> {
     None
 }
 
+/// Registers Sennel's own host name for Sennel's own extension in every installed browser. It
+/// conflicts with nothing, so the desktop app does this each time it starts, following it if moved.
+pub fn register_app(home: &Path, exe: &Path) -> io::Result<Vec<&'static str>> {
+    if let Some(why) = replaceable(exe) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+    }
+    let mut done = Vec::new();
+    for browser in browsers(home) {
+        let mut value = json!({
+            "name": APP_HOST,
+            "description": "Sennel",
+            "path": exe,
+            "type": "stdio",
+        });
+        if browser.firefox {
+            value["allowed_extensions"] = json!([SENNEL_FIREFOX]);
+        } else {
+            value["allowed_origins"] = json!([format!("chrome-extension://{SENNEL_CHROME}/")]);
+        }
+        std::fs::create_dir_all(&browser.hosts)?;
+        let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+        let file = browser.hosts.join(format!("{APP_HOST}.json"));
+        if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+            write_atomic(&file, text.as_bytes())?;
+        }
+        done.push(browser.name);
+    }
+    Ok(done)
+}
+
 fn private(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
@@ -299,6 +331,22 @@ mod tests {
         assert!(!installed[1].file().exists());
         assert!(taken_over(&home, exe).iter().all(|(_, on)| !*on));
 
+        // Sennel's own host name is registered for Sennel's own extension only.
+        assert_eq!(register_app(&home, exe).unwrap().len(), 2);
+        let app: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(installed[0].hosts.join(format!("{APP_HOST}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            app["allowed_origins"],
+            json!([format!("chrome-extension://{SENNEL_CHROME}/")])
+        );
+        let app: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(installed[1].hosts.join(format!("{APP_HOST}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(app["allowed_extensions"], json!([SENNEL_FIREFOX]));
+
         // A program others could replace is never registered.
         use std::os::unix::fs::PermissionsExt;
         let shared = home.join("shared");
@@ -306,6 +354,7 @@ mod tests {
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
         std::fs::write(shared.join("sennel"), "").unwrap();
         assert!(take_over(&home, &shared.join("sennel"), &aside).is_err());
+        assert!(register_app(&home, &shared.join("sennel")).is_err());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

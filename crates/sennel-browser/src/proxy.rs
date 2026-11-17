@@ -13,6 +13,11 @@ pub const KEEPASSXC_CHROME: &str = "oboonakemofpalcgghocfoadofidjkkk";
 pub const KEEPASSXC_EDGE: &str = "pdffhmdngciaglkoonimfcmckehcpafo";
 pub const KEEPASSXC_FIREFOX: &str = "keepassxc-browser@keepassxc.org";
 
+// Sennel's own extension. The Chrome id follows from the public key in extension/manifest.json, so
+// an unpacked build and the store build share it.
+pub const SENNEL_CHROME: &str = "naibgmdhaebnonifkllpaiaflpnggnfa";
+pub const SENNEL_FIREFOX: &str = "{11f92b7a-7cd2-477c-a988-2a64ef2e2091}";
+
 /// The host name a browser started this process under, from the arguments it passes: Chrome-family
 /// browsers pass the calling extension's origin, Firefox the manifest's path and the extension id.
 /// None when these are not native messaging arguments.

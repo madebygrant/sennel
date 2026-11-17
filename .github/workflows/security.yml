@@ -55,6 +55,9 @@ jobs:
       - name: Audit package-lock.json
         run: npm --prefix crates/sennel-desktop/ui audit --omit=dev --audit-level=high
 
+      - name: Audit the extension's package-lock.json
+        run: npm --prefix extension audit --omit=dev --audit-level=high
+
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-24.04

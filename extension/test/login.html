@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Plain login</title></head>
+  <body>
+    <h1>Plain login</h1>
+    <form onsubmit="event.preventDefault(); document.querySelector('output').textContent = `${this.user.value} / ${this.pass.value}`">
+      <p><label>Username <input name="user" autocomplete="username" /></label></p>
+      <p><label>Password <input name="pass" type="password" autocomplete="current-password" /></label></p>
+      <button>Sign in</button>
+    </form>
+    <p>Submitted: <output></output></p>
+  </body>
+</html>

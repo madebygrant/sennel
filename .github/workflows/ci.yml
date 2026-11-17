@@ -48,11 +48,20 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: crates/sennel-desktop/ui/package-lock.json
+          cache-dependency-path: |
+            crates/sennel-desktop/ui/package-lock.json
+            extension/package-lock.json
 
       # The desktop binary embeds the built page, so clippy needs it before it runs.
       - name: Build and test the desktop page
         working-directory: crates/sennel-desktop/ui
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Build and test the browser extension
+        working-directory: extension
         run: |
           npm ci
           npm test

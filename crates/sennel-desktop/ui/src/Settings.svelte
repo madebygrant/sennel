@@ -176,6 +176,9 @@
           {#if browsers.down}
             <p class="caution">Browsers cannot reach this window: {browsers.down}</p>
           {/if}
+          {#if browsers.unregistered}
+            <p class="caution">Sennel's own extension cannot start this app: {browsers.unregistered}</p>
+          {/if}
           {#if browsers.locked}
             <div class="row"><p>Unlock to see connected browsers.</p></div>
           {:else}

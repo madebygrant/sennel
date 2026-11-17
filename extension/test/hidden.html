@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hidden fields</title>
+    <style>
+      .trap input { display: block; margin: 4px 0; }
+      .cover { position: relative; }
+      .cover::after { content: ""; position: absolute; inset: 0; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <h1>Hidden fields</h1>
+    <p>After a fill, only the last pair should have values.</p>
+    <form class="trap">
+      <input name="u1" style="opacity: 0" /><input name="p1" type="password" style="opacity: 0" />
+      <input name="u2" style="position: absolute; left: -9999px" /><input name="p2" type="password" style="position: absolute; left: -9999px" />
+      <input name="u3" style="width: 0; height: 0; border: 0; padding: 0" /><input name="p3" type="password" style="width: 0; height: 0; border: 0; padding: 0" />
+      <div style="opacity: 0.05"><input name="u4" /><input name="p4" type="password" /></div>
+      <div class="cover"><input name="u5" /><input name="p5" type="password" /></div>
+    </form>
+    <form>
+      <p><label>Username <input name="user" /></label></p>
+      <p><label>Password <input name="pass" type="password" /></label></p>
+    </form>
+    <button onclick="document.querySelector('pre').textContent = [...document.querySelectorAll('input')].map((i) => `${i.name}=${i.value}`).join('\n')">Show values</button>
+    <pre></pre>
+  </body>
+</html>

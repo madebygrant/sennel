@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Sennel",
+  "version": "0.1.0",
+  "description": "Fill logins from the Sennel password manager.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Sennel",
+    "default_icon": { "32": "icons/32.png", "64": "icons/64.png" }
+  },
+  "icons": { "32": "icons/32.png", "64": "icons/64.png", "128": "icons/128.png" },
+  "permissions": ["nativeMessaging", "activeTab", "scripting", "storage", "clipboardWrite"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuZ0bdAtQ1DbEULJTlKzDWywXVGShLGScimHNSTS2zF78AmpbQnjTawKwKNI5XLmJKmid3XAlyilv1dDJ7LLAcAoN8WgwLpye6O3rREJ5GTclAfzh/4tdDtWo1m8bbAxukVjv/40BINQkXrmum/npS53ethOXwTL7Rr0nODEKKHpQfv/S8EsYPUhpHaMhvW4LZ06DJirZbq7OaqZke3FWVYlJSNCa/8ax2hXHVEy2i5nitf3oPE/YqFEiFyd33f0wieh81nQbxqx0I9YrXE4sb975eJqV8lJ8/zNqfgvhHCJH6mlAQtUpfvMneE38KtG9hM9ySh1VfAiMIvmJUir/pwIDAQAB",
+  "browser_specific_settings": {
+    "gecko": { "id": "{11f92b7a-7cd2-477c-a988-2a64ef2e2091}", "strict_min_version": "128.0" }
+  }
+}

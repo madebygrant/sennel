@@ -710,6 +710,12 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
             if let (Some(places), Some(socket)) =
                 (Places::find(), sennel_browser::transport::socket_path())
             {
+                // Lets Sennel's own extension start this program; KeePassXC's name stays untouched.
+                if let Err(e) =
+                    sennel_browser::registration::register_app(&places.home, &places.exe)
+                {
+                    browsers.unregistered(e.to_string());
+                }
                 let ui: Arc<dyn bridge::Ui> = Arc::new(Window(app.handle().clone()));
                 browsers.start(Arc::clone(&desk), ui, &socket, places.exe);
             }

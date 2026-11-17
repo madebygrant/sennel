@@ -16,6 +16,9 @@ use crate::{allow, pairing};
 /// The KeePassXC version Sennel answers as. The extension turns features on by it.
 pub const VERSION: &str = "2.8.0";
 
+/// Sennel's own additions to the protocol, so its extension can check for them. 1 has none yet.
+pub const SENNEL_PROTOCOL: u32 = 1;
+
 // Bounds the per-connection state a flood of key exchanges could pile up.
 const MAX_CLIENTS: usize = 64;
 
@@ -392,13 +395,18 @@ impl Server {
                 released: HashSet::new(),
             },
         );
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "action": action,
             "nonce": crypto::encode(&crypto::increment(&nonce)),
             "publicKey": crypto::encode(public.as_bytes()),
             "success": "true",
             "version": VERSION,
         });
+        // Tells Sennel's extension it reached Sennel rather than KeePassXC. KeePassXC-Browser's
+        // replies stay exactly as KeePassXC's are.
+        if self.strict {
+            body["sennel"] = serde_json::json!(SENNEL_PROTOCOL);
+        }
         Handled {
             reply: serde_json::to_vec(&body).unwrap_or_default(),
             effect: Effect::None,

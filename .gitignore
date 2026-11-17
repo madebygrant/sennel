@@ -3,3 +3,5 @@
 crates/sennel-desktop/ui/node_modules/
 crates/sennel-desktop/ui/dist/
 crates/sennel-desktop/gen/
+extension/node_modules/
+extension/dist/

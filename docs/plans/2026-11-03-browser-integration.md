@@ -61,7 +61,7 @@ Two constraints shape the design:
 - A locked vault answers `database-locked` and brings the window forward to unlock. No request waits on a hidden prompt.
 - **Exit criterion:** stock KeePassXC-Browser in Chrome and Firefox on macOS pairs with Sennel, fills a login and a one-time code, and sees lock and unlock. Its save and generate buttons show the "not available yet" message. KeePassXC then reclaims the registration on its next start, as documented.
 
-### Wave 3: The rules, then an extension that talks
+### Wave 3: The rules, then an extension that talks [done 2026-11-17]
 - Write `docs/extension-rules.md` before any extension code. Each rule states what to do, why, and the public issue or changelog entry it came from. It starts from these:
   - Fill only after a user action. Filling on page load lets an invisible form on a compromised page collect credentials.
   - Match scheme, host and port. Never send an https entry's password to an http page. Subdomain matching is a stated choice, not an accident.
@@ -73,7 +73,8 @@ Two constraints shape the design:
   - the protocol client: key exchange, pairing, nonces, and the Sennel-only feature check, which falls back to plain protocol behaviour against KeePassXC
   - a toolbar popup that lists the logins for the current site, fills on a click, and copies the one-time code. It has no save or generate buttons.
   - Chrome-family and Firefox builds, loaded unpacked for now
-- **Exit criterion:** the unpacked extension pairs with Sennel and with KeePassXC. On a plain login page, a click in the popup fills the form. Every rule in the document has a test or a written manual check.
+- **Exit criterion:** the unpacked extension pairs with Sennel. On a plain login page, a click in the popup fills the form. Every rule in the document has a test or a written manual check.
+- Pairing with KeePassXC was dropped from this check [decided 2026-11-17]. KeePassXC's registration allows only KeePassXC-Browser's store ids, and KeePassXC rewrites it on every start, so reaching KeePassXC needs a hand edit nobody would keep. The client still speaks the plain protocol when an app does not say it is Sennel, so the edit works, unsupported.
 
 ### Wave 4: Autofill on the page, and the stores
 - Field detection: usernames, passwords, one-time code fields, forms added after the page loads, and logins split across two pages.

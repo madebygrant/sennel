@@ -791,3 +791,29 @@ fn always_after_the_pairing_was_revoked_meanwhile_remembers_nothing() {
     assert_eq!(error_code(&reply), "8");
     assert!(allow::hosts(session.vault().unwrap()).is_empty());
 }
+
+#[test]
+fn only_sennels_own_host_says_it_is_sennel() {
+    let mut session: Session<Sealed> = Session::new();
+    let exchange = |server: &mut Server, session: &mut Session<Sealed>| -> Value {
+        let request = json!({
+            "action": "change-public-keys",
+            "publicKey": crypto::encode(crypto::generate_secret().public_key().as_bytes()),
+            "nonce": crypto::encode(&crypto::random_nonce()),
+            "clientID": "x",
+        });
+        let handled = run(
+            server,
+            session,
+            &mut Answers::default(),
+            request.to_string().as_bytes(),
+        );
+        serde_json::from_slice(&handled.reply).unwrap()
+    };
+    assert_eq!(exchange(&mut Server::strict(), &mut session)["sennel"], 1);
+    assert!(
+        exchange(&mut Server::new(), &mut session)
+            .get("sennel")
+            .is_none()
+    );
+}

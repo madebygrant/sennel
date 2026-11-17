@@ -45,6 +45,8 @@ pub struct Bridge {
     asking: Mutex<()>,
     // Why the socket is not there, for the settings screen.
     down: Mutex<Option<String>>,
+    // Why Sennel's own extension cannot start this app, which does not affect KeePassXC-Browser.
+    unregistered: Mutex<Option<String>>,
 }
 
 fn held<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -84,6 +86,10 @@ impl Bridge {
 
     pub fn down(&self) -> Option<String> {
         held(&self.down).clone()
+    }
+
+    pub fn unregistered(&self, why: String) {
+        *held(&self.unregistered) = Some(why);
     }
 
     fn serve(&self, desk: &Desk, ui: &dyn Ui, stream: UnixStream, exe: &Path) {
@@ -203,6 +209,7 @@ pub struct BrowserState {
     pub sites: Vec<(String, usize)>,
     pub locked: bool,
     pub down: Option<String>,
+    pub unregistered: Option<String>,
 }
 
 pub fn state(desk: &Desk, bridge: &Bridge, home: &Path, exe: &Path) -> BrowserState {
@@ -219,6 +226,7 @@ pub fn state(desk: &Desk, bridge: &Bridge, home: &Path, exe: &Path) -> BrowserSt
         sites: vault.map(allow::hosts).unwrap_or_default(),
         locked: vault.is_none(),
         down: bridge.down(),
+        unregistered: held(&bridge.unregistered).clone(),
     }
 }
 
