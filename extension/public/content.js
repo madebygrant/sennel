@@ -157,19 +157,25 @@
 
   const STYLE = `
     :host { all: initial; }
-    .box { font: 13px/1.35 system-ui, sans-serif; color: #ece8e1; }
+    .box { font: 13px/1.4 system-ui, sans-serif; color: #ebebea; }
     button { all: unset; box-sizing: border-box; cursor: pointer; }
-    .mark { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; background: #141414; border: 1px solid #3a3a3a; }
-    .mark:focus-visible, .row:focus-visible { outline: 2px solid #e2a65a; }
-    .panel { margin-top: 4px; width: 260px; max-height: 240px; overflow: auto; background: #141414; border: 1px solid #3a3a3a; border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); }
-    .row { display: grid; width: 100%; padding: 6px 8px; border-radius: 6px; }
-    .row:hover { background: #222; }
-    .title { font-weight: 600; }
-    .sub, .note { color: #9a948a; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .note { padding: 6px 8px; white-space: normal; }
+    .mark { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 5px; background: #181818; border: 1px solid #323232; }
+    .mark:hover { border-color: #e2a65a; }
+    .mark:focus-visible, .row:focus-visible { outline: 2px solid #e2a65a; outline-offset: 1px; }
+    .panel { margin-top: 6px; max-height: 260px; overflow: auto; background: #111; border: 1px solid #323232; border-radius: 7px; padding: 4px; box-shadow: 0 10px 28px rgb(0 0 0 / 0.45); }
+    .row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border-radius: 5px; }
+    .badge { flex-shrink: 0; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 5px; background: #232323; color: #e2a65a; font-weight: 600; }
+    .names { display: grid; min-width: 0; }
+    .row:hover { background: #232323; }
+    .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sub { font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: #a5a5a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .note { padding: 6px 8px; color: #a5a5a3; font-size: 12.5px; }
   `;
 
   let ui = null;
+  // A field whose list the user dismissed, by Escape or by typing. Clicks there show only the
+  // button until the field loses focus.
+  let quiet = null;
 
   function frameIsSafe(win) {
     // The in-page UI stays out of cross-origin frames (R3), where the parent could make the whole
@@ -252,8 +258,16 @@
     });
   }
 
+  // The list hangs under the field, lined up with its left edge, while the button sits at its right.
+  function align(panel) {
+    const width = ui.field.getBoundingClientRect().width;
+    panel.style.width = `${Math.max(width, 260)}px`;
+    panel.style.marginLeft = `${28 - width}px`;
+  }
+
   function say(text) {
     const panel = ui.root.querySelector(".panel");
+    align(panel);
     panel.hidden = false;
     panel.replaceChildren(Object.assign(document.createElement("div"), { className: "note", textContent: text }));
   }
@@ -273,11 +287,17 @@
     }
   }
 
-  async function open() {
+  // Opened by a click in the field, the list shows only when there are logins to offer. Opened by
+  // the button, it also says why there are none.
+  async function open(byField = false) {
     const asking = ui;
-    say("Asking Sennel…");
+    if (asking.asking) return;
+    asking.asking = true;
+    if (!byField) say("Asking Sennel…");
     const reply = await ask({ op: "page-list" });
-    if (ui !== asking) return;
+    asking.asking = false;
+    if (ui !== asking || (byField && quiet === ui.field)) return;
+    if (byField && (reply?.stage !== "list" || !reply.entries.length)) return;
     if (reply?.stage !== "list") {
       say(MESSAGES[reply?.stage] ?? reply?.note ?? "Something went wrong.");
       return;
@@ -287,15 +307,28 @@
       return;
     }
     const otp = kind(ui.field) === "otp";
+    // Sennel says which logins have a code; an app that does not say gets every login offered.
+    const marked = reply.entries.some((e) => e.code !== undefined);
+    const offered = otp && marked ? reply.entries.filter((e) => e.code) : reply.entries;
+    if (!offered.length) {
+      if (byField) return;
+      say("No login here has a one-time code.");
+      return;
+    }
     const panel = ui.root.querySelector(".panel");
+    align(panel);
+    panel.hidden = false;
     panel.replaceChildren(
-      ...reply.entries.map((entry) => {
+      ...offered.map((entry) => {
         const row = document.createElement("button");
         row.className = "row";
-        row.append(
-          Object.assign(document.createElement("span"), { className: "title", textContent: entry.name || entry.login }),
+        const label = entry.name || entry.login || "?";
+        const names = Object.assign(document.createElement("span"), { className: "names" });
+        names.append(
+          Object.assign(document.createElement("span"), { className: "title", textContent: label }),
           Object.assign(document.createElement("span"), { className: "sub", textContent: otp ? "one-time code" : entry.login }),
         );
+        row.append(Object.assign(document.createElement("span"), { className: "badge", textContent: label.trim().charAt(0).toUpperCase() }), names);
         row.addEventListener("click", (e) => {
           if (trusted(e)) choose(entry, otp);
         });
@@ -337,13 +370,52 @@
 
   if (!api?.runtime?.id) return;
 
+  const fieldOf = (e) => {
+    const field = e.composedPath()[0];
+    return kind(field) && usable(field, globalThis) && frameIsSafe(globalThis) ? field : null;
+  };
+  // Focus alone, as by Tab or a page's own script, shows the button and asks nothing.
   document.addEventListener(
     "focusin",
     (e) => {
-      const field = e.composedPath()[0];
-      if (ui && field === ui.field) return;
-      if (!kind(field) || !usable(field, globalThis) || !frameIsSafe(globalThis)) return;
-      show(field);
+      const field = fieldOf(e);
+      if (field && field !== ui?.field) show(field);
+    },
+    true,
+  );
+  // A real click on a login field opens the list at once (R9). Filling still takes a click on a
+  // row, which has to pass every R6 check.
+  document.addEventListener(
+    "click",
+    (e) => {
+      const field = e.isTrusted && fieldOf(e);
+      if (!field) return;
+      if (field !== ui?.field) show(field);
+      if (field !== quiet && ui.root.querySelector(".panel").hidden) open(true);
+    },
+    true,
+  );
+  // Typing means the user is entering it by hand: the list goes and the button stays.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!ui || e.composedPath()[0] !== ui.field || e.ctrlKey || e.metaKey) return;
+      if (e.key === "Escape") {
+        quiet = ui.field;
+        close();
+      } else if (e.key.length === 1 || e.key === "Backspace" || e.key === "Delete") {
+        quiet = ui.field;
+        const panel = ui.root.querySelector(".panel");
+        panel.hidden = true;
+        panel.replaceChildren();
+      }
+    },
+    true,
+  );
+  document.addEventListener(
+    "focusout",
+    (e) => {
+      if (e.composedPath()[0] === quiet) quiet = null;
     },
     true,
   );

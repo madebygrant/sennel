@@ -92,22 +92,89 @@ async function open(path) {
   return page;
 }
 
-test("a plain login fills after a click on the button, and not before (R1)", async () => {
+test("a plain login fills after a click on a row, and not before (R1)", async () => {
   const page = await open("login.html");
   await sleep(300);
   assert.deepEqual(await values(page), ["", ""], "nothing on load");
-  await page.click("input[name=user]");
-  assert.deepEqual(await values(page), ["", ""], "nothing on focus");
+  await page.focus("input[name=user]");
+  await button(page);
+  assert.equal(await panelOpen(page), false, "focus shows the button and asks nothing");
   await (await button(page)).click();
+  assert.deepEqual(await values(page), ["", ""], "nothing until a row is chosen");
   await pick(page);
   await filled(page, "input[name=pass]", "hunter2");
   assert.deepEqual(await values(page), ["ada", "hunter2"]);
   await page.close();
 });
 
-test("a script's click on the button does nothing (R1)", async () => {
+test("a real click on a login field opens the list, and a script's does not (R9)", async () => {
+  const page = await open("login.html");
+  await page.focus("input[name=user]");
+  await button(page);
+  await page.$eval("input[name=user]", (i) => i.click());
+  await sleep(300);
+  assert.equal(await panelOpen(page), false, "a script's click");
+  await page.click("input[name=pass]");
+  await rows(page);
+  assert.equal(await panelOpen(page), true, "a real click");
+  await pick(page);
+  await filled(page, "input[name=pass]", "hunter2");
+  assert.deepEqual(await values(page), ["ada", "hunter2"]);
+  await page.close();
+});
+
+test("a click on a field of a site with no logins shows only the button, which says why", async () => {
+  const page = await open("login.html?none");
+  await page.click("input[name=user]");
+  await sleep(500);
+  assert.equal(await panelOpen(page), false, "the click stays quiet");
+  await (await button(page)).click();
+  await page.waitForFunction(() => document.querySelector("sennel-fill")?.shadowRoot?.querySelector(".note")?.textContent === "No logins for this page.", { timeout: 3000 });
+  await page.close();
+});
+
+test("typing hides the list, and clicks in that field stay quiet until it loses focus", async () => {
   const page = await open("login.html");
   await page.click("input[name=user]");
+  await rows(page);
+  await page.keyboard.type("a");
+  assert.equal(await panelOpen(page), false, "typing hides it");
+  assert.ok(await button(page), "the button stays");
+  await page.click("input[name=user]");
+  await sleep(500);
+  assert.equal(await panelOpen(page), false, "a click after typing");
+  await page.click("input[name=pass]");
+  await rows(page);
+  await page.click("input[name=user]");
+  await rows(page);
+  assert.equal(await panelOpen(page), true, "back after the field lost focus");
+  await page.close();
+});
+
+test("Escape closes the list, and a click in the same field does not reopen it", async () => {
+  const page = await open("login.html");
+  await page.click("input[name=user]");
+  await rows(page);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.$("sennel-fill"), null);
+  await page.click("input[name=user]");
+  await sleep(500);
+  assert.equal(await panelOpen(page), false);
+  await page.close();
+});
+
+test("a code field lists only the logins that have a code", async () => {
+  const page = await open("otp.html");
+  await page.click("input[name=otp]");
+  await rows(page);
+  const names = await page.evaluate(() => [...document.querySelector("sennel-fill").shadowRoot.querySelectorAll(".title")].map((t) => t.textContent));
+  assert.deepEqual(names, ["with code"]);
+  await page.close();
+});
+
+test("a script's click on the button does nothing (R1)", async () => {
+  const page = await open("login.html");
+  await page.focus("input[name=user]");
   const mark = await button(page);
   await mark.evaluate((b) => b.click());
   await sleep(300);
@@ -117,7 +184,7 @@ test("a script's click on the button does nothing (R1)", async () => {
 
 test("a click before the button has settled does nothing (R6)", async () => {
   const page = await open("login.html");
-  await page.click("input[name=user]");
+  await page.focus("input[name=user]");
   await page.waitForFunction(() => document.querySelector("sennel-fill")?.shadowRoot?.querySelector(".mark"));
   const mark = await page.evaluateHandle(() => document.querySelector("sennel-fill").shadowRoot.querySelector(".mark"));
   await mark.click();
@@ -133,7 +200,7 @@ test("a page that fades itself or the button gets nothing from a click (R6)", as
     () => (document.body.style.filter = "opacity(0)"),
   ]) {
     const page = await open("login.html");
-    await page.click("input[name=user]");
+    await page.focus("input[name=user]");
     const mark = await button(page);
     await page.evaluate(fade);
     await mark.click();
@@ -147,7 +214,7 @@ test("a button the page moves has to settle again before a click counts (R6)", a
   const page = await open("login.html");
   await page.setViewport({ width: 800, height: 400 });
   await page.evaluate(() => (document.body.style.minHeight = "3000px"));
-  await page.click("input[name=user]");
+  await page.focus("input[name=user]");
   const mark = await button(page);
   await page.evaluate(() => scrollBy(0, 20));
   await sleep(50);
@@ -159,7 +226,7 @@ test("a button the page moves has to settle again before a click counts (R6)", a
 
 test("a page that opens its own popover over Sennel's gets nothing from a click (R6)", async () => {
   const page = await open("login.html");
-  await page.click("input[name=user]");
+  await page.focus("input[name=user]");
   const mark = await button(page);
   await page.evaluate(() => {
     const cover = Object.assign(document.createElement("div"), { popover: "manual", textContent: "Accept cookies" });
@@ -248,7 +315,7 @@ test("a one-time code field gets the code of the login picked (R7)", async () =>
   const page = await open("otp.html");
   await page.click("input[name=otp]");
   await (await button(page)).click();
-  await pick(page, 1);
+  await pick(page, 0);
   await filled(page, "input[name=otp]", "123456");
   assert.equal(await page.$eval("input[name=otp]", (i) => i.value), "123456");
   await page.close();

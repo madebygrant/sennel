@@ -78,7 +78,9 @@ async function fetchLogins(client, pairing, target) {
 }
 
 // What a list is shown as: never a password.
-const shown = (entries) => entries.map(({ uuid, name, login }) => ({ uuid, name, login }));
+// `code` is left out when the app does not say, which KeePassXC does not.
+const shown = (entries) =>
+  entries.map(({ uuid, name, login, sennelCode }) => ({ uuid, name, login, ...(sennelCode === undefined ? {} : { code: Boolean(sennelCode) }) }));
 
 function held(target) {
   const found = recent.get(keyOf(target));

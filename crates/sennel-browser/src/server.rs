@@ -161,6 +161,8 @@ struct Client {
     trust: Option<Trust>,
     // Entries this connection was given through get-logins: the only ones get-totp will serve.
     released: HashSet<EntryId>,
+    // On Sennel's own host, so replies may carry Sennel's additions.
+    strict: bool,
 }
 
 impl Client {
@@ -212,6 +214,10 @@ struct Login<'a> {
     uuid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     expired: Option<&'static str>,
+    // Sennel's extension shows its code action only where there is a code. Sent on Sennel's own
+    // host alone, so KeePassXC-Browser's replies stay as KeePassXC's are.
+    #[serde(rename = "sennelCode", skip_serializing_if = "Option::is_none")]
+    sennel_code: Option<bool>,
 }
 
 impl Server {
@@ -393,6 +399,7 @@ impl Server {
                 epoch: self.epochs,
                 trust: None,
                 released: HashSet::new(),
+                strict: self.strict,
             },
         );
         let mut body = serde_json::json!({
@@ -615,6 +622,7 @@ fn logins(
             string_fields: [],
             uuid: entry.id().uuid().simple().to_string(),
             expired: vault::expired(entry).then_some("true"),
+            sennel_code: client.strict.then(|| vault::has_otp(entry)),
         })
         .collect();
     client

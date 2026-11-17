@@ -817,3 +817,30 @@ fn only_sennels_own_host_says_it_is_sennel() {
             .is_none()
     );
 }
+
+#[test]
+fn sennels_own_host_marks_logins_that_have_a_code() {
+    for (mut server, marked) in [(Server::strict(), true), (Server::new(), false)] {
+        let (mut vault, id) = new_vault();
+        vault
+            .set_otp(
+                &id,
+                Some("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=6"),
+            )
+            .unwrap();
+        let mut session = session_with(vault);
+        let mut browser = Browser::new();
+        browser.exchange(&mut server, &mut session);
+        let mut ask = Answers {
+            name: Some("laptop".into()),
+            site: true,
+            ..Answers::default()
+        };
+        let associate =
+            json!({"action": "associate", "key": browser.public(), "idKey": browser.identity});
+        browser.send(&mut server, &mut session, &mut ask, associate);
+        let lookup = json!({"action": "get-logins", "url": "https://site.example/", "keys": browser.keys("laptop")});
+        let (reply, _) = browser.send(&mut server, &mut session, &mut ask, lookup);
+        assert_eq!(reply["entries"][0].get("sennelCode").is_some(), marked);
+    }
+}

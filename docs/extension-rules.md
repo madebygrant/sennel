@@ -6,7 +6,7 @@ A change that breaks a rule changes the rule first, with its reason.
 
 ## R1. Fill only after the user acts
 
-Nothing is filled when a page loads, when a field gets focus, or when a script dispatches an event. A fill starts from a click in the extension's own popup, or from a click on Sennel's in-page button and then on a row of its list, each one an event the browser marks as trusted (`isTrusted`).
+Nothing is filled when a page loads, when a field gets focus, or when a script dispatches an event. A fill starts from a click in the extension's own popup, or from a click on a row of Sennel's in-page list, an event the browser marks as trusted (`isTrusted`). The list opens on a trusted click on a login field or on Sennel's button, but opening it fills nothing.
 
 **Why.** An attacker who can run script on a page through cross-site scripting or a bad advert can draw an invisible form and collect whatever is filled into it. If a fill needs a real user action on UI the page cannot reach, the script cannot start one.
 
@@ -86,15 +86,15 @@ Every encrypted reply must carry the request's nonce plus one, both inside and o
 
 **Checked by.** `extension/src/client.test.js`.
 
-## R9. A page learns nothing until the user asks
+## R9. Nothing reaches Sennel until the user clicks
 
-The content script runs on every page but only watches for focus on a login field. It sends nothing to the background worker, and so nothing to Sennel, until the user clicks its button. Pairing is never started from a page, only from the toolbar popup.
+The content script runs on every page. Focus on a login field, by Tab or by a page's own script, shows Sennel's button and nothing more. Only a click the browser marks as trusted, on a login field or on the button, asks Sennel for the site's logins. Pairing is never started from a page, only from the toolbar popup.
 
-**Why.** Every message to Sennel can raise a dialog in the app, and a lookup tells the app which sites the user visits. A page should not be able to cause either by drawing a login form.
+**Why.** Every message to Sennel can raise a dialog in the app, and a lookup tells the app which sites the user visits. A page should not be able to cause either by drawing a login form or by focusing one. A page can still steer a real click onto a field it controls, which is why opening the list fills nothing (R1).
 
 **Source.** [#3043](https://github.com/keepassxreboot/keepassxc-browser/issues/3043): a site whose page alone made the extension prompt to unlock the database.
 
-**Checked by.** In `extension/public/content.js` the only `sendMessage` calls follow a trusted click, and `extension/src/background.js` offers content scripts no pairing operation. Manual check M7.
+**Checked by.** `extension/e2e/pages.test.js`: focus shows the button with no list, a script's click on the field opens nothing, and a real click opens the list. In `extension/public/content.js` every `sendMessage` follows a trusted click, and `extension/src/background.js` offers content scripts no pairing operation. Manual check M7.
 
 ## Manual checks
 
@@ -106,5 +106,5 @@ Run in Chrome and Firefox against Sennel with the unpacked extension.
 - **M4.** On `test/hidden.html`, the hidden and covered fields stay empty after a fill, and the visible pair is filled.
 - **M5.** Quit Sennel, then open the popup. It says the app is not reachable and does not retry on its own. Open Sennel and reopen the popup, and it works.
 - **M6.** On a site with no remembered answer, choose a login. Sennel's dialog closes the popup; answer "Allow once", reopen the popup, and the list is there without a second question. Pairing works the same way: click Connect, answer in Sennel, and reopen the popup.
-- **M7.** With the Sennel window in view, open a login page and click into its fields without clicking Sennel's button. Sennel shows no dialog and its status line stays quiet.
+- **M7.** With the Sennel window in view, open a login page and Tab into its fields. Sennel shows no dialog and its status line stays quiet. Click a field, and Sennel's list opens (with Sennel's site question the first time).
 - **M8.** In Firefox, repeat the browser tests' pages by hand: `login.html`, `two-step.html`, `dynamic.html`, `shadow.html`, `iframe-same.html`, `iframe-cross.html`, `hidden.html` and `otp.html`. Firefox runs no automated browser test.

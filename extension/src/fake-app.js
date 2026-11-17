@@ -39,9 +39,11 @@ export function fakePort() {
           return answer(m.action, nonce, { id: "test", hash: "h" });
         case "get-logins": {
           const host = new URL(inner.url).hostname;
-          if (host !== "127.0.0.1" && host !== "localhost") return fail("15");
+          // A page asked for with ?none stands for a site with no logins.
+          if ((host !== "127.0.0.1" && host !== "localhost") || new URL(inner.url).search === "?none") return fail("15");
           LOGINS.forEach((l) => given.add(l.uuid));
-          return answer(m.action, nonce, { count: LOGINS.length, entries: LOGINS.map(({ totp, ...l }) => l), hash: "h", id: "" });
+          const entries = LOGINS.map(({ totp, ...l }) => ({ ...l, sennelCode: Boolean(totp) }));
+          return answer(m.action, nonce, { count: LOGINS.length, entries, hash: "h", id: "" });
         }
         case "get-totp": {
           const entry = LOGINS.find((l) => l.uuid === inner.uuid && given.has(l.uuid));
