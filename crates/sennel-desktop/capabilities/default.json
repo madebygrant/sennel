@@ -58,6 +58,10 @@
     "allow-remove-field",
     "allow-extract",
     "allow-agent-give",
+    "allow-browser-state",
+    "allow-set-takeover",
+    "allow-revoke-browser",
+    "allow-forget-site",
     "allow-quit"
   ]
 }

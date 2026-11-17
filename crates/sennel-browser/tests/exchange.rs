@@ -4,7 +4,7 @@ use crypto_box::{PublicKey, SecretKey};
 use keepass::db::{CustomDataItem, CustomDataValue, EntryId};
 use sennel_browser::crypto::{self, Channel};
 use sennel_browser::server::VERSION;
-use sennel_browser::{Answer, Effect, Handled, Prompt, Server, Step, pairing};
+use sennel_browser::{Answer, Effect, Handled, Prompt, Server, Step, allow, pairing};
 use sennel_core::session::Session;
 use sennel_core::touchid::Sealed;
 use sennel_core::vault::Vault;
@@ -28,6 +28,7 @@ fn fixture(name: &str) -> PathBuf {
 struct Answers {
     name: Option<String>,
     site: bool,
+    always: bool,
     totp: bool,
     pairs_asked: usize,
     sites_asked: Vec<(String, Vec<String>)>,
@@ -45,6 +46,9 @@ impl Answers {
             }
             Prompt::Site { host, titles } => {
                 self.sites_asked.push((host.clone(), titles.clone()));
+                if self.always {
+                    return Answer::Always;
+                }
                 yes(self.site)
             }
             Prompt::Totp { title } => {
@@ -695,4 +699,95 @@ fn a_pairing_survives_a_save_and_a_reopen() {
     let mut session = session_with(reopened);
     pairing::revoke(&mut session, "laptop").unwrap();
     assert!(pairing::pairings(session.vault().unwrap()).is_empty());
+}
+
+#[test]
+fn sennels_own_host_gives_the_hash_only_after_a_pairing_is_shown() {
+    let (vault, _) = new_vault();
+    let mut session = session_with(vault);
+    let mut server = Server::strict();
+    let mut browser = Browser::new();
+    browser.exchange(&mut server, &mut session);
+    let mut ask = Answers {
+        name: Some("laptop".into()),
+        ..Answers::default()
+    };
+    let hash = json!({"action": "get-databasehash"});
+    let (reply, _) = browser.send(&mut server, &mut session, &mut ask, hash.clone());
+    assert_eq!(error_code(&reply), "8");
+    assert!(!server.known());
+    let associate =
+        json!({"action": "associate", "key": browser.public(), "idKey": browser.identity});
+    browser.send(&mut server, &mut session, &mut ask, associate);
+    let (reply, _) = browser.send(&mut server, &mut session, &mut ask, hash);
+    assert!(reply["hash"].is_string());
+    assert!(server.known());
+}
+
+#[test]
+fn always_is_remembered_in_the_vault_and_asked_no_more() {
+    let (vault, id) = new_vault();
+    let mut session = session_with(vault);
+    let mut server = Server::new();
+    let mut browser = Browser::new();
+    browser.exchange(&mut server, &mut session);
+    let mut ask = Answers {
+        name: Some("laptop".into()),
+        always: true,
+        ..Answers::default()
+    };
+    let associate =
+        json!({"action": "associate", "key": browser.public(), "idKey": browser.identity});
+    browser.send(&mut server, &mut session, &mut ask, associate);
+    let lookup = json!({"action": "get-logins", "url": "https://site.example/", "keys": browser.keys("laptop")});
+    let (reply, effect) = browser.send(&mut server, &mut session, &mut ask, lookup.clone());
+    assert_eq!(
+        (reply["count"].as_u64(), effect),
+        (Some(1), Effect::Changed)
+    );
+    assert!(allow::allowed(
+        session.vault().unwrap(),
+        "site.example",
+        &id
+    ));
+    // The entry itself is not written to.
+    let entry = session.vault().unwrap().get_entry(&id).unwrap();
+    assert!(entry.custom_data.is_empty());
+
+    let (reply, effect) = browser.send(&mut server, &mut session, &mut ask, lookup.clone());
+    assert_eq!((reply["count"].as_u64(), effect), (Some(1), Effect::None));
+    assert_eq!(ask.sites_asked.len(), 1);
+
+    allow::forget(&mut session, "site.example").unwrap();
+    assert!(allow::hosts(session.vault().unwrap()).is_empty());
+    browser.send(&mut server, &mut session, &mut ask, lookup);
+    assert_eq!(ask.sites_asked.len(), 2);
+}
+
+#[test]
+fn always_after_the_pairing_was_revoked_meanwhile_remembers_nothing() {
+    let (vault, _) = new_vault();
+    let mut session = session_with(vault);
+    let mut server = Server::new();
+    let mut browser = Browser::new();
+    browser.exchange(&mut server, &mut session);
+    let mut ask = Answers {
+        name: Some("laptop".into()),
+        ..Answers::default()
+    };
+    let associate =
+        json!({"action": "associate", "key": browser.public(), "idKey": browser.identity});
+    browser.send(&mut server, &mut session, &mut ask, associate);
+    let lookup = json!({"action": "get-logins", "url": "https://site.example/", "keys": browser.keys("laptop")});
+    let nonce = crypto::random_nonce();
+    let raw = browser.envelope(&lookup, &nonce);
+    let Step::Ask(question) = server.handle(&session, &raw) else {
+        panic!("the site has no remembered answer, so the user is asked");
+    };
+    pairing::revoke(&mut session, "laptop").unwrap();
+    let handled = server.resume(&mut session, question, Answer::Always);
+    assert_eq!(handled.effect, Effect::None);
+    let (reply, _) = browser.read(handled, &lookup, &nonce);
+    assert_eq!(error_code(&reply), "8");
+    assert!(allow::hosts(session.vault().unwrap()).is_empty());
 }

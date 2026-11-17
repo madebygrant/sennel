@@ -64,6 +64,7 @@
         refresh();
       }),
       on("prompt", (n) => say([n])),
+      on("browser", (notes) => say(notes)),
       on("quit-asked", () => (asking = true)),
     ];
     const tick = setInterval(() => (now = Date.now()), 1000);

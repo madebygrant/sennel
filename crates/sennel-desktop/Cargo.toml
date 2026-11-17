@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 sennel-core = { path = "../sennel-core" }
+sennel-browser = { path = "../sennel-browser" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 anyhow.workspace = true
@@ -29,6 +30,8 @@ zeroize = { workspace = true, features = ["serde"] }
 uuid = "1"
 # A `kill` or a logout must still wipe the clipboard and take keys back, through the normal exit.
 signal-hook = "0.3"
+serde_json = "1"
 
 [dev-dependencies]
+crypto_box = "0.9"
 sennel-core = { path = "../sennel-core", features = ["test-support"] }

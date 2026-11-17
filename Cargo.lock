@@ -4617,11 +4617,13 @@ dependencies = [
  "chrono",
  "crypto_box",
  "keepass",
+ "libc",
  "sennel-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "url",
+ "uuid",
  "zeroize",
 ]
 
@@ -4655,9 +4657,12 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "crypto_box",
  "keepass",
+ "sennel-browser",
  "sennel-core",
  "serde",
+ "serde_json",
  "signal-hook",
  "tauri",
  "tauri-build",

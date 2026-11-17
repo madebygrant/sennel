@@ -49,6 +49,10 @@ const COMMANDS: &[&str] = &[
     "remove_field",
     "extract",
     "agent_give",
+    "browser_state",
+    "set_takeover",
+    "revoke_browser",
+    "forget_site",
     "quit",
 ];
 

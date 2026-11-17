@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{self, Channel, CryptoError, Nonce};
 use crate::matching::{self, Page, Remembered};
-use crate::pairing;
+use crate::{allow, pairing};
 
 /// The KeePassXC version Sennel answers as. The extension turns features on by it.
 pub const VERSION: &str = "2.8.0";
@@ -60,6 +60,8 @@ pub enum Prompt {
 pub enum Answer {
     No,
     Yes,
+    /// Yes, and remember it for this host, in the vault.
+    Always,
     Named(String),
 }
 
@@ -181,6 +183,11 @@ impl Client {
 pub struct Server {
     clients: HashMap<String, Client>,
     epochs: u64,
+    // The vault's hash goes only to a connection that proved a pairing. Sennel's own host works
+    // this way; KeePassXC-Browser needs the hash first to choose which pairing to prove.
+    strict: bool,
+    // Some connection here has proved a pairing, so it may bring the window forward to unlock.
+    known: bool,
 }
 
 type Fail = (Code, Option<String>);
@@ -207,6 +214,18 @@ struct Login<'a> {
 impl Server {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn strict() -> Self {
+        Server {
+            strict: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether a connection here has shown a pairing since this server started.
+    pub fn known(&self) -> bool {
+        self.known
     }
 
     /// The unprompted message KeePassXC sends every connection when the vault locks or unlocks.
@@ -260,7 +279,9 @@ impl Server {
         if inner.get("action").and_then(Value::as_str) != Some(action.as_str()) {
             return Step::Reply(refuse(&action, Code::IncorrectAction, None));
         }
-        match answer(client, session.vault(), &action, &inner) {
+        let outcome = answer(client, session.vault(), &action, &inner, self.strict);
+        self.known |= client.trust.is_some();
+        match outcome {
             Outcome::Done(done) => Step::Reply(finish(client, &action, &reply, done)),
             Outcome::Ask(prompt, pending) => Step::Ask(Box::new(Question {
                 prompt,
@@ -309,13 +330,24 @@ impl Server {
                     mut allowed,
                     asked,
                 } => {
-                    if matches!(answer, Answer::Yes) {
-                        allowed.extend(asked);
+                    let always = matches!(answer, Answer::Always);
+                    if always || matches!(answer, Answer::Yes) {
+                        allowed.extend(asked.iter().copied());
                     }
-                    logins(client, session.vault(), &page, &allowed, &hash)
+                    let done = logins(client, session.vault(), &page, &allowed, &hash);
+                    // Remembered only once the logins went out, so a refused or emptied request
+                    // leaves no rule behind.
+                    match done {
+                        Ok((bytes, _))
+                            if always && allow::remember(session, page.host(), &asked).is_ok() =>
+                        {
+                            Ok((bytes, Effect::Changed))
+                        }
+                        other => other,
+                    }
                 }
                 Pending::Totp { entry } => match answer {
-                    Answer::Yes => totp(client, session.vault(), entry),
+                    Answer::Yes | Answer::Always => totp(client, session.vault(), entry),
                     _ => Err((
                         Code::NoValidUuid,
                         Some("Access to the one-time code was refused".into()),
@@ -323,6 +355,7 @@ impl Server {
                 },
             },
         };
+        self.known |= client.trust.is_some();
         finish(client, &action, &reply, done)
     }
 
@@ -377,7 +410,13 @@ fn field<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn answer(client: &mut Client, vault: Option<&Vault>, action: &str, inner: &Value) -> Outcome {
+fn answer(
+    client: &mut Client,
+    vault: Option<&Vault>,
+    action: &str,
+    inner: &Value,
+    strict: bool,
+) -> Outcome {
     if let Some((_, feature)) = NOT_YET.iter().find(|(a, _)| *a == action) {
         return Outcome::Done(Err((
             Code::IncorrectAction,
@@ -389,6 +428,9 @@ fn answer(client: &mut Client, vault: Option<&Vault>, action: &str, inner: &Valu
     };
     let hash = pairing::database_hash(vault);
     let done = match action {
+        "get-databasehash" if strict && !client.trusted(vault) => {
+            Err((Code::AssociationFailed, None))
+        }
         "get-databasehash" => body(&serde_json::json!({ "hash": hash })),
         "test-associate" => {
             let (name, key) = (field(inner, "id"), field(inner, "key"));
@@ -480,8 +522,13 @@ fn lookup(client: &mut Client, vault: &Vault, inner: &Value, hash: &str) -> Outc
     let mut allowed = Vec::new();
     let mut asked = Vec::new();
     let mut titles = Vec::new();
+    let always = allow::for_host(vault, page.host());
     for entry in candidates(vault, &page) {
-        match matching::remembered(&entry, &page) {
+        let remembered = match matching::remembered(&entry, &page) {
+            Remembered::Unknown if always.contains(&entry.id()) => Remembered::Allowed,
+            other => other,
+        };
+        match remembered {
             Remembered::Allowed => allowed.push(entry.id()),
             Remembered::Unknown => {
                 asked.push(entry.id());

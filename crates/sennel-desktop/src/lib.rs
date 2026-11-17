@@ -2,9 +2,11 @@
 // HTTP server, no port. Every command runs on the blocking pool, never the main thread, since any
 // of them can wait on the session while it derives a key or waits for a touch.
 
+pub mod bridge;
 pub mod desk;
 pub mod settings;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -427,6 +429,168 @@ async fn agent_give(
     .await?
 }
 
+// Where the browser parts live: this program (which the browser registration starts), the user's
+// home (where browsers keep registrations), and where KeePassXC's own registrations are kept aside.
+struct Places {
+    exe: PathBuf,
+    home: PathBuf,
+    aside: PathBuf,
+}
+
+impl Places {
+    fn find() -> Option<Places> {
+        let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+        let home = sennel_core::config::home().ok()?;
+        let aside = sennel_core::config::files_dir().parent()?.join("browser");
+        Some(Places { exe, home, aside })
+    }
+}
+
+type Browsers<'a> = State<'a, Arc<bridge::Bridge>>;
+
+#[tauri::command]
+async fn browser_state(
+    desk: Shared<'_>,
+    bridge: Browsers<'_>,
+) -> Result<bridge::BrowserState, String> {
+    let bridge = Arc::clone(bridge.inner());
+    off_main(&desk, move |d| {
+        let places = Places::find().ok_or("cannot find this program or the home folder")?;
+        Ok(bridge::state(d, &bridge, &places.home, &places.exe))
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn set_takeover(app: AppHandle, desk: Shared<'_>, on: bool) -> Result<Note, String> {
+    off_main(&desk, move |_| {
+        let places = Places::find().ok_or("cannot find this program or the home folder")?;
+        // Asked natively: the page must not be able to open the vault to browsers by itself.
+        if on {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+            let yes = app
+                .dialog()
+                .message(
+                    "Let KeePassXC-Browser reach Sennel instead of KeePassXC?\n\nKeePassXC takes \
+                     this back the next time it starts, unless \"Update native messaging manifest \
+                     files at startup\" is off in its Browser Integration settings.",
+                )
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Use Sennel".into(),
+                    "Cancel".into(),
+                ))
+                .blocking_show();
+            if !yes {
+                return Ok(desk::info("unchanged"));
+            }
+        }
+        Ok(bridge::set_takeover(
+            on,
+            &places.home,
+            &places.exe,
+            &places.aside,
+        ))
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn revoke_browser(desk: Shared<'_>, name: String) -> Result<Reply, String> {
+    off_main(&desk, move |d| Reply::notes(bridge::revoke(d, &name))).await
+}
+
+#[tauri::command]
+async fn forget_site(desk: Shared<'_>, host: String) -> Result<Reply, String> {
+    off_main(&desk, move |d| Reply::notes(bridge::forget(d, &host))).await
+}
+
+// The bridge's questions, asked in native dialogs a script in the page cannot answer.
+struct Window(AppHandle);
+
+const ALWAYS: &str = "Always allow";
+const ONCE: &str = "Allow once";
+
+impl bridge::Ui for Window {
+    fn ask(&self, prompt: &sennel_browser::Prompt) -> sennel_browser::Answer {
+        use sennel_browser::{Answer, Prompt};
+        use sennel_core::vault::printable;
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
+        let dialog = self.0.dialog();
+        match prompt {
+            Prompt::Pair { fingerprint } => {
+                let yes = dialog
+                    .message(format!(
+                        "A browser extension asks to connect to Sennel and fill logins from this \
+                         vault. Connect it only if you just clicked Connect in the extension.\n\n\
+                         Key fingerprint {fingerprint}"
+                    ))
+                    .title("Connect a browser?")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Connect".into(),
+                        "Don't connect".into(),
+                    ))
+                    .blocking_show();
+                if yes {
+                    Answer::Named(bridge::pairing_name(fingerprint))
+                } else {
+                    Answer::No
+                }
+            }
+            Prompt::Site { host, titles } => {
+                let names: Vec<String> = titles.iter().map(|t| printable(t)).collect();
+                let result = dialog
+                    .message(format!(
+                        "{} asks for the login{} {}. The address is what the browser reports.",
+                        printable(host),
+                        if names.len() == 1 { "" } else { "s" },
+                        names.join(", ")
+                    ))
+                    .title("Fill a login?")
+                    .buttons(MessageDialogButtons::YesNoCancelCustom(
+                        ALWAYS.into(),
+                        ONCE.into(),
+                        "Deny".into(),
+                    ))
+                    .blocking_show_with_result();
+                // Custom buttons come back as their label; closing the dialog denies.
+                match result {
+                    MessageDialogResult::Custom(label) if label == ALWAYS => Answer::Always,
+                    MessageDialogResult::Custom(label) if label == ONCE => Answer::Yes,
+                    _ => Answer::No,
+                }
+            }
+            Prompt::Totp { title } => {
+                let yes = dialog
+                    .message(format!(
+                        "A browser asks for the one-time code of {}.",
+                        printable(title)
+                    ))
+                    .title("Send a one-time code?")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Send code".into(),
+                        "Don't send".into(),
+                    ))
+                    .blocking_show();
+                if yes { Answer::Yes } else { Answer::No }
+            }
+        }
+    }
+
+    fn raise(&self) {
+        if let Some(window) = self.0.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+
+    fn tell(&self, notes: Vec<Note>, locked: bool) {
+        let _ = self
+            .0
+            .emit(if locked { "locked" } else { "browser" }, notes);
+    }
+}
+
 // The window asked and the user chose to lose what could not be saved.
 #[tauri::command]
 fn quit(app: AppHandle, leaving: State<'_, Leaving>) {
@@ -503,6 +667,7 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
             let _ = app.emit("prompt", note);
         }
     }));
+    let browsers = Arc::new(bridge::Bridge::default());
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -511,6 +676,7 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
                 .build(),
         )
         .manage(Arc::clone(&desk))
+        .manage(Arc::clone(&browsers))
         .manage(Leaving(AtomicBool::new(false)))
         .setup(move |app| {
             let _ = handle.set(app.handle().clone());
@@ -541,9 +707,16 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
                     }
                 });
             }
+            if let (Some(places), Some(socket)) =
+                (Places::find(), sennel_browser::transport::socket_path())
+            {
+                let ui: Arc<dyn bridge::Ui> = Arc::new(Window(app.handle().clone()));
+                browsers.start(Arc::clone(&desk), ui, &socket, places.exe);
+            }
             // On a Rust timer, so a hung or hidden webview cannot keep the vault open.
             let app = app.handle().clone();
             let desk = Arc::clone(&desk);
+            let browsers = Arc::clone(&browsers);
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(Duration::from_secs(1));
@@ -554,6 +727,9 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
                     if let Ok(Some(notes)) = idle {
                         let _ = app.emit("locked", notes);
                     }
+                    // Read first: the guard must be gone before any socket is written.
+                    let open = desk.session().is_open();
+                    browsers.watch(open);
                 }
             });
             Ok(())
@@ -615,6 +791,10 @@ pub fn run(context: tauri::Context, refused: Vec<&'static str>) {
             remove_field,
             extract,
             agent_give,
+            browser_state,
+            set_takeover,
+            revoke_browser,
+            forget_site,
             quit,
         ])
         .build(context)

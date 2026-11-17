@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-browser"
+description = "Enables the revoke_browser command without any pre-configured scope."
+commands.allow = ["revoke_browser"]
+
+[[permission]]
+identifier = "deny-revoke-browser"
+description = "Denies the revoke_browser command without any pre-configured scope."
+commands.deny = ["revoke_browser"]

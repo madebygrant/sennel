@@ -25,8 +25,8 @@ Two constraints shape the design:
    - Nobody working on Sennel reads KeePassXC or KeePassXC-Browser source. If one behaviour can only be understood from the source, one person reads it and writes a description in their own words, and someone else implements it.
    - Libraries are permissive only: TweetNaCl-js (public domain) for the encryption, and Mozilla's `webextension-polyfill` (MPL-2.0) for the browser API differences. No code comes from Bitwarden's extension either, which is also GPL-3.
 2. **The first release is read-only** [decided 2026-11-03]. It fills forms and writes nothing to the vault except pairings.
-3. **The Sennel host name.** This is a reverse domain the project controls, such as `dev.sennel.browser`. It is fixed once the extension ships, because it is written into every user's browser registration.
-4. **Taking over KeePassXC-Browser's registration.** The recommended default is off, behind a setting that explains KeePassXC will take it back on its next start unless its own setting is turned off.
+3. **The Sennel host name** [decided 2026-11-17]. `app.sennel.browser`, matching the desktop app's identifier `app.sennel.desktop`. It is fixed once the extension ships, because it is written into every user's browser registration.
+4. **Taking over KeePassXC-Browser's registration** [decided 2026-11-17]. A setting, off by default, that explains KeePassXC will take it back on its next start unless its own setting is turned off.
 5. **Whether the terminal app can host the server.** The recommendation is desktop only at first. A browser request needs somewhere to show an approval dialog and to unlock the vault, and the terminal app is often not running.
 
 ## First release: read-only fill
@@ -47,7 +47,7 @@ Two constraints shape the design:
   - honour KeePassXC's per-entry "KeePassXC-Browser Settings" allow and deny lists, read as data from the vault
 - **Exit criterion:** core tests drive a full exchange, from key exchange through pairing to a lookup. The pairing test runs against the KeePassXC-paired fixture vault and finds the existing association. A replayed nonce is refused. Every refused action gets its error reply, and a test checks that none of them changes the vault.
 
-### Wave 2: Transport and the desktop side
+### Wave 2: Transport and the desktop side [done 2026-11-17]
 - Add a `sennel-proxy` binary. It relays the browser's length-prefixed stdio messages to the desktop app's socket, byte for byte, and holds no keys.
 - The desktop app listens while it runs:
   - on Unix, a socket in a per-user directory with mode 0700
@@ -139,5 +139,5 @@ This work has not started, so these are requirements for it rather than fixes to
 6. Browser requests do not count as activity for the idle lock, and a prompt never holds the session mutex while it waits.
 7. Pin `allowed_origins` and `allowed_extensions` to verified store ids, and make sure the native-messaging manifest's binary path is not writable by the user.
 8. `get-totp` gets its own approval, since it puts the second factor behind the same pairing as the password.
-9. `get-databasehash` before pairing gives an unpaired client a stable identifier for the vault. Answer it only to paired clients.
+9. `get-databasehash` before pairing gives an unpaired client a stable identifier for the vault. Sennel's own host answers it only to paired clients [decided 2026-11-17]. The KeePassXC host answers any connected client, as KeePassXC does, because KeePassXC-Browser needs the hash to choose which pairing to prove.
 10. Create the socket's folder `0700` atomically, refuse an existing path the user does not own, and do not use shared `/tmp`.

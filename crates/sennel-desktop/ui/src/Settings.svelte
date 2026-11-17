@@ -9,11 +9,13 @@
   let { say, refresh, changed, close } = $props();
 
   let prefs = $state(null);
+  let browsers = $state(null);
   let box = $state();
   const field = { lock_timeout: "lockTimeout", clipboard_timeout: "clipboardTimeout", sort: "sort", single_keys: "singleKeys", backups: "backups", touch_id: "touchId" };
 
   onMount(async () => {
     prefs = await call("prefs");
+    loadBrowsers();
     await tick();
     box?.querySelector("select")?.focus();
   });
@@ -25,6 +27,27 @@
   function set(key, value) {
     queue = queue.then(() => apply(key, value));
   }
+
+  async function loadBrowsers() {
+    try {
+      browsers = await call("browser_state");
+    } catch (why) {
+      say([{ level: "error", text: String(why) }]);
+    }
+  }
+
+  // Each of these changes the vault or the browser registrations, then reads the state back.
+  async function browserCall(cmd, args) {
+    try {
+      const out = await call(cmd, args);
+      say(out.notes ?? [out]);
+    } catch (why) {
+      say([{ level: "error", text: String(why) }]);
+    }
+    await loadBrowsers();
+  }
+
+  const takenOver = (b) => b.takeover.length > 0 && b.takeover.every(([, on]) => on);
 
   async function apply(key, given) {
     const value = typeof given === "function" ? given(prefs) : given;
@@ -133,6 +156,45 @@
             <button type="button" aria-label="More" disabled={prefs.backups >= prefs.backupsMax} onclick={() => set("backups", (p) => Math.min(p.backupsMax, p.backups + 1))}>+</button>
           </div>
         </div>
+      </div>
+
+      <h3>Browsers</h3>
+      <div class="group">
+        {#if browsers}
+          <div class="row">
+            <div class="text">
+              <span class="name" id="takeover">Serve KeePassXC-Browser</span>
+              <p>The KeePassXC-Browser extension fills logins from Sennel instead of KeePassXC.</p>
+            </div>
+            <button type="button" class="switch" role="switch" aria-labelledby="takeover" aria-checked={takenOver(browsers)} class:on={takenOver(browsers)} disabled={!browsers.takeover.length} onclick={() => browserCall("set_takeover", { on: !takenOver(browsers) })}><span></span></button>
+          </div>
+          {#if !browsers.takeover.length}
+            <p class="caution">No supported browser is installed.</p>
+          {:else if browsers.takeover.some(([, on]) => on) && !takenOver(browsers)}
+            <p class="caution">Only in {browsers.takeover.filter(([, on]) => on).map(([n]) => n).join(", ")}. KeePassXC may have taken the others back when it started.</p>
+          {/if}
+          {#if browsers.down}
+            <p class="caution">Browsers cannot reach this window: {browsers.down}</p>
+          {/if}
+          {#if browsers.locked}
+            <div class="row"><p>Unlock to see connected browsers.</p></div>
+          {:else}
+            {#each browsers.paired as name}
+              <div class="row">
+                <div class="text"><span class="name">{name}</span><p>Connected browser</p></div>
+                <button type="button" onclick={() => browserCall("revoke_browser", { name })}>Remove</button>
+              </div>
+            {:else}
+              <div class="row"><p>No browser is connected to this vault.</p></div>
+            {/each}
+            {#each browsers.sites as [host, count]}
+              <div class="row">
+                <div class="text"><span class="name">{host}</span><p>Always allowed, {count} {count === 1 ? "entry" : "entries"}</p></div>
+                <button type="button" onclick={() => browserCall("forget_site", { host })}>Forget</button>
+              </div>
+            {/each}
+          {/if}
+        {/if}
       </div>
 
       <p class="where">

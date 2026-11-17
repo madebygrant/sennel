@@ -47,7 +47,7 @@ pub(crate) fn info(text: impl Into<String>) -> Note {
     }
 }
 
-fn warn(text: impl Into<String>) -> Note {
+pub(crate) fn warn(text: impl Into<String>) -> Note {
     Note {
         level: Level::Warn,
         text: text.into(),
@@ -997,6 +997,24 @@ impl Desk {
         })
     }
 
+    /// Locks at a browser's request. Nobody is at the window to confirm losing work, so a vault
+    /// with changes that cannot be saved now stays open; the idle lock still gets it later.
+    pub fn lock_for_browser(&self) -> Vec<Note> {
+        let mut s = self.session();
+        if !s.is_open() {
+            return Vec::new();
+        }
+        if s.is_dirty() {
+            self.ask_for_key(&s, "to save before locking");
+        }
+        if let Some(why) = s.unsaved_before_lock(false) {
+            return vec![warn(format!(
+                "a browser asked to lock · not locked, unsaved changes would be lost: {why}"
+            ))];
+        }
+        self.lock_unattended(&mut s, "locked by a browser".into(), None)
+    }
+
     /// Locks when the vault has sat idle past the timeout. Called by the window's timer thread.
     // Returns the lock's notes, or None while the vault stays open.
     pub fn lock_if_idle(&self, now: Instant) -> Option<Vec<Note>> {
@@ -1005,12 +1023,22 @@ impl Desk {
             return None;
         }
         let lost = s.unsaved_before_lock(false);
+        let said = format!("locked after {} idle", spell_secs(self.lock_timeout()));
+        Some(self.lock_unattended(&mut s, said, lost))
+    }
+
+    // The lock nobody is at the window for: the idle lock, and a browser's.
+    fn lock_unattended(
+        &self,
+        s: &mut Session<Sealed>,
+        said: String,
+        lost: Option<String>,
+    ) -> Vec<Note> {
         let failed = s.lock();
         self.agent_confirmed
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut notes = vec![warn(format!(
-            "locked after {} idle{}",
-            spell_secs(self.lock_timeout()),
+            "{said}{}",
             lost.map_or(String::new(), |why| format!(
                 " · unsaved changes were lost: {why}"
             ))
@@ -1020,7 +1048,7 @@ impl Desk {
                 "ssh agent: {failed} key(s) not removed · they expire on their own"
             )));
         }
-        Some(notes)
+        notes
     }
 
     pub fn tree(&self) -> Vec<GroupRow> {
@@ -1392,7 +1420,7 @@ impl Desk {
     }
 
     // Every change lands on disk before the reply, the autosave the terminal app makes.
-    fn saved(&self, s: &mut Session<Sealed>, said: Note) -> Vec<Note> {
+    pub(crate) fn saved(&self, s: &mut Session<Sealed>, said: Note) -> Vec<Note> {
         let mut notes = vec![said];
         self.ask_for_key(s, "to save");
         match s.persist(true) {
