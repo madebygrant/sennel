@@ -1175,6 +1175,35 @@ pub struct Vault {
     backed_up: bool,
     // A routine backup is skipped when the newest is younger than this.
     backup_gap: std::time::Duration,
+    // The vault's own custom data keys as the file last had them, so a merge can tell a key one
+    // side removed from a key the other side added.
+    agreed_meta: HashSet<String>,
+}
+
+fn meta_keys(db: &Database) -> HashSet<String> {
+    db.meta.custom_data.keys().cloned().collect()
+}
+
+// keepass's merge leaves the vault's own custom data alone, where browser pairings and site access
+// live. Per key, the newer write wins, and ours within the same second, which the file cannot tell
+// apart. A removal wins over a change, even a pairing made again under the same name.
+fn merge_meta(merged: &mut Database, theirs: &Database, agreed: &HashSet<String>) -> usize {
+    let incoming = &theirs.meta.custom_data;
+    let ours = &mut merged.meta.custom_data;
+    let before = ours.len();
+    ours.retain(|key, _| incoming.contains_key(key) || !agreed.contains(key));
+    let mut changed = before - ours.len();
+    for (key, item) in incoming {
+        let take = match ours.get(key) {
+            None => !agreed.contains(key),
+            Some(mine) => item.last_modification_time > mine.last_modification_time,
+        };
+        if take {
+            ours.insert(key.clone(), item.clone());
+            changed += 1;
+        }
+    }
+    changed
 }
 
 fn subtree(db: &Database, id: &GroupId, groups: &mut Vec<GroupId>, entries: &mut Vec<EntryId>) {
@@ -1294,6 +1323,8 @@ pub struct MergeSummary {
     pub moved: usize,
     pub deleted: usize,
     pub warnings: usize,
+    // Keys of the vault's own custom data, such as browser pairings, that the merge changed.
+    pub settings: usize,
 }
 
 impl MergeSummary {
@@ -1322,6 +1353,7 @@ impl MergeSummary {
             (self.updated, "updated"),
             (self.moved, "moved"),
             (self.deleted, "deleted"),
+            (self.settings, "vault settings"),
             (self.warnings, "warnings"),
         ]
         .into_iter()
@@ -1391,6 +1423,7 @@ impl Vault {
             backup_dir: None,
             backed_up: false,
             backup_gap: BACKUP_GAP,
+            agreed_meta: HashSet::new(),
         }
     }
 
@@ -1482,6 +1515,7 @@ impl Vault {
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
         let key = Self::build_key(password, key_file, challenge.as_ref())?;
         let db = read_database(&mut file, key.clone())?;
+        let agreed_meta = meta_keys(&db);
         sweep_leftovers(path);
         Ok(Vault {
             db,
@@ -1494,6 +1528,7 @@ impl Vault {
             backup_dir: None,
             backed_up: false,
             backup_gap: BACKUP_GAP,
+            agreed_meta,
         })
     }
 
@@ -1588,6 +1623,7 @@ impl Vault {
         let mut file = std::fs::File::open(&path).map_err(|e| VaultError::Io(e.to_string()))?;
         self.db = read_database(&mut file, key)?;
         self.stamp = Stamp::of(&path);
+        self.agreed_meta = meta_keys(&self.db);
         self.backed_up = false;
         // Said once at unlock; a reload must not quietly undo it.
         self.raise_weak_kdf();
@@ -1638,6 +1674,7 @@ impl Vault {
         }
         let mut merged = self.db.clone();
         settle_ties(&mut merged, &theirs);
+        let settings = merge_meta(&mut merged, &theirs, &self.agreed_meta);
         let log = merged
             .merge(&theirs)
             .map_err(|e| VaultError::Merge(self.merge_failure(&e)))?;
@@ -1649,7 +1686,10 @@ impl Vault {
             self.db = previous;
             return Err(e);
         }
-        Ok(MergeSummary::of(&log))
+        Ok(MergeSummary {
+            settings,
+            ..MergeSummary::of(&log)
+        })
     }
 
     // Never the vault's own folder: a sync client watching it would upload the backups, old passwords
@@ -1707,6 +1747,7 @@ impl Vault {
             return Err(VaultError::Unsaved);
         };
         self.stamp = Self::write_file_as(&self.db, key, &path, publish)?;
+        self.agreed_meta = meta_keys(&self.db);
         Ok(())
     }
 
@@ -1737,6 +1778,7 @@ impl Vault {
         };
         let mut file = std::fs::File::open(path).map_err(|e| VaultError::Io(e.to_string()))?;
         let db = read_database(&mut file, key.clone())?;
+        let agreed_meta = meta_keys(&db);
         Ok(Vault {
             db,
             key: Some(key),
@@ -1748,6 +1790,7 @@ impl Vault {
             backup_dir: None,
             backed_up: false,
             backup_gap: BACKUP_GAP,
+            agreed_meta,
         })
     }
 
@@ -1822,6 +1865,7 @@ impl Vault {
         self.key = Some(key);
         self.challenge = challenge;
         self.stamp = written;
+        self.agreed_meta = meta_keys(&self.db);
         self.path = Some(path);
         self.shown = Some(typed.to_path_buf());
         // A file that has just been created holds nothing worth keeping.
@@ -1894,6 +1938,7 @@ impl Vault {
         };
         self.key = Some(key);
         self.stamp = written;
+        self.agreed_meta = meta_keys(&self.db);
         // The copies still open with the old password, and a leaked password is a common reason to change it.
         let gone = self
             .backup_dir
@@ -3668,6 +3713,79 @@ mod tests {
     }
 
     // Each side adds, edits, moves and deletes a different entry.
+    // Browser pairings live in the vault's own custom data, which keepass's merge does not touch.
+    #[test]
+    fn merging_keeps_both_sides_vault_data_and_removals() {
+        let file = Temp::new("merge-meta");
+        merge_base(&file);
+        let mut base = Vault::open(&file.path, "pw", None).unwrap();
+        let keys = [
+            "kept",
+            "theirs-drop",
+            "ours-drop",
+            "changed",
+            "ours-drop-theirs-change",
+            "ours-change-theirs-drop",
+        ];
+        for key in keys {
+            base.set_meta_data(key, Some("as it was"));
+        }
+        base.save().unwrap();
+        let at = |v: &mut Vault, key: &str, year: i32| {
+            let when = chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0);
+            v.db.meta
+                .custom_data
+                .get_mut(key)
+                .unwrap()
+                .last_modification_time = when;
+        };
+
+        let mut ours = Vault::open(&file.path, "pw", None).unwrap();
+        let mut theirs = Vault::open(&file.path, "pw", None).unwrap();
+        ours.set_meta_data("ours-drop", None);
+        ours.set_meta_data("ours-new", Some("from ours"));
+        ours.set_meta_data("changed", Some("from ours"));
+        at(&mut ours, "changed", 2030);
+        ours.set_meta_data("ours-drop-theirs-change", None);
+        ours.set_meta_data("ours-change-theirs-drop", Some("from ours"));
+        at(&mut ours, "ours-change-theirs-drop", 2032);
+        theirs.set_meta_data("theirs-drop", None);
+        theirs.set_meta_data("theirs-new", Some("from theirs"));
+        theirs.set_meta_data("changed", Some("from theirs"));
+        at(&mut theirs, "changed", 2031);
+        theirs.set_meta_data("ours-drop-theirs-change", Some("from theirs"));
+        at(&mut theirs, "ours-drop-theirs-change", 2032);
+        theirs.set_meta_data("ours-change-theirs-drop", None);
+        theirs.save().unwrap();
+
+        assert_eq!(ours.save(), Err(VaultError::ChangedOnDisk));
+        // theirs-drop and ours-change-theirs-drop go, theirs-new comes, changed takes theirs.
+        assert_eq!(ours.merge_from_disk().unwrap().settings, 4);
+        let data = |v: &Vault| {
+            let mut out: Vec<(String, String)> = v
+                .meta_data()
+                .map(|(k, value)| match value {
+                    keepass::db::CustomDataValue::String(s) => (k.to_string(), s.clone()),
+                    other => (k.to_string(), format!("{other:?}")),
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let want = [
+            ("changed", "from theirs"),
+            ("kept", "as it was"),
+            ("ours-new", "from ours"),
+            ("theirs-new", "from theirs"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .to_vec();
+        assert_eq!(data(&ours), want);
+        assert_eq!(data(&Vault::open(&file.path, "pw", None).unwrap()), want);
+    }
+
     #[test]
     fn merging_keeps_what_both_sides_changed() {
         let file = Temp::new("merge-eight");
@@ -3700,7 +3818,8 @@ mod tests {
                 updated: 1,
                 moved: 1,
                 deleted: 1,
-                warnings: 0
+                warnings: 0,
+                settings: 0
             },
             "{}",
             summary.describe()

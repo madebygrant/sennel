@@ -844,3 +844,44 @@ fn sennels_own_host_marks_logins_that_have_a_code() {
         assert_eq!(reply["entries"][0].get("sennelCode").is_some(), marked);
     }
 }
+
+// One key per host, so a conflict merge keeps the hosts each copy of the vault remembered.
+#[test]
+fn each_host_is_remembered_under_its_own_key_and_the_old_map_is_split() {
+    let (mut vault, id) = new_vault();
+    let old = json!({ "old.example": [id.uuid().simple().to_string()] }).to_string();
+    vault.set_meta_data("sennel.browser.allow", Some(&old));
+    let mut session = session_with(vault);
+    assert!(allow::allowed(session.vault().unwrap(), "old.example", &id));
+
+    allow::remember(&mut session, "New.Example", &[id]).unwrap();
+    let mut keys: Vec<String> = session
+        .vault()
+        .unwrap()
+        .meta_data()
+        .map(|(k, _)| k.to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "sennel.browser.allow.new.example",
+            "sennel.browser.allow.old.example"
+        ]
+    );
+    assert_eq!(
+        allow::hosts(session.vault().unwrap()),
+        [
+            ("new.example".to_string(), 1),
+            ("old.example".to_string(), 1)
+        ]
+    );
+
+    allow::forget(&mut session, "old.example").unwrap();
+    assert!(!allow::allowed(
+        session.vault().unwrap(),
+        "old.example",
+        &id
+    ));
+    assert!(allow::allowed(session.vault().unwrap(), "new.example", &id));
+}
