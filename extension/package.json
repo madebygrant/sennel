@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "build": "vite build && node build.js",
-    "test": "node --test \"src/**/*.test.js\""
+    "test": "node --test \"src/**/*.test.js\"",
+    "build:test": "SENNEL_FAKE_APP=1 vite build && node build.js test",
+    "test:pages": "npm run build:test && node --test \"e2e/*.test.js\""
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "puppeteer": "^25.17.0",
     "svelte": "^5.57.2",
     "vite": "^8.3.5"
   }

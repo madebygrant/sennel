@@ -8,18 +8,20 @@
   let note = $state("");
   let entries = $state([]);
   let host = $state("");
-  let tab;
+  // Cross-origin frames with a login form, offered by origin (R3).
+  let others = $state([]);
+  let target;
 
   async function activeTab() {
     const [t] = await api.tabs.query({ active: true, currentWindow: true });
     // The worker decides what may be filled; this only skips the browser's own pages.
-    return t && /^https?:/.test(t.url ?? "") ? { id: t.id, url: t.url } : null;
+    return t && /^https?:/.test(t.url ?? "") ? { id: t.id, frameId: 0, url: t.url } : null;
   }
 
   // The background worker does the work, so a Sennel dialog that closes this popup loses nothing.
   async function ask(op, extra = {}) {
     try {
-      return await api.runtime.sendMessage({ op, tab, ...extra });
+      return await api.runtime.sendMessage({ op, target, ...extra });
     } catch (e) {
       return { stage: "error", note: e?.message ?? String(e) };
     }
@@ -32,12 +34,26 @@
   }
 
   async function load() {
-    tab = await activeTab();
-    if (!tab) {
+    target = await activeTab();
+    if (!target) {
       stage = "nopage";
       return;
     }
-    host = new URL(tab.url).host;
+    host = new URL(target.url).host;
+    // Side by side: the frames are known at once, while the list may wait on a Sennel dialog.
+    const framesAsked = ask("frames", { tabId: target.id }).then((found) => {
+      if (Array.isArray(found)) others = found.filter((f) => f.crossOrigin);
+    });
+    show(await ask("list"));
+    await framesAsked;
+  }
+
+  // The user picked a frame by its origin: its logins are listed and filled there alone.
+  async function useFrame(frame) {
+    target = { id: target.id, frameId: frame.frameId, url: frame.url };
+    host = new URL(frame.url).host;
+    others = [];
+    stage = "loading";
     show(await ask("list"));
   }
 
@@ -107,6 +123,12 @@
   {:else}
     <p class="error">{note}</p>
   {/if}
+
+  {#each others as frame (frame.frameId)}
+    <button class="frame" onclick={() => useFrame(frame)}>
+      Login form in a frame from <strong>{new URL(frame.url).origin}</strong>
+    </button>
+  {/each}
 
   {#if note && stage !== "error"}<p class="note" role="status">{note}</p>{/if}
 </main>

@@ -76,13 +76,14 @@ Two constraints shape the design:
 - **Exit criterion:** the unpacked extension pairs with Sennel. On a plain login page, a click in the popup fills the form. Every rule in the document has a test or a written manual check.
 - Pairing with KeePassXC was dropped from this check [decided 2026-11-17]. KeePassXC's registration allows only KeePassXC-Browser's store ids, and KeePassXC rewrites it on every start, so reaching KeePassXC needs a hand edit nobody would keep. The client still speaks the plain protocol when an app does not say it is Sennel, so the edit works, unsupported.
 
-### Wave 4: Autofill on the page, and the stores
+### Wave 4: Autofill on the page, and the stores [done 2026-11-17]
 - Field detection: usernames, passwords, one-time code fields, forms added after the page loads, and logins split across two pages.
 - Shadow DOM, and frames under the rules from wave 3.
 - An in-page prompt on a focused field, drawn where the page cannot reach it. It offers to fill, never to save.
 - A test page set in the repository: plain, two-step, iframe, cross-origin iframe, invisible fields, a dynamic form and shadow DOM. The extension's tests run against it in a headless browser.
 - Publish to the Chrome Web Store and Firefox Add-ons. The listing says the release fills and does not save. It names KeePassXC compatibility without using its name or look as Sennel's.
 - **Exit criterion:** every page in the test set behaves as the rules say, in Chrome and Firefox. After a session of fills, the vault file has changed only by its pairing records. The published builds install from both stores and pair with Sennel.
+- Publishing was left out of this wave [decided 2026-11-17], and the browser tests run in Chrome through Puppeteer against a stand-in app, with Firefox as written manual check M8.
 
 ## After the first release
 

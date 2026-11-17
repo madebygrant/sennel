@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Shadow DOM</title></head>
+  <body>
+    <h1>Login inside a shadow root</h1>
+    <login-box></login-box>
+    <script>
+      customElements.define("login-box", class extends HTMLElement {
+        connectedCallback() {
+          this.attachShadow({ mode: "open" }).innerHTML =
+            '<form><label>Username <input name="user" autocomplete="username"></label> <label>Password <input name="pass" type="password"></label></form>';
+        }
+      });
+    </script>
+  </body>
+</html>

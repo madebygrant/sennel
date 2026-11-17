@@ -62,10 +62,19 @@ jobs:
 
       - name: Build and test the browser extension
         working-directory: extension
+        # Puppeteer's Chrome is only needed where the page tests run.
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: ${{ runner.os != 'Linux' && 'true' || '' }}
         run: |
           npm ci
           npm test
           npm run build
+
+      # The test pages in headless Chrome, against the test build's stand-in app.
+      - name: Test the extension on its test pages
+        if: runner.os == 'Linux'
+        working-directory: extension
+        run: npm run test:pages
 
       # The version comes from rust-toolchain.toml.
       - name: Install Rust

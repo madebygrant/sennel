@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Dynamic form</title></head>
+  <body>
+    <h1>Form added after load</h1>
+    <div id="slot"></div>
+    <script>
+      setTimeout(() => {
+        document.getElementById("slot").innerHTML =
+          '<form><label>Username <input name="user" autocomplete="username"></label> <label>Password <input name="pass" type="password"></label></form>';
+      }, 700);
+    </script>
+  </body>
+</html>

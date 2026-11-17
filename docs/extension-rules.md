@@ -6,13 +6,13 @@ A change that breaks a rule changes the rule first, with its reason.
 
 ## R1. Fill only after the user acts
 
-Nothing is filled when a page loads, when a field gets focus, or when a script dispatches an event. A fill starts from a click in the extension's own popup, or later from a key or click on Sennel's own in-page UI that the browser marks as trusted.
+Nothing is filled when a page loads, when a field gets focus, or when a script dispatches an event. A fill starts from a click in the extension's own popup, or from a click on Sennel's in-page button and then on a row of its list, each one an event the browser marks as trusted (`isTrusted`).
 
 **Why.** An attacker who can run script on a page through cross-site scripting or a bad advert can draw an invisible form and collect whatever is filled into it. If a fill needs a real user action on UI the page cannot reach, the script cannot start one.
 
 **Source.** [#437 Raising awareness around the security concerns of auto-fill](https://github.com/keepassxreboot/keepassxc-browser/issues/437): a dropdown the page could "click" with script, and the suggestion to require `Event.isTrusted`.
 
-**Checked by.** The popup is the only place a fill starts in this release. A code review check: `fill` in `extension/src/session.js` is reached only through the background worker's `fill` message, which `extension/src/background.js` accepts only from the extension's own pages, and the popup sends it only from a row's click handler. The injected `extension/public/fill.js` runs nothing until called. Manual check M1.
+**Checked by.** `extension/e2e/pages.test.js`: nothing fills on load or on focus, and a script's click on the button opens nothing. In the code, the content script's click handlers go through `trusted()` in `extension/public/content.js`, and the popup's fill is reached only through the background worker's `fill` message, which `extension/src/background.js` accepts only from the extension's own pages. Manual check M1.
 
 ## R2. Match scheme, host and port
 
@@ -24,15 +24,15 @@ The app decides which logins a page gets: the same host and port, and never an h
 
 **Checked by.** `crates/sennel-browser/src/matching.rs` tests for the app's side. `extension/src/page.test.js` and `extension/src/visible.test.js` for refusing a page that moved.
 
-## R3. Fill the top page only, until frames have their own prompt
+## R3. Frames: the same origin on a click, another origin only when named
 
-This release fills only the tab's top frame. Same-origin frames, and cross-origin frames behind a prompt that names the frame's origin, come with on-page filling in wave 4.
+The in-page button appears in the top frame and in frames of the same origin, and only while no frame around it is faded or filtered. It never appears in a cross-origin frame, where the parent page could make the whole frame transparent without the frame being able to tell. A login form in a cross-origin frame is offered by the toolbar popup instead, on a button that names the frame's origin, and its logins are fetched for that frame's address and filled into that frame alone.
 
 **Why.** A login form in a cross-origin frame belongs to whoever serves that frame, which may not be the site the user sees in the address bar. An attacker can also load the real site in a transparent frame and steer clicks onto it.
 
 **Source.** [#1367 Clickjacking vulnerability](https://github.com/keepassxreboot/keepassxc-browser/issues/1367) (the real site loaded in an invisible frame), [#3097](https://github.com/keepassxreboot/keepassxc-browser/issues/3097) (a site-wide cross-origin switch is too broad) and [#2937](https://github.com/keepassxreboot/keepassxc-browser/issues/2937) (fills bubbling into other frames).
 
-**Checked by.** The fill is injected with `allFrames: false` (`fill` in `extension/src/session.js`). Manual check M3.
+**Checked by.** `extension/e2e/pages.test.js`: a same-origin frame fills and a cross-origin frame gets no button. `frameIsSafe` in `extension/public/content.js`; the popup's fill targets one `frameId` (`fill` in `extension/src/session.js`). Manual check M3.
 
 ## R4. Skip fields the user cannot see
 
@@ -42,7 +42,7 @@ A field is filled only if it has a size, sits at least partly in the viewport, i
 
 **Source.** [#2184 Suggestions for Improvement in Detecting Hidden Form Elements](https://github.com/keepassxreboot/keepassxc-browser/issues/2184): concrete hiding tricks the size and opacity checks alone missed, and the cost of checking every ancestor.
 
-**Checked by.** `extension/src/visible.test.js` covers each way of hiding. Manual check M4.
+**Checked by.** `extension/src/visible.test.js` covers each way of hiding, and `extension/e2e/pages.test.js` fills `hidden.html` in Chrome. Manual check M4.
 
 ## R5. A dropped connection to the app is routine
 
@@ -56,13 +56,15 @@ The extension opens the native messaging connection when it needs one and expect
 
 ## R6. Sennel's UI on a page is out of the page's reach
 
-Any UI the extension draws on a page sits in a closed shadow root with its own styles, positioned on top, and refuses clicks while the page has made it or its frame transparent. This release draws nothing on pages; the rule binds wave 4.
+Sennel's in-page button and list sit in a closed shadow root with their own styles, in the browser's top layer (a popover) above anything the page stacks. A click on them counts only if it is trusted, the button or list has been on screen and still for half a second (moving it, by scrolling or resizing, starts the wait again), nothing of the page's is open in the top layer or full screen, and at that moment the button, the page's `<html>` and `<body>`, and every frame around it are fully opaque, visible and unfiltered.
+
+A known gap: a popover the page opens inside a closed shadow root of its own cannot be seen, so it could still sit above Sennel's button.
 
 **Why.** A page can restyle, cover or fade an extension's in-page UI to steer the user's click onto it, which is DOM-based clickjacking. It can also break the UI by accident, as `font-size: 0` on `<body>` did.
 
 **Source.** [#1367](https://github.com/keepassxreboot/keepassxc-browser/issues/1367), [#2645 Potential Clickjacking](https://github.com/keepassxreboot/keepassxc-browser/issues/2645) and the research it links, [DOM-based extension clickjacking](https://marektoth.com/blog/dom-based-extension-clickjacking/), and [#3035](https://github.com/keepassxreboot/keepassxc-browser/issues/3035) (page CSS hiding the extension's banner).
 
-**Checked by.** Nothing yet: no in-page UI exists. Wave 4's test pages carry the check.
+**Checked by.** `extension/e2e/pages.test.js`: a click before the button settles, after the page scrolls it, after the page opens its own popover over it, and after the page fades itself, its body or the button, opens nothing.
 
 ## R7. A one-time code goes with the login it belongs to
 
@@ -84,13 +86,25 @@ Every encrypted reply must carry the request's nonce plus one, both inside and o
 
 **Checked by.** `extension/src/client.test.js`.
 
+## R9. A page learns nothing until the user asks
+
+The content script runs on every page but only watches for focus on a login field. It sends nothing to the background worker, and so nothing to Sennel, until the user clicks its button. Pairing is never started from a page, only from the toolbar popup.
+
+**Why.** Every message to Sennel can raise a dialog in the app, and a lookup tells the app which sites the user visits. A page should not be able to cause either by drawing a login form.
+
+**Source.** [#3043](https://github.com/keepassxreboot/keepassxc-browser/issues/3043): a site whose page alone made the extension prompt to unlock the database.
+
+**Checked by.** In `extension/public/content.js` the only `sendMessage` calls follow a trusted click, and `extension/src/background.js` offers content scripts no pairing operation. Manual check M7.
+
 ## Manual checks
 
 Run in Chrome and Firefox against Sennel with the unpacked extension.
 
-- **M1.** Open a login page that has a matching entry. Nothing fills until a row in the popup is clicked.
+- **M1.** Open a login page that has a matching entry. Nothing fills until a row is clicked, in the popup or in the in-page list.
 - **M2.** Open the popup on a login page, then navigate the tab to another site with the popup still open, and click a row. Nothing fills, and the popup says the page changed.
-- **M3.** On a page with a login form inside a cross-origin iframe, clicking a row fills nothing in the frame.
-- **M4.** On the repository's test page `extension/test/hidden.html`, the hidden and covered fields stay empty after a fill, and the visible pair is filled.
+- **M3.** On `test/iframe-cross.html`, focusing the frame's field shows no button. The toolbar popup offers "Login form in a frame from http://127.0.0.1:…", and choosing it lists and fills that frame.
+- **M4.** On `test/hidden.html`, the hidden and covered fields stay empty after a fill, and the visible pair is filled.
 - **M5.** Quit Sennel, then open the popup. It says the app is not reachable and does not retry on its own. Open Sennel and reopen the popup, and it works.
 - **M6.** On a site with no remembered answer, choose a login. Sennel's dialog closes the popup; answer "Allow once", reopen the popup, and the list is there without a second question. Pairing works the same way: click Connect, answer in Sennel, and reopen the popup.
+- **M7.** With the Sennel window in view, open a login page and click into its fields without clicking Sennel's button. Sennel shows no dialog and its status line stays quiet.
+- **M8.** In Firefox, repeat the browser tests' pages by hand: `login.html`, `two-step.html`, `dynamic.html`, `shadow.html`, `iframe-same.html`, `iframe-cross.html`, `hidden.html` and `otp.html`. Firefox runs no automated browser test.

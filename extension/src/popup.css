@@ -130,3 +130,9 @@ button:focus-visible {
   color: var(--accent-ink);
   justify-self: start;
 }
+
+.frame {
+  text-align: left;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

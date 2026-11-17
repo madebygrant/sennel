@@ -1,10 +1,10 @@
-// Loads public/fill.js the way the browser injects it, into a scope with a fake page.
+// Loads public/content.js the way the browser injects it, into a scope with a fake page.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("../public/fill.js", import.meta.url), "utf8");
+const source = readFileSync(new URL("../public/content.js", import.meta.url), "utf8");
 
 // A fake input: where it is, how it is styled, and its chain of parents.
 function page(fields) {
@@ -120,4 +120,18 @@ test("a new query or fragment on the same page is still the page", () => {
   win.location.href = "https://site.example/login?next=%2F#two";
   sennel.fill("ada", "hunter2", "https://site.example/login", win);
   assert.equal(els[1].value, "hunter2");
+});
+
+test("a text field in another form is never taken for the username", () => {
+  const search = { id: "search" };
+  const login = { id: "login" };
+  const { win, els, sennel } = page([{ name: "q", form: search }, { type: "password", form: login }]);
+  sennel.fill("ada", "hunter2", "https://site.example/login", win);
+  assert.deepEqual(els.map((e) => e.value), ["", "hunter2"]);
+});
+
+test("number fields are never login fields", () => {
+  const { sennel } = page([]);
+  const field = { tagName: "INPUT", getAttribute: (n) => (n === "type" ? "number" : null), autocomplete: "", name: "account_number", id: "" };
+  assert.equal(sennel.kind(field), null);
 });

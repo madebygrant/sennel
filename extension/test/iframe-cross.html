@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Cross-origin frame</title></head>
+  <body>
+    <h1>Login in a cross-origin frame</h1>
+    <p>localhost and 127.0.0.1 are different origins, so the frame below is cross-origin. No fill button may appear in it; the toolbar popup offers it by origin instead.</p>
+    <iframe id="frame" width="420" height="200"></iframe>
+    <script>
+      const other = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+      document.getElementById("frame").src = `${location.protocol}//${other}:${location.port}/login.html`;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Two-step login</title></head>
+  <body>
+    <h1>Two-step login</h1>
+    <form id="one" novalidate onsubmit="event.preventDefault(); this.hidden = true; document.getElementById('two').hidden = false">
+      <label>Email <input name="email" type="email" autocomplete="username" /></label>
+      <button>Next</button>
+    </form>
+    <form id="two" hidden onsubmit="event.preventDefault()">
+      <label>Password <input name="pass" type="password" autocomplete="current-password" /></label>
+      <button>Sign in</button>
+    </form>
+  </body>
+</html>
